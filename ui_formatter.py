@@ -21,6 +21,7 @@ console = Console()
 # Tool icons mapping
 TOOL_ICONS = {
     'run_command': '🔧',
+    'run_interactive': '🖥️',
     'read_file': '📄',
     'write_file': '✍️',
     'chat': '💬',

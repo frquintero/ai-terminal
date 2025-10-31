@@ -32,7 +32,6 @@ def ensure_venv():
 ensure_venv()
 
 from agent import MiniAgent
-from shell_integration import ShellIntegration
 from ui_formatter import ui, console
 from rich.prompt import Prompt
 
@@ -43,7 +42,6 @@ def main():
     # Initialize components
     try:
         agent = MiniAgent()
-        shell = ShellIntegration()  # For cleanup, though agent manages its own
     except Exception as e:
         ui.error(f"Error initializing: {e}")
         sys.exit(1)
@@ -87,10 +85,13 @@ def main():
                 console.print("[dim]Please try again.[/dim]\n")
 
     finally:
-        # Cleanup
+        # Cleanup - close the persistent shell in RunCommandTool
         try:
-            shell.close()
-        except:
+            from tools import TOOLS
+            run_command = TOOLS.get("run_command")
+            if run_command and hasattr(run_command, "shell"):
+                run_command.shell.close()
+        except Exception:
             pass
 
 if __name__ == "__main__":
