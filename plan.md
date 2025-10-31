@@ -125,15 +125,52 @@ ai-terminal/
 - Include command sanitization (basic filtering)
 - Handle shell session errors and recovery
 
-## Phase 5: Testing and Validation
+## Phase 5: UI Polish and Enhancement
 
-### 5.1 Unit Tests
+### 5.1 Enhanced Prompt Display
+- Implement dynamic prompt showing current directory
+- Add colored prompt with user@host and current working directory
+- Display format: `user@hostname  ~/current/path ❯`
+- Use ANSI color codes for visual appeal
+- Add visual indicator when AI is processing (animated spinner or dots)
+- Show "thinking" state during API calls
+
+### 5.2 Output Formatting
+- Implement syntax highlighting for shell command outputs
+- Add color-coded messages:
+  - Success messages: green
+  - Error messages: red
+  - Info/AI responses: blue/cyan
+  - Warning messages: yellow
+- Create box/panel formatting to distinguish AI responses from command outputs
+- Add markdown rendering for AI explanations (bold, code blocks, lists)
+- Format tool execution results with clear separators
+
+### 5.3 Interactive Feedback
+- Add progress indicators for long-running commands
+- Display which tool AI is using:
+  - "🔧 Running command: {command}"
+  - "📄 Reading file: {filename}"
+  - "✍️  Writing file: {filename}"
+  - "💬 Thinking..."
+  - "🔄 Processing content..."
+- Show execution time for commands and AI responses
+- Add step counter for multi-step operations (e.g., "Step 2/4: Processing...")
+- Display token usage statistics (optional, configurable)
+
+### 5.4 Dependencies
+- Add `colorama` or `rich` library for advanced terminal formatting
+- Update requirements.txt with new dependencies
+
+## Phase 6: Testing and Validation
+
+### 6.1 Unit Tests
 - Test individual tools (file operations, command execution, chat tool, content processing)
 - Test shell integration components
 - Mock AI responses for agent testing
 - Test configuration loading and validation
 
-### 5.2 Integration Tests
+### 6.2 Integration Tests
 - End-to-end conversation flows (command execution, chat responses, and complex multi-step tasks)
 - AI translation accuracy for natural language to shell commands and workflows
 - Multi-step tool sequence execution (e.g., read → process → write)
@@ -142,36 +179,36 @@ ai-terminal/
 - Error handling scenarios for both execution and conversation
 - Interactive command testing (where possible)
 
-### 5.3 Safety Testing
+### 6.3 Safety Testing
 - Test sudo operations (with caution)
 - Validate timeout behaviors
 - Check file operation boundaries
 
-## Phase 6: Advanced Features and Optimization
+## Phase 7: Advanced Features and Optimization
 
-### 6.1 Enhanced Natural Language Processing
+### 7.1 Enhanced Natural Language Processing
 - Improve prompt engineering for better shell command translation
 - Add context-aware command suggestions
 - Implement command history analysis
 
-### 6.2 Performance Optimizations
+### 7.2 Performance Optimizations
 - Optimize API calls and response times
 - Implement conversation state persistence
 - Add rate limiting and caching where appropriate
 
-### 6.3 Security Enhancements
+### 7.3 Security Enhancements
 - Strengthen command validation
 - Add file operation restrictions
 - Implement audit logging for sensitive operations
 
-## Phase 7: Documentation and Deployment
+## Phase 8: Documentation and Deployment
 
-### 7.1 Documentation
+### 8.1 Documentation
 - Complete README.md with installation, usage, and examples
 - Add inline code documentation
 - Create user guide and troubleshooting section
 
-### 7.2 Deployment Preparation
+### 8.2 Deployment Preparation
 - Add Docker support for containerized deployment
 - Implement logging and monitoring
 - Prepare for production deployment considerations
@@ -245,11 +282,12 @@ ai-terminal/
 - Phase 2: 2-3 days (Core tools)
 - Phase 3: 2-3 days (Agent integration)
 - Phase 4: 1-2 days (CLI interface)
-- Phase 5: 2-3 days (Testing)
-- Phase 6: 1-2 days (Advanced features)
-- Phase 7: 1-2 days (Documentation and polish)
+- Phase 5: 1-2 days (UI polish and enhancement)
+- Phase 6: 2-3 days (Testing)
+- Phase 7: 1-2 days (Advanced features)
+- Phase 8: 1-2 days (Documentation and polish)
 
-Total: 10-17 days for MVP completion
+Total: 11-19 days for MVP completion
 
 ## Next Steps
 
@@ -258,7 +296,8 @@ Total: 10-17 days for MVP completion
 3. Build core tools including ChatTool and ContentProcessingTool for complex workflows
 4. Integrate MiniMax M2 with unified AI processing supporting multi-step task execution
 5. Develop CLI interface that passes all inputs to AI agent
-6. Conduct thorough testing for command translation, multi-step workflows, execution, and conversation
-7. Document and prepare for deployment
+6. Polish UI with enhanced prompts, output formatting, and interactive feedback
+7. Conduct thorough testing for command translation, multi-step workflows, execution, and conversation
+8. Document and prepare for deployment
 
 This plan provides a structured approach to building a robust AI-powered terminal while addressing key technical challenges and safety considerations.

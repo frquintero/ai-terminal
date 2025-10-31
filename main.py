@@ -6,52 +6,85 @@ A CLI interface that uses AI to interpret natural language commands and execute 
 """
 
 import sys
+import os
+import subprocess
+
+# Check if running in virtual environment, if not, restart with venv
+def ensure_venv():
+    venv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'venv')
+    venv_python = os.path.join(venv_path, 'bin', 'python3')
+    
+    # Check if we're already in a venv or if venv python doesn't exist
+    if hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix):
+        # Already in a virtual environment
+        return
+    
+    # Check if venv exists
+    if os.path.exists(venv_python):
+        # Restart with venv python
+        os.execv(venv_python, [venv_python] + sys.argv)
+    else:
+        print(f"Warning: Virtual environment not found at {venv_path}")
+        print("Run: python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt")
+        sys.exit(1)
+
+# Ensure we're running in venv before importing dependencies
+ensure_venv()
+
 from agent import MiniAgent
 from shell_integration import ShellIntegration
+from ui_formatter import ui, console
+from rich.prompt import Prompt
 
 def main():
-    print("🤖 AI-Powered Linux Shell Terminal")
-    print("Type 'exit', 'quit', or press Ctrl+C to exit.")
-    print("-" * 50)
+    # Print banner
+    ui.print_banner()
 
     # Initialize components
     try:
         agent = MiniAgent()
         shell = ShellIntegration()  # For cleanup, though agent manages its own
     except Exception as e:
-        print(f"Error initializing: {e}")
+        ui.error(f"Error initializing: {e}")
         sys.exit(1)
 
     # Main REPL loop
     try:
         while True:
             try:
-                user_input = input("❯ ").strip()
+                # Display dynamic prompt and get input
+                ui.print_prompt()
+                user_input = input().strip()
+                
                 if not user_input:
                     continue
 
                 # Check for exit commands
                 if user_input.lower() in ['exit', 'quit', 'q']:
-                    print("Goodbye! 👋")
+                    ui.print_goodbye()
                     break
 
                 # Process input through AI agent
-                response = agent.process_input(user_input)
+                result = agent.process_input(user_input)
 
                 # Display response
-                if response:
-                    print(response)
-                print()  # Empty line for readability
+                if result["error"]:
+                    # Error was already displayed by agent
+                    pass
+                elif result["content"]:
+                    ui.ai_response(result["content"], result.get("elapsed_time"))
+                
+                console.print()  # Empty line for readability
 
             except KeyboardInterrupt:
-                print("\nGoodbye! 👋")
+                ui.print_goodbye()
                 break
             except EOFError:
-                print("\nGoodbye! 👋")
+                ui.print_goodbye()
                 break
             except Exception as e:
-                print(f"Error processing input: {e}")
-                print("Please try again.\n")
+                ui.error(f"Error processing input: {e}")
+                console.print("[dim]Please try again.[/dim]\n")
 
     finally:
         # Cleanup
