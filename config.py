@@ -2,12 +2,13 @@ import os
 from dotenv import load_dotenv
 
 class Config:
-    def __init__(self, api_key: str, model: str, max_tokens: int, temperature: float, hide_thinking: bool):
+    def __init__(self, api_key: str, model: str, max_tokens: int, temperature: float, hide_thinking: bool, max_steps: int):
         self.api_key = api_key
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.hide_thinking = hide_thinking
+        self.max_steps = max_steps
 
 def load_config() -> Config:
     load_dotenv()
@@ -42,4 +43,10 @@ def load_config() -> Config:
     else:
         raise ValueError("HIDE_THINKING must be true or false")
 
-    return Config(api_key, model, max_tokens, temperature, hide_thinking)
+    max_steps_str = os.getenv('MAX_STEPS', '15')
+    try:
+        max_steps = int(max_steps_str)
+    except ValueError:
+        raise ValueError("MAX_STEPS must be an integer")
+
+    return Config(api_key, model, max_tokens, temperature, hide_thinking, max_steps)

@@ -42,6 +42,12 @@ def main():
     # Initialize components
     try:
         agent = MiniAgent()
+        
+        # Link AI shell to UI for dynamic prompt
+        from tools import TOOLS
+        run_command = TOOLS.get("run_command")
+        if run_command and hasattr(run_command, "shell"):
+            ui.set_ai_shell(run_command.shell)
     except Exception as e:
         ui.error(f"Error initializing: {e}")
         sys.exit(1)

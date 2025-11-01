@@ -138,9 +138,6 @@ def get_system_info() -> Dict[str, str]:
         if disk_info:
             info['disk_root'] = disk_info
     
-    # Current working directory
-    info['cwd'] = os.getcwd()
-    
     # User info
     info['user'] = os.environ.get('USER', 'unknown')
     info['home'] = os.path.expanduser('~')
@@ -154,37 +151,24 @@ def get_system_info() -> Dict[str, str]:
     return info
 
 def format_system_info(info: Dict[str, str]) -> str:
-    """Format system info as a readable string for the AI agent"""
-    lines = ["System Information:"]
+    """Format system info as a compact string for the AI agent"""
+    lines = []
     
-    # OS details
-    if 'distribution' in info:
-        lines.append(f"- OS: {info['distribution']} ({info['architecture']})")
-    else:
-        lines.append(f"- OS: {info['os']} {info.get('os_version', '')} ({info['architecture']})")
+    # System: OS, shell, hardware resources
+    os_name = info.get('distribution', info['os']).split('(')[0].strip()  # Remove redundant arch
+    shell = info.get('shell', '').split('/')[-1] if 'shell' in info else 'unknown'
+    cores = info.get('cpu_cores', '?')
+    mem_total = info.get('memory_total', '?')
+    mem_avail = info.get('memory_available', '?')
+    disk = info.get('disk_root', '?')
     
-    if 'kernel' in info:
-        lines.append(f"- Kernel: {info['kernel']}")
-    
-    if 'shell' in info:
-        lines.append(f"- Shell: {info['shell']}")
-    
-    # Hardware
-    if 'cpu' in info:
-        lines.append(f"- CPU: {info['cpu']} ({info.get('cpu_cores', '?')} cores)")
-    
-    if 'memory_total' in info:
-        lines.append(f"- Memory: {info['memory_total']} total, {info.get('memory_available', '?')} available")
-    
-    if 'disk_root' in info:
-        lines.append(f"- Disk (/): {info['disk_root']}")
+    lines.append(f"System: {os_name}, {shell} shell, {cores} cores, {mem_total} RAM ({mem_avail} free), {disk} disk")
     
     # User context
-    lines.append(f"- User: {info['user']} (home: {info['home']})")
-    lines.append(f"- Current directory: {info['cwd']}")
+    lines.append(f"User: {info['user']} (home: {info['home']})")
     
-    # Available tools
+    # Available tools (if any)
     if 'available_tools' in info:
-        lines.append(f"- Available tools: {info['available_tools']}")
+        lines.append(f"Tools: {info['available_tools']}")
     
     return '\n'.join(lines)

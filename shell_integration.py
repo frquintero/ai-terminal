@@ -9,6 +9,7 @@ class ShellIntegration:
     
     def __init__(self):
         self.shell = None
+        self.current_dir = os.path.expanduser('~')  # Track AI shell's working directory
         self._init_shell()
         # Ensure shell is closed on process exit
         atexit.register(self.close)
@@ -42,6 +43,11 @@ class ShellIntegration:
                 
                 # Clean up leading whitespace
                 output = raw_output.lstrip("\r\n").strip()
+                
+                # Update current directory if cd command was executed
+                if command.strip().startswith('cd ') or command.strip() == 'cd':
+                    self._update_current_dir()
+                
                 return output if output else "Command executed successfully."
                 
             elif index == 1:  # Timeout
@@ -96,6 +102,29 @@ class ShellIntegration:
                 pass
             return f"Error executing sudo command: {str(e)}"
 
+    def _update_current_dir(self):
+        """Query the shell for current working directory"""
+        try:
+            self.shell.sendline('pwd')
+            self.shell.expect_exact(self.PROMPT, timeout=5)
+            pwd_output = self.shell.before or ""
+            
+            # Strip the echoed 'pwd' command
+            if pwd_output.startswith('pwd'):
+                pwd_output = pwd_output[3:]
+            
+            # Extract the directory path
+            pwd_output = pwd_output.strip()
+            if pwd_output:
+                self.current_dir = pwd_output
+        except Exception:
+            # If we can't get pwd, keep the previous directory
+            pass
+    
+    def get_current_dir(self) -> str:
+        """Get the AI shell's current working directory"""
+        return self.current_dir
+    
     def close(self):
         if self.shell:
             self.shell.close()

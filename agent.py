@@ -12,6 +12,12 @@ class MiniAgent:
     MAX_HISTORY_MESSAGES = 40
     MAX_TOOL_OUTPUT_CHARS = 8000
     
+    # New: Advanced trimming configuration
+    MAX_RECENT_MESSAGES = 10  # Keep full detail for last 10 messages
+    SUMMARIZE_THRESHOLD = 20  # Summarize messages older than this
+    OLD_TOOL_OUTPUT_CHARS = 2000  # More aggressive truncation for old messages
+    APPROXIMATE_TOKEN_BUDGET = 6000  # Rough token limit for history (excluding system)
+    
     def __init__(self):
         self.config = load_config()
         self.client = openai.OpenAI(
@@ -23,62 +29,150 @@ class MiniAgent:
         system_info = get_system_info()
         system_context = format_system_info(system_info)
         
+        # Minimal system prompt: only essential information
         self.message_history = [
             {
                 "role": "system",
-                "content": f"""You are an AI-powered Linux shell terminal assistant. You can execute shell commands, read and write files, process content, and engage in conversation.
+                "content": f"""Linux shell assistant with file management, command execution, and content processing.
 
 {system_context}
 
-Available tools:
-- read_file: Read the contents of a file
-- write_file: Create or overwrite a file with content
-- run_command: Execute a shell command (for non-interactive commands ONLY)
-- run_interactive: Execute interactive commands that need terminal control (vim, nano, top, htop, less, man, etc.)
-- chat: Provide a conversational response
-- process_content: Analyze and process text content
+Tools: read_file, write_file, run_command, run_interactive, chat, process_content
 
-CRITICAL: Never use run_command for interactive programs (vim, nano, less, top, htop, man, ssh, mysql, python REPL, etc.) — it will hang or timeout. Always use run_interactive for those.
+CRITICAL: Never use run_command for interactive programs (vim, nano, less, top, htop, man, ssh, mysql, python REPL) — always use run_interactive for those.
 
-When users ask questions:
-1. General knowledge questions (facts, trivia, explanations): Answer directly using your knowledge base. Do NOT deflect or suggest terminal-related alternatives.
-2. Interactive apps (vim, nano, top, htop, less, man, ssh, etc.): Use run_interactive tool to give full terminal control
-3. Non-interactive terminal tasks (ls, cat, grep, find, etc.): Use run_command tool
-4. File operations (read/write): Use read_file or write_file tools
-5. Content processing tasks (analyze files, generate summaries): Use process_content tool
-6. Conversational queries about the terminal or seeking help: Use chat tool or respond directly
+EFFICIENCY RULES:
+- Trust tool outputs - if a command succeeds, don't retry it
+- Combine related commands with && or ; when possible (e.g., "uname -a && lscpu && free -h")
+- Don't add PATH prefixes unless commands fail with "command not found"
+- Limit yourself to essential tool calls only
 
-Examples:
-- "What is the population of Paris?" → Answer directly with factual information
-- "Open vim to edit config.py" → Use run_interactive tool with 'vim config.py'
-- "Edit test.txt with nano" → Use run_interactive tool with 'nano test.txt'
-- "Show me running processes" → Use run_interactive tool with 'top' or 'htop'
-- "List files in current directory" → Use run_command tool with 'ls'
-- "Read config.py" → Use read_file tool
-- "What can you do?" → Use chat tool or respond directly
-
-Always prioritize safety and helpfulness. Provide accurate, direct answers to knowledge questions."""
+Present command output with raw results followed by brief interpretation."""
             }
         ]
     
-    def _trim_history(self):
-        """Trim message history to prevent memory/token exhaustion"""
-        # Truncate large tool outputs in ALL messages first
-        for msg in self.message_history:
-            if msg.get("role") == "tool" and isinstance(msg.get("content"), str):
-                if len(msg["content"]) > self.MAX_TOOL_OUTPUT_CHARS:
-                    extra = len(msg["content"]) - self.MAX_TOOL_OUTPUT_CHARS
-                    msg["content"] = (
-                        msg["content"][:self.MAX_TOOL_OUTPUT_CHARS] + 
-                        f"\n...[truncated {extra} chars for brevity]"
-                    )
+    def _estimate_tokens(self, text: str) -> int:
+        """Rough token estimation: ~4 chars per token for English"""
+        if not text:
+            return 0
+        return len(text) // 4
+    
+    def _get_role(self, msg) -> str:
+        """Safely get role from either dict or ChatCompletionMessage"""
+        if isinstance(msg, dict):
+            return msg.get("role", "")
+        return getattr(msg, "role", "")
+    
+    def _summarize_message_pair(self, user_msg: dict, assistant_msg: dict) -> dict:
+        """Summarize a user-assistant message exchange into a compact form"""
+        user_content = user_msg.get("content", "")
         
-        # Then trim message count if needed
-        if len(self.message_history) > self.MAX_HISTORY_MESSAGES:
-            # Keep system message (first) + recent messages
-            system_msg = self.message_history[:1]
-            recent_msgs = self.message_history[1:][-( self.MAX_HISTORY_MESSAGES - 1):]
-            self.message_history = system_msg + recent_msgs
+        # Handle assistant message - could be dict or ChatCompletionMessage
+        if isinstance(assistant_msg, dict):
+            assistant_content = assistant_msg.get("content", "")
+            tool_calls = assistant_msg.get("tool_calls", [])
+        else:
+            assistant_content = getattr(assistant_msg, "content", "") or ""
+            tool_calls = getattr(assistant_msg, "tool_calls", [])
+        
+        # Create summary
+        summary_parts = []
+        
+        # Summarize user request
+        user_summary = user_content[:200] if len(user_content) > 200 else user_content
+        summary_parts.append(f"User: {user_summary}")
+        
+        # Summarize tool usage
+        if tool_calls:
+            tool_names = [tc.function.name if hasattr(tc, 'function') else tc.get('function', {}).get('name', 'unknown') for tc in tool_calls]
+            summary_parts.append(f"Tools used: {', '.join(tool_names)}")
+        
+        # Summarize response
+        if assistant_content:
+            response_summary = assistant_content[:200] if len(assistant_content) > 200 else assistant_content
+            summary_parts.append(f"Response: {response_summary}")
+        
+        return {
+            "role": "user",
+            "content": f"[SUMMARY] {' | '.join(summary_parts)}"
+        }
+    
+    def _trim_history(self):
+        """Advanced message history trimming with summarization and token budgeting"""
+        if len(self.message_history) <= 1:
+            return
+        
+        # Keep system message separate
+        system_msg = self.message_history[0]
+        messages = self.message_history[1:]
+        
+        # Step 1: Truncate tool outputs based on age
+        for i, msg in enumerate(messages):
+            if isinstance(msg, dict) and msg.get("role") == "tool":
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    # Recent messages: keep more content
+                    if i >= len(messages) - self.MAX_RECENT_MESSAGES:
+                        max_chars = self.MAX_TOOL_OUTPUT_CHARS
+                    else:
+                        max_chars = self.OLD_TOOL_OUTPUT_CHARS
+                    
+                    if len(content) > max_chars:
+                        extra = len(content) - max_chars
+                        msg["content"] = (
+                            content[:max_chars] + 
+                            f"\n...[truncated {extra} chars]"
+                        )
+        
+        # Step 2: Summarize old conversation pairs
+        if len(messages) > self.SUMMARIZE_THRESHOLD:
+            messages_to_keep = messages[-(self.SUMMARIZE_THRESHOLD):]
+            messages_to_summarize = messages[:-(self.SUMMARIZE_THRESHOLD)]
+            
+            summarized = []
+            i = 0
+            while i < len(messages_to_summarize):
+                msg = messages_to_summarize[i]
+                
+                # Try to pair user message with next assistant message
+                if self._get_role(msg) == "user" and i + 1 < len(messages_to_summarize):
+                    next_msg = messages_to_summarize[i + 1]
+                    if self._get_role(next_msg) == "assistant":
+                        # Summarize the pair
+                        summary = self._summarize_message_pair(msg, next_msg)
+                        summarized.append(summary)
+                        i += 2
+                        # Skip associated tool messages
+                        while i < len(messages_to_summarize) and self._get_role(messages_to_summarize[i]) == "tool":
+                            i += 1
+                        continue
+                
+                # If can't pair, keep as-is but truncate if needed
+                if isinstance(msg, dict) and isinstance(msg.get("content"), str):
+                    if len(msg["content"]) > 500:
+                        msg["content"] = msg["content"][:500] + "...[truncated]"
+                summarized.append(msg)
+                i += 1
+            
+            messages = summarized + messages_to_keep
+        
+        # Step 3: Enforce message count limit
+        if len(messages) > self.MAX_HISTORY_MESSAGES:
+            messages = messages[-(self.MAX_HISTORY_MESSAGES):]
+        
+        # Step 4: Token budget enforcement (approximate)
+        estimated_tokens = sum(self._estimate_tokens(
+            msg.get("content", "") if isinstance(msg, dict) else str(msg)
+        ) for msg in messages)
+        
+        # If still over budget, drop oldest non-summary messages
+        while estimated_tokens > self.APPROXIMATE_TOKEN_BUDGET and len(messages) > 5:
+            # Remove oldest message
+            removed = messages.pop(0)
+            removed_content = removed.get("content", "") if isinstance(removed, dict) else str(removed)
+            estimated_tokens -= self._estimate_tokens(removed_content)
+        
+        self.message_history = [system_msg] + messages
 
     def process_input(self, user_input: str) -> dict:
         """Process user input and return response with metadata"""
@@ -89,7 +183,7 @@ Always prioritize safety and helpfulness. Provide accurate, direct answers to kn
         self._trim_history()
         
         tools = get_tool_schemas()
-        max_steps = 10  # Prevent infinite loops
+        max_steps = self.config.max_steps  # Configurable via .env (default: 15)
         step_count = 0
         
         while step_count < max_steps:
@@ -199,6 +293,14 @@ Always prioritize safety and helpfulness. Provide accurate, direct answers to kn
                 self.message_history.append(error_message)
                 ui.warning(error_message["content"])
                 return {"content": error_message["content"], "error": None, "elapsed_time": ui.get_elapsed_time()}
+        
+        # Safety check: if we exit the loop without breaking, return error
+        if step_count >= max_steps:
+            return {
+                "content": "Maximum processing steps reached without a final answer.",
+                "error": "max_steps_exceeded",
+                "elapsed_time": ui.get_elapsed_time()
+            }
         
         content = assistant_message.content or ""
         if self.config.hide_thinking:

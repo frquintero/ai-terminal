@@ -33,12 +33,22 @@ class UIFormatter:
     
     def __init__(self):
         self.start_time = None
+        self.ai_shell = None  # Reference to AI shell for tracking its cwd
+        
+    def set_ai_shell(self, shell):
+        """Set reference to AI shell for dynamic prompt tracking"""
+        self.ai_shell = shell
         
     def get_prompt(self) -> str:
-        """Generate dynamic prompt with user@host and current directory"""
+        """Generate dynamic prompt with user@host and AI shell's current directory"""
         username = os.getenv('USER', 'user')
         hostname = os.uname().nodename
-        cwd = os.getcwd()
+        
+        # Use AI shell's current directory if available, otherwise fall back to app's cwd
+        if self.ai_shell:
+            cwd = self.ai_shell.get_current_dir()
+        else:
+            cwd = os.getcwd()
         
         # Replace home directory with ~
         home = os.path.expanduser('~')
