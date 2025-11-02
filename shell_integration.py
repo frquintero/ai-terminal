@@ -266,18 +266,35 @@ class ShellIntegration:
             
             self.shell.sendline(wrapped)
             
-            # Wait for either sudo prompt or start marker
+            # Step 1: Wait for start marker first
+            try:
+                self.shell.expect_exact(self._start_marker, timeout=5)
+            except pexpect.TIMEOUT:
+                self._resync()
+                return "Error: Failed to start sudo command execution (shell desync)"
+            except pexpect.EOF:
+                self.close()
+                self._init_shell()
+                return "Shell died during sudo command"
+            
+            # Step 2: Now wait for sudo prompt or end marker
             password_sent = False
+            end_pattern = re.compile(
+                rf'{re.escape(self._end_marker)}(\d+):([^\r\n]+)',
+                re.MULTILINE
+            )
+            
             while True:
                 idx = self.shell.expect(
-                    [self._sudo_prompt, self._start_marker, pexpect.TIMEOUT, pexpect.EOF],
-                    timeout=5
+                    [self._sudo_prompt, end_pattern, r'Sorry, try again', pexpect.EOF, pexpect.TIMEOUT],
+                    timeout=timeout
                 )
                 
                 if idx == 0:  # Sudo password prompt
                     if password and not password_sent:
                         self.shell.sendline(password)
                         password_sent = True
+                        continue
                     else:
                         # No password or already tried once
                         self.shell.sendcontrol('c')
@@ -287,46 +304,43 @@ class ShellIntegration:
                             pass
                         return "Sudo password required but not provided or incorrect"
                 
-                elif idx == 1:  # Start marker - proceed normally
-                    break
+                elif idx == 1:  # End marker
+                    raw_output = self.shell.before or ""
+                    exit_code = int(self.shell.match.group(1))
+                    new_pwd = self.shell.match.group(2).strip()
+                    
+                    if new_pwd and new_pwd.startswith('/'):
+                        self.current_dir = new_pwd
+                    
+                    try:
+                        self.shell.expect_exact(self.PROMPT, timeout=3)
+                    except:
+                        pass
+                    
+                    output = self._normalize_output(raw_output)
+                    
+                    if exit_code != 0 and output:
+                        output += f"\n[Exit code: {exit_code}]"
+                    elif exit_code != 0:
+                        output = f"Sudo command failed with exit code {exit_code}"
+                    
+                    return output if output else "Sudo command executed successfully."
                 
-                elif idx == 2:  # Timeout
-                    self._resync()
-                    return "Sudo command timed out waiting for start"
+                elif idx == 2:  # "Sorry, try again" - wrong password
+                    self.shell.sendcontrol('c')
+                    try:
+                        self.shell.expect_exact(self.PROMPT, timeout=3)
+                    except:
+                        pass
+                    return "Sudo password incorrect"
                 
-                else:  # EOF
+                elif idx == 3:  # EOF
                     self.close()
                     self._init_shell()
                     return "Shell died during sudo command"
-            
-            # Now proceed with normal end marker parsing
-            end_pattern = re.compile(
-                rf'{re.escape(self._end_marker)}(\d+):(.*?)(?:\r?\n|$)',
-                re.DOTALL
-            )
-            
-            self.shell.expect(end_pattern, timeout=timeout)
-            
-            raw_output = self.shell.before or ""
-            exit_code = int(self.shell.match.group(1))
-            new_pwd = self.shell.match.group(2).strip()
-            
-            if new_pwd and new_pwd.startswith('/'):
-                self.current_dir = new_pwd
-            
-            try:
-                self.shell.expect_exact(self.PROMPT, timeout=3)
-            except:
-                pass
-            
-            output = self._normalize_output(raw_output)
-            
-            if exit_code != 0 and output:
-                output += f"\n[Exit code: {exit_code}]"
-            elif exit_code != 0:
-                output = f"Sudo command failed with exit code {exit_code}"
-            
-            return output if output else "Sudo command executed successfully."
+                
+                else:  # TIMEOUT
+                    return self._handle_timeout(f"sudo {command}", timeout)
         
         except pexpect.TIMEOUT:
             return self._handle_timeout(f"sudo {command}", timeout)

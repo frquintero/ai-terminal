@@ -116,7 +116,7 @@ class RunCommandTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Execute a non-interactive shell command (do not use for interactive programs like vim, nano, top, etc.)"
+        return "Execute a non-interactive shell command. Do not use for: interactive programs (vim, nano, top), sudo commands (use run_sudo_command), or package managers without --noconfirm flag."
 
     @property
     def schema(self) -> Dict[str, Any]:
@@ -124,7 +124,7 @@ class RunCommandTool(BaseTool):
             "type": "function",
             "function": {
                 "name": "run_command",
-                "description": "Execute a non-interactive shell command (will timeout if used with interactive programs)",
+                "description": "Execute a non-interactive shell command. Package managers (yay/pacman) must include --noconfirm flag. Use run_sudo_command for sudo. Will timeout if used with interactive programs.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -148,7 +148,30 @@ class RunCommandTool(BaseTool):
             # Extract command names (skip flags starting with -)
             cmd_names = [os.path.basename(t) for t in tokens if not t.startswith('-')]
             
-            # Check if any command name is interactive
+            # Guard 1: Check for sudo/doas - redirect to run_sudo_command
+            if cmd_names and cmd_names[0] in ('sudo', 'doas'):
+                return "Error: This command uses sudo. Use run_sudo_command tool to handle password prompts safely."
+            
+            # Guard 2: Check for package managers that may require confirmation and/or sudo
+            if cmd_names:
+                base_cmd = cmd_names[0]
+                if base_cmd in {'yay', 'pacman'}:
+                    # Check if this is a privileged operation (S/U/R flags)
+                    flags = [t for t in tokens if t.startswith('-')]
+                    has_privileged_operation = any(
+                        any(c in flag for c in ['S', 'R', 'U']) 
+                        for flag in flags
+                    )
+                    
+                    if has_privileged_operation:
+                        # These operations require sudo - enforce it
+                        return (
+                            f"Error: Package manager command '{base_cmd}' with install/update/remove operations requires root privileges. "
+                            f"Use run_sudo_command tool with --noconfirm flag. "
+                            f"Example: run_sudo_command('{command} --noconfirm', password='your_password')"
+                        )
+            
+            # Guard 3: Check if any command name is interactive
             is_interactive = False
             interactive_cmd = None
             
@@ -157,7 +180,7 @@ class RunCommandTool(BaseTool):
                 if cmd_names[0] in InteractiveCommandTool.INTERACTIVE_COMMANDS:
                     is_interactive = True
                     interactive_cmd = cmd_names[0]
-                # Check sudo/doas followed by interactive command
+                # Check sudo/doas followed by interactive command (shouldn't reach here due to Guard 1)
                 elif cmd_names[0] in ('sudo', 'doas') and len(cmd_names) > 1:
                     if cmd_names[1] in InteractiveCommandTool.INTERACTIVE_COMMANDS:
                         is_interactive = True
@@ -248,6 +271,78 @@ class ContentProcessingTool(BaseTool):
             return f"Summary: {content[:100]}..."  # Simple truncation for now
         return f"Processed content for task '{task}': {content}"
 
+class SudoRunCommandTool(BaseTool):
+    def __init__(self):
+        self.shell = ShellIntegration()
+    
+    @property
+    def name(self) -> str:
+        return "run_sudo_command"
+    
+    @property
+    def description(self) -> str:
+        return "Execute a command with sudo privileges, handling password prompts"
+    
+    @property
+    def schema(self) -> Dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": "run_sudo_command",
+                "description": "Execute a command with sudo privileges, handling password prompts",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The command to execute with sudo (do not include 'sudo' prefix)"
+                        },
+                        "password": {
+                            "type": "string",
+                            "description": "Sudo password (optional if passwordless sudo is configured)"
+                        },
+                        "timeout": {
+                            "type": "integer",
+                            "description": "Command timeout in seconds (default: 60)",
+                            "default": 60
+                        }
+                    },
+                    "required": ["command"]
+                }
+            }
+        }
+    
+    def execute(self, command: str, password: str = None, timeout: int = 60) -> str:
+        try:
+            # Parse command to check for package manager operations
+            tokens = shlex.split(command) if command.strip() else []
+            if not tokens:
+                return "Error: Empty command"
+            
+            cmd_names = [os.path.basename(t) for t in tokens if not t.startswith('-')]
+            
+            # Guard: Check for package managers that may require confirmation
+            if cmd_names:
+                base_cmd = cmd_names[0]
+                if base_cmd in {'yay', 'pacman'}:
+                    # Check if this is a prompt-prone operation (S/U/R flags)
+                    flags = [t for t in tokens if t.startswith('-')]
+                    has_prompt_operation = any(
+                        any(c in flag for c in ['S', 'R', 'U']) 
+                        for flag in flags
+                    )
+                    
+                    if has_prompt_operation and '--noconfirm' not in tokens:
+                        return (
+                            f"Error: Package manager command '{base_cmd}' may prompt for confirmation. "
+                            f"Add --noconfirm to the command to run non-interactively. "
+                            f"Example: '{command} --noconfirm'"
+                        )
+            
+            return self.shell.run_sudo_command(command, password, timeout)
+        except Exception as e:
+            return f"Error executing sudo command: {str(e)}"
+
 class InteractiveCommandTool(BaseTool):
     # List of known interactive commands that require TTY
     INTERACTIVE_COMMANDS = {
@@ -313,6 +408,7 @@ TOOLS: Dict[str, BaseTool] = {
     "read_file": ReadFileTool(),
     "write_file": WriteFileTool(),
     "run_command": RunCommandTool(),
+    "run_sudo_command": SudoRunCommandTool(),
     "run_interactive": InteractiveCommandTool(),
     "chat": ChatTool(),
     "process_content": ContentProcessingTool()
