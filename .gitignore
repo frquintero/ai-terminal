@@ -44,5 +44,7 @@ coverage.xml
 .DS_Store
 Thumbs.db
 
-# Session logs
-logs/
+# Session database
+logs/session_logs.db
+logs/session_logs.db-shm
+logs/session_logs.db-wal

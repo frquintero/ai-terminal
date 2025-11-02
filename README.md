@@ -1,5 +1,7 @@
 # AI-Powered Linux Shell Terminal
 
+**Version:** 1.01
+
 This project implements an AI-powered Linux shell terminal using MiniMax M2 AI. It combines natural language processing, shell command execution, and tool-based operations to create an intelligent CLI interface.
 
 ## Features

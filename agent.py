@@ -2,12 +2,11 @@ from config import Config, load_config
 from tools import get_tool_schemas, TOOLS
 from ui_formatter import ui, console
 from utils.system_info import get_system_info, format_system_info
+from db_logger import DBLogger
 import openai
 import json
 import re
-import logging
-import os
-from datetime import datetime
+import atexit
 from rich.live import Live
 
 class MiniAgent:
@@ -32,8 +31,10 @@ class MiniAgent:
         system_info = get_system_info()
         system_context = format_system_info(system_info)
         
-        # Setup session logging
-        self._setup_logging(system_info)
+        # Setup database logging
+        self.db_logger = DBLogger()
+        self.session_id = self.db_logger.start_session(system_info)
+        atexit.register(self.db_logger.close)
         
         # Minimal system prompt: only essential information
         self.message_history = [
@@ -49,58 +50,13 @@ Present command output with raw results followed by brief interpretation."""
             }
         ]
     
-    def _setup_logging(self, system_info: dict):
-        """Setup session-based logging with markdown format"""
-        # Create logs directory if it doesn't exist
-        os.makedirs('logs', exist_ok=True)
-        
-        # Create unique log file per session
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        log_file = f'logs/session_{timestamp}.log'
-        
-        # Configure logger
-        self.logger = logging.getLogger(f'MiniAgent_{timestamp}')
-        self.logger.setLevel(logging.INFO)
-        
-        # Remove any existing handlers to avoid duplicates
-        self.logger.handlers.clear()
-        
-        # File handler
-        file_handler = logging.FileHandler(log_file, encoding='utf-8')
-        file_handler.setLevel(logging.INFO)
-        
-        # Use a minimal format - we'll format as markdown ourselves
-        formatter = logging.Formatter('%(message)s')
-        file_handler.setFormatter(formatter)
-        
-        self.logger.addHandler(file_handler)
-        self.logger.propagate = False  # Don't propagate to root logger
-        
-        # Write markdown header
-        self._write_session_header(system_info, timestamp)
-    
-    def _write_session_header(self, system_info: dict, timestamp: str):
-        """Write markdown header with system information"""
-        header = f"""# AI Terminal Session Log
+    def _log(self, log_type: str, content: str):
+        """Safe logging wrapper that prevents DB failures from crashing flows"""
+        try:
+            self.db_logger.log_entry(self.session_id, log_type, content)
+        except Exception as e:
+            ui.warning(f"Logging failed: {e}")
 
-**Session Started:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  
-**Session ID:** {timestamp}
-
-## System Information
-
-- **OS:** {system_info.get('os', 'Unknown')} {system_info.get('os_version', '')}
-- **Architecture:** {system_info.get('arch', 'Unknown')}
-- **Memory:** {system_info.get('total_memory', 'Unknown')} GB
-- **Python Version:** {system_info.get('python_version', 'Unknown')}
-- **AI Terminal Version:** 1.0.0
-
----
-
-## Session Activity
-
-"""
-        self.logger.info(header)
-    
     def _to_dict_message(self, msg) -> dict:
         """Convert ChatCompletionMessage or dict to plain dict for storage"""
         if isinstance(msg, dict):
@@ -273,7 +229,7 @@ Present command output with raw results followed by brief interpretation."""
         ui.start_timer()
         
         # Log incoming user query
-        self.logger.info(f"### User Query\n\n```\n{user_input}\n```\n")
+        self._log("USER_QUERY", user_input)
         
         self.message_history.append({"role": "user", "content": user_input})
         
@@ -350,7 +306,8 @@ Present command output with raw results followed by brief interpretation."""
                     
                     # Log tool call
                     args_str = json.dumps(args, indent=2)
-                    self.logger.info(f"#### Tool Call: `{tool_name}`\n\n**Arguments:**\n```json\n{args_str}\n```\n")
+                    tool_call_content = f"Tool: {tool_name}\nArguments:\n{args_str}"
+                    self._log("TOOL_CALL", tool_call_content)
                     
                     # Show tool execution indicator
                     details = ""
@@ -373,9 +330,12 @@ Present command output with raw results followed by brief interpretation."""
                         except Exception as e:
                             result = f"Tool '{tool_name}' raised error: {e}"
                     
-                    # Log tool result
-                    result_preview = result[:500] + "..." if len(result) > 500 else result
-                    self.logger.info(f"**Result:**\n```\n{result_preview}\n```\n")
+                    # Log tool result (with truncation for large outputs)
+                    result_str = result if isinstance(result, str) else str(result)
+                    if len(result_str) > 32768:
+                        extra = len(result_str) - 32768
+                        result_str = result_str[:32768] + f"\n...[truncated {extra} chars]"
+                    self._log("TOOL_RESULT", result_str)
                     
                     tool_message = {
                         "role": "tool",
@@ -413,7 +373,7 @@ Present command output with raw results followed by brief interpretation."""
             content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
         
         # Log final response
-        self.logger.info(f"### Assistant Response\n\n{content}\n\n---\n")
+        self._log("ASSISTANT_RESPONSE", content)
         
         return {
             "content": content,
