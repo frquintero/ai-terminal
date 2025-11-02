@@ -38,18 +38,51 @@ class MiniAgent:
 {system_context}
 
 Tools: read_file, write_file, run_command, run_interactive, chat, process_content
-
-CRITICAL: Never use run_command for interactive programs (vim, nano, less, top, htop, man, ssh, mysql, python REPL) — always use run_interactive for those.
-
-EFFICIENCY RULES:
-- Trust tool outputs - if a command succeeds, don't retry it
-- Combine related commands with && or ; when possible (e.g., "uname -a && lscpu && free -h")
-- Don't add PATH prefixes unless commands fail with "command not found"
-- Limit yourself to essential tool calls only
-
+Use run_interactive (not run_command) for vim, nano, less, top, htop, man, ssh, mysql, python REPL.
 Present command output with raw results followed by brief interpretation."""
             }
         ]
+    
+    def _to_dict_message(self, msg) -> dict:
+        """Convert ChatCompletionMessage or dict to plain dict for storage"""
+        if isinstance(msg, dict):
+            d = dict(msg)
+            # Normalize content to string
+            if "content" in d and d["content"] is not None and not isinstance(d["content"], str):
+                d["content"] = str(d["content"])
+            return d
+        
+        # ChatCompletionMessage -> dict
+        role = getattr(msg, "role", "")
+        content = getattr(msg, "content", "") or ""
+        out = {"role": role, "content": content}
+        
+        # Optional fields for tool/assistant messages
+        for attr in ("name", "tool_call_id"):
+            val = getattr(msg, attr, None)
+            if val:
+                out[attr] = val
+        
+        # Handle tool_calls (convert to dict and ensure arguments is JSON string)
+        tool_calls = getattr(msg, "tool_calls", None)
+        if tool_calls:
+            tc_list = []
+            for tc in tool_calls:
+                fn = getattr(tc, "function", None)
+                args = getattr(fn, "arguments", "{}") if fn else "{}"
+                if not isinstance(args, str):
+                    try:
+                        args = json.dumps(args)
+                    except Exception:
+                        args = str(args)
+                tc_list.append({
+                    "id": getattr(tc, "id", None),
+                    "type": getattr(tc, "type", "function") or "function",
+                    "function": {"name": getattr(fn, "name", ""), "arguments": args}
+                })
+            out["tool_calls"] = tc_list
+        
+        return out
     
     def _estimate_tokens(self, text: str) -> int:
         """Rough token estimation: ~4 chars per token for English"""
@@ -105,6 +138,9 @@ Present command output with raw results followed by brief interpretation."""
         # Keep system message separate
         system_msg = self.message_history[0]
         messages = self.message_history[1:]
+        
+        # Normalize all messages to dicts to prevent serialization issues
+        messages = [self._to_dict_message(m) for m in messages]
         
         # Step 1: Truncate tool outputs based on age
         for i, msg in enumerate(messages):
@@ -218,7 +254,7 @@ Present command output with raw results followed by brief interpretation."""
                 return {"content": None, "error": str(e), "elapsed_time": ui.get_elapsed_time()}
             
             if assistant_message.tool_calls:
-                self.message_history.append(assistant_message)
+                self.message_history.append(self._to_dict_message(assistant_message))
                 
                 # Show step indicator for multi-step operations
                 if len(assistant_message.tool_calls) > 1 or step_count > 0:
@@ -273,7 +309,7 @@ Present command output with raw results followed by brief interpretation."""
                     
                     tool_message = {
                         "role": "tool",
-                        "content": result,
+                        "content": result if isinstance(result, str) else str(result),
                         "tool_call_id": tool_call.id
                     }
                     self.message_history.append(tool_message)
@@ -281,7 +317,7 @@ Present command output with raw results followed by brief interpretation."""
                     # Trim history after tool execution to manage large outputs
                     self._trim_history()
             else:
-                self.message_history.append(assistant_message)
+                self.message_history.append(self._to_dict_message(assistant_message))
                 break
             
             step_count += 1
