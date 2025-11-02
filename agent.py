@@ -56,7 +56,16 @@ class MiniAgent:
 Tools: read_file, write_file, run_command, run_sudo_command, run_interactive, chat, process_content
 - Use run_sudo_command for commands requiring root privileges (omit 'sudo' prefix, password will be requested)
 - Use run_interactive (not run_command) for vim, nano, less, top, htop, man, ssh, mysql, python REPL
-Present command output with raw results followed by brief interpretation."""
+
+Response Format:
+1. Show command/file output verbatim in a code block (```text)
+2. Then provide brief interpretation or explanation below
+
+Example:
+```text
+[raw command output here]
+```
+Brief explanation of what the output means."""
             }
         ]
     
