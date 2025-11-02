@@ -45,6 +45,9 @@ class MiniAgent:
         self.pending_state: Optional[dict] = None
         atexit.register(self._clear_secrets)
         
+        # Tool output collector for deterministic rendering
+        self._current_step_tool_outputs = []
+        
         # Minimal system prompt: only essential information
         self.message_history = [
             {
@@ -57,7 +60,7 @@ Tools: read_file, write_file, run_command, run_sudo_command, run_interactive, ch
 - Use run_sudo_command for commands requiring root privileges (omit 'sudo' prefix, password will be requested)
 - Use run_interactive (not run_command) for vim, nano, less, top, htop, man, ssh, mysql, python REPL
 
-CRITICAL: ALWAYS show command output verbatim in a code block first, then provide interpretation."""
+Tool output is displayed automatically. Provide brief interpretation/explanation only - do not reprint tool output."""
             }
         ]
     
@@ -249,6 +252,9 @@ CRITICAL: ALWAYS show command output verbatim in a code block first, then provid
         """Process user input and return response with metadata"""
         ui.start_timer()
         
+        # Clear tool output collector for new turn
+        self._current_step_tool_outputs = []
+        
         # Log incoming user query
         self._log("USER_QUERY", user_input)
         
@@ -407,6 +413,13 @@ CRITICAL: ALWAYS show command output verbatim in a code block first, then provid
                     }
                     self.message_history.append(tool_message)
                     
+                    # Collect tool output for deterministic rendering
+                    self._current_step_tool_outputs.append({
+                        "tool": tool_name,
+                        "args": args,
+                        "result": result if isinstance(result, str) else str(result)
+                    })
+                    
                     # Trim history after tool execution to manage large outputs
                     self._trim_history()
             else:
@@ -434,6 +447,22 @@ CRITICAL: ALWAYS show command output verbatim in a code block first, then provid
         content = assistant_message.content or ""
         if self.config.hide_thinking:
             content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+        
+        # Inject raw tool outputs before LLM commentary
+        if self._current_step_tool_outputs:
+            raw_blocks = []
+            for output in self._current_step_tool_outputs:
+                # Show command if it's a command tool
+                cmd = output["args"].get("command")
+                if cmd and output["tool"] in ["run_command", "run_sudo_command"]:
+                    raw_blocks.append(f"$ {cmd}\n{output['result']}")
+                else:
+                    # For non-command tools, just show result
+                    raw_blocks.append(output["result"])
+            
+            raw_output = "\n\n".join(raw_blocks).rstrip()
+            if raw_output:
+                content = f"```terminal\n{raw_output}\n```\n\n{content}"
         
         # Log final response
         self._log("ASSISTANT_RESPONSE", content)
@@ -505,6 +534,14 @@ CRITICAL: ALWAYS show command output verbatim in a code block first, then provid
             "tool_call_id": tool_call_id
         }
         self.message_history.append(tool_message)
+        
+        # Collect for rendering
+        self._current_step_tool_outputs.append({
+            "tool": tool_name,
+            "args": args,
+            "result": result if isinstance(result, str) else str(result)
+        })
+        
         self._trim_history()
         
         # Continue processing remaining tool calls for this assistant turn
@@ -559,6 +596,14 @@ CRITICAL: ALWAYS show command output verbatim in a code block first, then provid
                     "content": remaining_result if isinstance(remaining_result, str) else str(remaining_result),
                     "tool_call_id": tc["id"]
                 })
+                
+                # Collect for rendering
+                self._current_step_tool_outputs.append({
+                    "tool": remaining_tool_name,
+                    "args": remaining_args,
+                    "result": remaining_result if isinstance(remaining_result, str) else str(remaining_result)
+                })
+                
                 self._trim_history()
         
         # Now continue the normal LLM loop to get final response
@@ -636,6 +681,14 @@ CRITICAL: ALWAYS show command output verbatim in a code block first, then provid
                         "content": result if isinstance(result, str) else str(result),
                         "tool_call_id": tool_call.id
                     })
+                    
+                    # Collect for rendering
+                    self._current_step_tool_outputs.append({
+                        "tool": tool_name,
+                        "args": args,
+                        "result": result if isinstance(result, str) else str(result)
+                    })
+                    
                     self._trim_history()
                 
                 step_count += 1
@@ -645,6 +698,20 @@ CRITICAL: ALWAYS show command output verbatim in a code block first, then provid
                 content = next_message.content or ""
                 if self.config.hide_thinking:
                     content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+                
+                # Inject raw tool outputs (same as process_input)
+                if self._current_step_tool_outputs:
+                    raw_blocks = []
+                    for output in self._current_step_tool_outputs:
+                        cmd = output["args"].get("command")
+                        if cmd and output["tool"] in ["run_command", "run_sudo_command"]:
+                            raw_blocks.append(f"$ {cmd}\n{output['result']}")
+                        else:
+                            raw_blocks.append(output["result"])
+                    
+                    raw_output = "\n\n".join(raw_blocks).rstrip()
+                    if raw_output:
+                        content = f"```terminal\n{raw_output}\n```\n\n{content}"
                 
                 self._log("ASSISTANT_RESPONSE", content)
                 
