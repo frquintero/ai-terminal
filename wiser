@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# wiser - lightweight wrapper to run ai-terminal's main.py
+# Usage: ./wiser [args...]
+
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_PY="$REPO_DIR/.venv/bin/python"
+
+if [ -x "$VENV_PY" ]; then
+  exec "$VENV_PY" "$REPO_DIR/main.py" "$@"
+else
+  # Fall back to system python3
+  if command -v python3 >/dev/null 2>&1; then
+    exec python3 "$REPO_DIR/main.py" "$@"
+  else
+    echo "Error: python3 not found. Please install Python 3 or create a .venv with 'python3 -m venv .venv'" >&2
+    exit 2
+  fi
+fi
