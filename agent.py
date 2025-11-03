@@ -52,13 +52,19 @@ class MiniAgent:
         self.message_history = [
             {
                 "role": "system",
-                "content": f"""Linux shell assistant with file management, command execution, and content processing.
+                "content": f"""Shell automation expert and conversational assistant. Execute commands, write scripts, manage files, and engage in helpful dialogue.
 
 {system_context}
 
-Tools: read_file, write_file, run_command, run_sudo_command, run_interactive, chat, process_content
-- Use run_sudo_command for commands requiring root privileges (omit 'sudo' prefix, password will be requested)
-- Use run_interactive (not run_command) for vim, nano, less, top, htop, man, ssh, mysql, python REPL
+Decision-making:
+- Simple tasks (filtering, text processing, calculations): compose shell pipelines using grep, awk, sed, cut, sort, etc.
+- Complex logic (algorithms, multi-step operations, data structures): write Python script with write_file, execute with run_command
+- Interactive tools (vim, nano, less, top, htop, man, ssh, mysql, python REPL): use run_interactive
+- Root privileges: use run_sudo_command (omit 'sudo' prefix)
+
+Shell efficiency rules:
+- For simple version/info queries, prefer a single tool call
+- If tool output answers the question, provide the final response without additional tools unless explicitly requested
 
 Tool output is displayed automatically. Provide brief interpretation/explanation only - do not reprint tool output."""
             }
@@ -444,25 +450,35 @@ Tool output is displayed automatically. Provide brief interpretation/explanation
                 "elapsed_time": ui.get_elapsed_time()
             }
         
-        content = assistant_message.content or ""
-        if self.config.hide_thinking:
-            content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+        # Check if this turn only used run_interactive
+        only_interactive = (
+            self._current_step_tool_outputs and
+            all(output["tool"] == "run_interactive" for output in self._current_step_tool_outputs)
+        )
         
-        # Inject raw tool outputs before LLM commentary
-        if self._current_step_tool_outputs:
-            raw_blocks = []
-            for output in self._current_step_tool_outputs:
-                # Show command if it's a command tool
-                cmd = output["args"].get("command")
-                if cmd and output["tool"] in ["run_command", "run_sudo_command"]:
-                    raw_blocks.append(f"$ {cmd}\n{output['result']}")
-                else:
-                    # For non-command tools, just show result
-                    raw_blocks.append(output["result"])
+        if only_interactive:
+            # For interactive tools, skip LLM commentary - just show tool results
+            content = "\n\n".join(output["result"] for output in self._current_step_tool_outputs)
+        else:
+            content = assistant_message.content or ""
+            if self.config.hide_thinking:
+                content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
             
-            raw_output = "\n\n".join(raw_blocks).rstrip()
-            if raw_output:
-                content = f"```terminal\n{raw_output}\n```\n\n{content}"
+            # Inject raw tool outputs before LLM commentary
+            if self._current_step_tool_outputs:
+                raw_blocks = []
+                for output in self._current_step_tool_outputs:
+                    # Show command if it's a command tool
+                    cmd = output["args"].get("command")
+                    if cmd and output["tool"] in ["run_command", "run_sudo_command"]:
+                        raw_blocks.append(f"$ {cmd}\n{output['result']}")
+                    else:
+                        # For non-command tools, just show result
+                        raw_blocks.append(output["result"])
+                
+                raw_output = "\n\n".join(raw_blocks).rstrip()
+                if raw_output:
+                    content = f"```terminal\n{raw_output}\n```\n\n{content}"
         
         # Log final response
         self._log("ASSISTANT_RESPONSE", content)
@@ -695,23 +711,34 @@ Tool output is displayed automatically. Provide brief interpretation/explanation
             else:
                 # Got final answer
                 self.message_history.append(self._to_dict_message(next_message))
-                content = next_message.content or ""
-                if self.config.hide_thinking:
-                    content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
                 
-                # Inject raw tool outputs (same as process_input)
-                if self._current_step_tool_outputs:
-                    raw_blocks = []
-                    for output in self._current_step_tool_outputs:
-                        cmd = output["args"].get("command")
-                        if cmd and output["tool"] in ["run_command", "run_sudo_command"]:
-                            raw_blocks.append(f"$ {cmd}\n{output['result']}")
-                        else:
-                            raw_blocks.append(output["result"])
+                # Check if this turn only used run_interactive
+                only_interactive = (
+                    self._current_step_tool_outputs and
+                    all(output["tool"] == "run_interactive" for output in self._current_step_tool_outputs)
+                )
+                
+                if only_interactive:
+                    # For interactive tools, skip LLM commentary - just show tool results
+                    content = "\n\n".join(output["result"] for output in self._current_step_tool_outputs)
+                else:
+                    content = next_message.content or ""
+                    if self.config.hide_thinking:
+                        content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
                     
-                    raw_output = "\n\n".join(raw_blocks).rstrip()
-                    if raw_output:
-                        content = f"```terminal\n{raw_output}\n```\n\n{content}"
+                    # Inject raw tool outputs (same as process_input)
+                    if self._current_step_tool_outputs:
+                        raw_blocks = []
+                        for output in self._current_step_tool_outputs:
+                            cmd = output["args"].get("command")
+                            if cmd and output["tool"] in ["run_command", "run_sudo_command"]:
+                                raw_blocks.append(f"$ {cmd}\n{output['result']}")
+                            else:
+                                raw_blocks.append(output["result"])
+                        
+                        raw_output = "\n\n".join(raw_blocks).rstrip()
+                        if raw_output:
+                            content = f"```terminal\n{raw_output}\n```\n\n{content}"
                 
                 self._log("ASSISTANT_RESPONSE", content)
                 

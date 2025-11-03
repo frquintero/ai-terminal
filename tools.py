@@ -194,6 +194,28 @@ class RunCommandTool(BaseTool):
                             break
             
             if is_interactive:
+                # Smart guard: allow non-interactive usage patterns
+                SAFE_GLOBAL_FLAGS = {'--version', '-V', '--help', '-h'}
+                INTERPRETERS = {'python', 'python3', 'node', 'ruby', 'bash', 'sh', 'zsh'}
+                
+                # Check for universal safe flags
+                safe_global = any(flag in SAFE_GLOBAL_FLAGS for flag in tokens)
+                
+                # Check for interpreter safe modes
+                interpreter_safe = False
+                if interactive_cmd in INTERPRETERS:
+                    # Check for script execution flags
+                    script_flags = {'-c', '-m', '-e'}
+                    if any(flag in script_flags for flag in tokens):
+                        interpreter_safe = True
+                    # Check for script file argument (heuristic: command + arguments > 1)
+                    elif len(cmd_names) > 1:
+                        interpreter_safe = True
+                
+                # Bypass guard if safe pattern detected
+                if safe_global or interpreter_safe:
+                    return self.shell.run_command(command)
+                
                 return f"Error: '{interactive_cmd}' is an interactive command. Use run_interactive tool instead to avoid timeout."
             
             return self.shell.run_command(command)
