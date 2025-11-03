@@ -77,7 +77,8 @@ class MiniAgent:
 
 Decision-making:
 - Simple tasks (filtering, text processing, calculations): compose shell pipelines using grep, awk, sed, cut, sort, etc.
-- Complex logic (algorithms, multi-step operations, data structures): write Python script with write_file, execute with run_command
+- Complex Python/data analysis or plots: write Python code with write_file (or inline) and run with run_python_sandbox (resource-limited, auto-captures plots to artifacts)
+- Non-Python commands and simple shell pipelines: use run_command
 - Interactive tools (vim, nano, less, top, htop, man, ssh, mysql, python REPL): use run_interactive
 - Root privileges: use run_sudo_command (omit 'sudo' prefix)
 - External knowledge: use wikipedia_search for general knowledge, definitions, facts, or information not available in the local file system

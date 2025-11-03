@@ -22,6 +22,7 @@ The system automatically discovers and registers tools:
 - `run_command` - Execute non-interactive shell commands
 - `run_sudo_command` - Execute commands with sudo privileges
 - `run_interactive` - Run interactive commands (vim, nano, top, etc.)
+- `run_python_sandbox` - Execute Python code in isolated, resource-limited sandbox with data science libraries (pandas, numpy, matplotlib). Auto-saves plots.
 - `wikipedia_search` - Search Wikipedia for information
 - `process_content` - Analyze and process text content
 
@@ -29,13 +30,18 @@ The system automatically discovers and registers tools:
 
 1. Clone the repository
 2. Install dependencies: `pip install -r requirements.txt`
-3. Copy `.env.example` to `.env` and configure:
+3. (Optional) Set up Python sandbox environment:
+   ```bash
+   ./setup_sandbox.sh
+   ```
+4. Copy `.env.example` to `.env` and configure:
    ```bash
    MINIMAX_M2_API_KEY=your_api_key_here
    MINIMAX_MODEL=MiniMax-M2
    SHOW_RAW_OUTPUT=false  # Set to true for debugging
+   SANDBOX_PYTHON=./sandbox_venv/bin/python  # If you ran setup_sandbox.sh
    ```
-4. Run the terminal: `python main.py`
+5. Run the terminal: `python main.py`
 
 ## Configuration
 
@@ -44,6 +50,15 @@ Key settings in `.env`:
 - `RAW_OUTPUT_MAX_CHARS` (default: `4000`) - Maximum characters to display when raw output is enabled.
 - `HIDE_THINKING` (default: `true`) - Hide AI reasoning in responses.
 - `MAX_STEPS` (default: `15`) - Maximum tool execution steps per request.
+
+### Python Sandbox Configuration
+- `SANDBOX_PATH` (default: `./sandbox_runs`) - Directory for sandbox execution environments
+- `SANDBOX_PYTHON` (optional) - Path to dedicated sandbox Python interpreter with pre-installed data science libraries
+- `SANDBOX_TIMEOUT` (default: `30`) - Default timeout in seconds for sandbox execution
+- `SANDBOX_MAX_CPU_SEC` (default: `20`) - Maximum CPU time in seconds
+- `SANDBOX_MAX_MEM_MB` (default: `1024`) - Maximum memory in MB
+- `SANDBOX_MAX_FSIZE_MB` (default: `50`) - Maximum file size in MB
+- `SANDBOX_DISABLE_NETWORK` (default: `1`) - Disable network access in sandbox
 
 ## Usage
 
