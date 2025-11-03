@@ -45,6 +45,4 @@ coverage.xml
 Thumbs.db
 
 # Session database
-logs/session_logs.db
-logs/session_logs.db-shm
-logs/session_logs.db-wal
+logs/
