@@ -99,6 +99,36 @@ plt.legend()
 
 ## Advanced Features
 
+### Accessing Project Files
+
+The sandbox provides read-only access to your project directory via the `SANDBOX_PROJECT` environment variable. This allows you to read files from your project without risking accidental modifications.
+
+```python
+code = """
+import os
+import pandas as pd
+
+# Access the project directory
+project_dir = os.environ['SANDBOX_PROJECT']
+
+# Read a CSV file from the project
+csv_path = os.path.join(project_dir, 'test.csv')
+df = pd.read_csv(csv_path)
+
+print(f"Loaded {len(df)} rows from {csv_path}")
+print(df.head())
+
+# Analyze the data
+print(f"\\nColumns: {list(df.columns)}")
+print(f"\\nSummary statistics:")
+print(df.describe())
+"""
+```
+
+**Security:** By default, the project directory is mounted as read-only. Attempting to write, modify, or delete project files will raise a `PermissionError`. This prevents sandbox code from accidentally damaging your project.
+
+**Write Access:** If you need to allow writes to the project directory (use with caution), set `SANDBOX_ALLOW_PROJECT_WRITES=1` in your `.env` file.
+
 ### Multiple Plots
 ```python
 code = """
@@ -200,6 +230,14 @@ result = tool.execute(file_path="./my_analysis.py")
 # For performance when artifacts aren't needed
 result = tool.execute(code=code, return_artifacts=False)
 ```
+
+### Allow Project Directory Writes
+```bash
+# In .env - enable write access to project directory (use with caution)
+SANDBOX_ALLOW_PROJECT_WRITES=1
+```
+
+**Warning:** Enabling project writes allows sandbox code to modify or delete files in your project directory. Only enable this if you trust the code being executed and understand the risks.
 
 ## Resource Limits
 

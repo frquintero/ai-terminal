@@ -583,16 +583,28 @@ class RunPythonSandboxTool(BaseTool):
         except Exception:
             resource = None
         
+        # Capture original working directory for project file access
+        original_cwd = Path(os.getcwd()).resolve()
+        
         # Setup run directory
         base = os.getenv("SANDBOX_PATH", "./sandbox_runs")
         run_id = str(uuid.uuid4())
-        run_dir = Path(base) / "runs" / run_id
+        run_dir = (Path(base) / "runs" / run_id).resolve()
         artifacts_dir = run_dir / "artifacts"
         
         try:
             os.makedirs(artifacts_dir, mode=0o700, exist_ok=True)
         except Exception as e:
             return f"Error creating sandbox directory: {str(e)}"
+        
+        # Create symlink to project directory for convenient access
+        project_link = run_dir / "project"
+        try:
+            project_link.symlink_to(original_cwd, target_is_directory=True)
+            project_mount = project_link
+        except Exception:
+            # Symlink not supported (e.g., Windows without privileges)
+            project_mount = original_cwd
         
         # Prepare code
         try:
@@ -609,7 +621,14 @@ class RunPythonSandboxTool(BaseTool):
             return f"Error preparing script: {str(e)}"
         
         # Inject plotting/network prologue + epilogue
-        disable_net = os.getenv("SANDBOX_DISABLE_NETWORK", "1") in ("1", "true", "yes")
+        disable_net = os.getenv("SANDBOX_DISABLE_NETWORK", "0") in ("1", "true", "yes")
+        
+        # Expose project directory via environment variable
+        project_guard = """
+# Expose project directory for convenient access
+PROJECT_DIR = os.environ.get("SANDBOX_PROJECT")
+"""
+        
         prologue = """
 import os
 import sys
@@ -624,7 +643,9 @@ except ImportError:
     pass  # matplotlib not available, skip plotting setup
 # optional network disable
 {disable_net}
-""".format(disable_net=textwrap.dedent("""
+{project_guard}
+""".format(
+    disable_net=textwrap.dedent("""
 try:
     import socket
     class _BlockedSocket(socket.socket):
@@ -632,7 +653,9 @@ try:
     socket.socket = _BlockedSocket
     socket.create_connection = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("Network disabled"))
 except Exception: pass
-""") if disable_net else "")
+""") if disable_net else "",
+    project_guard=project_guard
+)
 
         # Use relative path for epilogue since we run with cwd=run_dir
         epilogue = """
@@ -674,6 +697,9 @@ except Exception as _e:
             "OPENBLAS_NUM_THREADS": "1",
             "MKL_NUM_THREADS": "1",
             "NUMEXPR_NUM_THREADS": "1",
+            "SANDBOX_ORIGINAL_CWD": str(original_cwd),
+            "SANDBOX_PROJECT": str(project_mount),
+            "SANDBOX_RUN_DIR": str(run_dir),
         }
         # Keep only safe inherited vars
         env.update({k: v for k, v in os.environ.items() if k in ("LC_ALL", "LANG")})
@@ -699,8 +725,9 @@ except Exception as _e:
                     resource.setrlimit(resource.RLIMIT_FSIZE, (max_fsize_mb * 1024 * 1024, max_fsize_mb * 1024 * 1024))
                     if hasattr(resource, "RLIMIT_NOFILE"):
                         resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
-                    if hasattr(resource, "RLIMIT_NPROC"):
-                        resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))
+                    # Note: RLIMIT_NPROC disabled to allow matplotlib threading for font management
+                    # if hasattr(resource, "RLIMIT_NPROC"):
+                    #     resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))
             except Exception:
                 pass
         
@@ -761,6 +788,7 @@ except Exception as _e:
         parts = []
         parts.append(f"[python-sandbox] run_id={run_id}")
         parts.append(f"Interpreter: {py}")
+        parts.append(f"Project Mount: {project_mount}")
         parts.append(f"Timeout: {timeout}s (timed_out={timed_out})")
         parts.append(f"Exit code: {manifest['exit_code']}")
         if out:

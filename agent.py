@@ -77,7 +77,7 @@ class MiniAgent:
 
 Decision-making:
 - Simple tasks (filtering, text processing, calculations): compose shell pipelines using grep, awk, sed, cut, sort, etc.
-- Complex Python/data analysis or plots: write Python code with write_file (or inline) and run with run_python_sandbox (resource-limited, auto-captures plots to artifacts)
+- Complex Python/data analysis or plots: write Python code with write_file (or inline) and run with run_python_sandbox (resource-limited, auto-captures plots to artifacts). Access project files via os.environ['SANDBOX_PROJECT'] (e.g., pd.read_csv(os.path.join(os.environ['SANDBOX_PROJECT'], 'data.csv')))
 - Non-Python commands and simple shell pipelines: use run_command
 - Interactive tools (vim, nano, less, top, htop, man, ssh, mysql, python REPL): use run_interactive
 - Root privileges: use run_sudo_command (omit 'sudo' prefix)

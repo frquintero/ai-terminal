@@ -174,6 +174,77 @@ print(f"Pi: {math.pi}")
         # Should succeed even if matplotlib not available
         self.assertIn("exit code: 0", result.lower())
         self.assertIn("Pi: 3.14", result)
+    
+    def test_project_file_read(self):
+        """Test reading project files via SANDBOX_PROJECT"""
+        # Create a test file in the project directory (test_dir acts as project)
+        test_file = os.path.join(self.test_dir, "test_data.txt")
+        with open(test_file, 'w') as f:
+            f.write("Hello from project directory")
+        
+        # Change to test_dir to simulate being in the project
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(self.test_dir)
+            
+            code = """
+import os
+
+project_dir = os.environ.get('SANDBOX_PROJECT')
+if not project_dir:
+    print("ERROR: SANDBOX_PROJECT not set")
+else:
+    test_file = os.path.join(project_dir, 'test_data.txt')
+    with open(test_file, 'r') as f:
+        content = f.read()
+    print(f"Read from project: {content}")
+"""
+            result = self.sandbox_tool.execute(code=code)
+            
+            self.assertIn("exit code: 0", result.lower())
+            self.assertIn("Read from project: Hello from project directory", result)
+        finally:
+            os.chdir(original_cwd)
+    
+    def test_project_write_guard(self):
+        """Test that writing to project directory is blocked by default"""
+        # Create a test file in the project directory
+        test_file = os.path.join(self.test_dir, "protected.txt")
+        with open(test_file, 'w') as f:
+            f.write("Original content")
+        
+        # Change to test_dir to simulate being in the project
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(self.test_dir)
+            
+            # Ensure write protection is enabled
+            os.environ['SANDBOX_ALLOW_PROJECT_WRITES'] = '0'
+            
+            code = """
+import os
+
+project_dir = os.environ.get('SANDBOX_PROJECT')
+if project_dir:
+    test_file = os.path.join(project_dir, 'protected.txt')
+    try:
+        with open(test_file, 'w') as f:
+            f.write("Modified content")
+        print("ERROR: Write should have been blocked")
+    except PermissionError as e:
+        print(f"Write blocked as expected: {e}")
+"""
+            result = self.sandbox_tool.execute(code=code)
+            
+            self.assertIn("exit code: 0", result.lower())
+            self.assertIn("Write blocked as expected", result)
+            
+            # Verify file was not modified
+            with open(test_file, 'r') as f:
+                content = f.read()
+            self.assertEqual(content, "Original content")
+        finally:
+            os.chdir(original_cwd)
 
 if __name__ == '__main__':
     unittest.main()
