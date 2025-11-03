@@ -198,27 +198,28 @@ def _generate_execution_prompt(self, user_query: str) -> str:
         }
         catalog_str = json.dumps(simple_catalog, indent=2)
     
-    meta_prompt = f"""You are a meta-prompt generator.
+    meta_prompt = f"""You are a meta-prompt generator for an AI assistant.
 
 USER QUERY:
 {user_query}
 
-AVAILABLE TOOLS:
+AVAILABLE TOOLS (with usage examples):
 {catalog_str}
 
 YOUR TASK:
-Generate a concise, focused system prompt for executing this specific query.
+Analyze the query and generate the optimal system prompt for executing it effectively.
 
-Guidelines:
-1. Identify your role for this task (analyst, shell expert, assistant, etc.)
-2. List 1-3 most relevant tools
-3. If data/file operations: INCLUDE the SANDBOX_PROJECT pattern from examples
-4. Keep under 300 words
+You decide:
+- What role/identity is best for this task
+- Which tools (if any) to reference
+- What patterns or examples to include
+- How detailed or concise the prompt should be
+
+Trust your judgment. Generate whatever prompt will produce the best result.
 
 Return JSON:
 {{
-  "system_prompt": "Your generated prompt here",
-  "key_tools": ["tool1", "tool2"]
+  "system_prompt": "Your complete generated prompt"
 }}"""
     
     try:
