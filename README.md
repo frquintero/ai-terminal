@@ -1,6 +1,6 @@
 # AI-Powered Linux Shell Terminal
 
-**Version:** 1.01
+**Version:** 1.1
 
 This project implements an AI-powered Linux shell terminal using MiniMax M2 AI. It combines natural language processing, shell command execution, and tool-based operations to create an intelligent CLI interface.
 
@@ -8,23 +8,49 @@ This project implements an AI-powered Linux shell terminal using MiniMax M2 AI. 
 
 - **AI-First Processing**: All user inputs go through MiniMax M2 AI for intelligent interpretation
 - **Multi-Step Task Execution**: AI can break down complex requests into sequences of tool calls
+- **Automatic Tool Discovery**: Tools are auto-registered from class definitions - add/remove tools without manual registry updates
+- **Intelligent Output Display**: Clean agent summaries by default, with optional raw output mode for debugging
 - **Tool-Based Execution**: AI translates natural language to shell commands and executes via shell integration
-- **Chat Tool**: Handle pure conversational responses when no command execution is needed
 - **Content Processing**: Combine file operations, shell commands, and AI generation for complex workflows
 - **Shell Integration**: Wrap around bash/zsh for efficient command execution and output capture
+
+## Available Agent Tools
+
+The system automatically discovers and registers tools:
+- `read_file` - Read file contents
+- `write_file` - Create or overwrite files
+- `run_command` - Execute non-interactive shell commands
+- `run_sudo_command` - Execute commands with sudo privileges
+- `run_interactive` - Run interactive commands (vim, nano, top, etc.)
+- `wikipedia_search` - Search Wikipedia for information
+- `process_content` - Analyze and process text content
 
 ## Installation
 
 1. Clone the repository
 2. Install dependencies: `pip install -r requirements.txt`
-3. Copy `.env.example` to `.env` and fill in your MiniMax M2 API key
+3. Copy `.env.example` to `.env` and configure:
+   ```bash
+   MINIMAX_M2_API_KEY=your_api_key_here
+   MINIMAX_MODEL=MiniMax-M2
+   SHOW_RAW_OUTPUT=false  # Set to true for debugging
+   ```
 4. Run the terminal: `python main.py`
+
+## Configuration
+
+Key settings in `.env`:
+- `SHOW_RAW_OUTPUT` (default: `false`) - Show raw command outputs. Set to `true` for debugging or verification workflows.
+- `RAW_OUTPUT_MAX_CHARS` (default: `4000`) - Maximum characters to display when raw output is enabled.
+- `HIDE_THINKING` (default: `true`) - Hide AI reasoning in responses.
+- `MAX_STEPS` (default: `15`) - Maximum tool execution steps per request.
 
 ## Usage
 
 - Enter natural language commands
 - The AI will interpret and execute them appropriately
-- Supports file operations, shell commands, and conversation
+- Supports file operations, shell commands, Wikipedia searches, and conversation
+- By default, see clean AI summaries; enable raw output for detailed command results
 
 ## Development
 

@@ -48,11 +48,30 @@ class MiniAgent:
         # Tool output collector for deterministic rendering
         self._current_step_tool_outputs = []
         
-        # Minimal system prompt: only essential information
-        self.message_history = [
-            {
-                "role": "system",
-                "content": f"""Shell automation expert and conversational assistant. Execute commands, write scripts, manage files, and engage in helpful dialogue.
+        # Build system prompt with available tools
+        system_prompt = self._build_system_prompt(system_context)
+        self.message_history = [{"role": "system", "content": system_prompt}]
+    
+    def _clear_secrets(self):
+        """Clear all secrets from memory"""
+        self.secrets.clear()
+    
+    def _format_tools_for_prompt(self) -> str:
+        """Generate a formatted list of available agent tools for the system prompt"""
+        lines = ["Available agent tools:"]
+        for name in sorted(TOOLS.keys()):
+            desc = getattr(TOOLS[name], "description", "") or ""
+            # Flatten whitespace and newlines to keep one line per tool
+            desc = " ".join(desc.strip().split())
+            lines.append(f"- {name}: {desc}")
+        return "\n".join(lines)
+    
+    def _build_system_prompt(self, system_context: str) -> str:
+        """Build the complete system prompt with tools, context, and guidelines"""
+        tools_block = self._format_tools_for_prompt()
+        return f"""Shell automation expert and conversational assistant. Execute commands, write scripts, manage files, and engage in helpful dialogue.
+
+{tools_block}
 
 {system_context}
 
@@ -61,18 +80,18 @@ Decision-making:
 - Complex logic (algorithms, multi-step operations, data structures): write Python script with write_file, execute with run_command
 - Interactive tools (vim, nano, less, top, htop, man, ssh, mysql, python REPL): use run_interactive
 - Root privileges: use run_sudo_command (omit 'sudo' prefix)
+- External knowledge: use wikipedia_search for general knowledge, definitions, facts, or information not available in the local file system
 
-Shell efficiency rules:
+Tool efficiency rules:
 - For simple version/info queries, prefer a single tool call
 - If tool output answers the question, provide the final response without additional tools unless explicitly requested
+- Trust tool results: If wikipedia_search returns information, use it directly. Do NOT verify Wikipedia results by scraping HTML with curl/grep
+- Do NOT use tools for conversation: respond directly as assistant unless you need to read/write files, run commands, or fetch external information
 
-Tool output is displayed automatically. Provide brief interpretation/explanation only - do not reprint tool output."""
-            }
-        ]
-    
-    def _clear_secrets(self):
-        """Clear all secrets from memory"""
-        self.secrets.clear()
+Rendering rules:
+- Interactive tools (run_interactive): Output is streamed to terminal automatically. Do not summarize or reprint.
+- Non-interactive tools: Provide concise summaries and interpretations. Include minimal snippets only when necessary or explicitly requested (e.g., "show the file", "paste the output").
+- Do not duplicate information: Tool outputs are logged internally. Focus on explaining results, not reprinting them."""
     
     def _mask_args(self, tool_name: str, args: dict) -> dict:
         """Mask sensitive arguments for logging"""
@@ -464,17 +483,23 @@ Tool output is displayed automatically. Provide brief interpretation/explanation
             if self.config.hide_thinking:
                 content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
             
-            # Inject raw tool outputs before LLM commentary
-            if self._current_step_tool_outputs:
+            # Optionally inject raw tool outputs before LLM commentary (disabled by default)
+            if self._current_step_tool_outputs and self.config.show_raw_output:
                 raw_blocks = []
                 for output in self._current_step_tool_outputs:
+                    # Get result and truncate if needed
+                    result = output["result"]
+                    if len(result) > self.config.raw_output_max_chars:
+                        truncated = len(result) - self.config.raw_output_max_chars
+                        result = result[:self.config.raw_output_max_chars] + f"\n...[truncated {truncated} chars]"
+                    
                     # Show command if it's a command tool
                     cmd = output["args"].get("command")
                     if cmd and output["tool"] in ["run_command", "run_sudo_command"]:
-                        raw_blocks.append(f"$ {cmd}\n{output['result']}")
+                        raw_blocks.append(f"$ {cmd}\n{result}")
                     else:
                         # For non-command tools, just show result
-                        raw_blocks.append(output["result"])
+                        raw_blocks.append(result)
                 
                 raw_output = "\n\n".join(raw_blocks).rstrip()
                 if raw_output:

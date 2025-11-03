@@ -3,7 +3,11 @@ import os
 import subprocess
 import sys
 import shlex
-from typing import Dict, Any, List
+import urllib.request
+import urllib.parse
+import json
+import inspect
+from typing import Dict, Any, List, Optional
 from shell_integration import ShellIntegration
 
 class BaseTool(ABC):
@@ -107,8 +111,8 @@ class WriteFileTool(BaseTool):
             return f"Error writing file: {str(e)}"
 
 class RunCommandTool(BaseTool):
-    def __init__(self):
-        self.shell = ShellIntegration()
+    def __init__(self, shell: 'ShellIntegration' = None):
+        self.shell = shell or ShellIntegration()
 
     @property
     def name(self) -> str:
@@ -223,6 +227,9 @@ class RunCommandTool(BaseTool):
             return f"Error executing command: {str(e)}"
 
 class ChatTool(BaseTool):
+    # Deprecated: Assistants should respond directly without tools for conversation
+    AUTO_REGISTER = False
+    
     @property
     def name(self) -> str:
         return "chat"
@@ -294,8 +301,8 @@ class ContentProcessingTool(BaseTool):
         return f"Processed content for task '{task}': {content}"
 
 class SudoRunCommandTool(BaseTool):
-    def __init__(self):
-        self.shell = ShellIntegration()
+    def __init__(self, shell: 'ShellIntegration' = None):
+        self.shell = shell or ShellIntegration()
     
     @property
     def name(self) -> str:
@@ -425,16 +432,137 @@ class InteractiveCommandTool(BaseTool):
         except Exception as e:
             return f"Error executing interactive command: {str(e)}"
 
-# Tool registry
-TOOLS: Dict[str, BaseTool] = {
-    "read_file": ReadFileTool(),
-    "write_file": WriteFileTool(),
-    "run_command": RunCommandTool(),
-    "run_sudo_command": SudoRunCommandTool(),
-    "run_interactive": InteractiveCommandTool(),
-    "chat": ChatTool(),
-    "process_content": ContentProcessingTool()
-}
+class WikipediaSearchTool(BaseTool):
+    @property
+    def name(self) -> str:
+        return "wikipedia_search"
+    
+    @property
+    def description(self) -> str:
+        return "Search Wikipedia for general knowledge, definitions, or external information"
+    
+    @property
+    def schema(self) -> Dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": "wikipedia_search",
+                "description": "Search Wikipedia for general knowledge, definitions, or external information",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The search query or topic to look up on Wikipedia"
+                        },
+                        "sentences": {
+                            "type": "integer",
+                            "description": "Number of sentences to return (default: 3)",
+                            "default": 3
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }
+        }
+    
+    def execute(self, query: str, sentences: int = 3) -> str:
+        try:
+            # Create a request with User-Agent header (Wikipedia requires it)
+            headers = {
+                'User-Agent': 'AI-Terminal/1.0 (https://github.com/frquintero/ai-terminal) Python-urllib'
+            }
+            
+            # Step 1: Search for the page title
+            search_url = f"https://en.wikipedia.org/w/api.php?action=query&format=json&list=search&srsearch={urllib.parse.quote(query)}&srlimit=1"
+            
+            request = urllib.request.Request(search_url, headers=headers)
+            with urllib.request.urlopen(request, timeout=10) as response:
+                search_data = json.loads(response.read().decode())
+            
+            # Check if we got any results
+            if not search_data.get('query', {}).get('search'):
+                return f"No Wikipedia results found for '{query}'"
+            
+            # Get the first search result's title
+            page_title = search_data['query']['search'][0]['title']
+            
+            # Step 2: Fetch the page extract
+            extract_url = f"https://en.wikipedia.org/w/api.php?action=query&format=json&prop=extracts&exintro=1&explaintext=1&titles={urllib.parse.quote(page_title)}"
+            
+            request = urllib.request.Request(extract_url, headers=headers)
+            with urllib.request.urlopen(request, timeout=10) as response:
+                extract_data = json.loads(response.read().decode())
+            
+            # Extract the content
+            pages = extract_data.get('query', {}).get('pages', {})
+            if not pages:
+                return f"Could not retrieve content for '{page_title}'"
+            
+            page = list(pages.values())[0]
+            extract = page.get('extract', '')
+            
+            if not extract:
+                return f"No content available for '{page_title}'"
+            
+            # Split into sentences and take the requested number
+            # Simple sentence splitting (could be improved)
+            sentence_list = extract.replace('.\n', '. ').split('. ')
+            result_sentences = sentence_list[:sentences]
+            result_text = '. '.join(result_sentences)
+            
+            # Ensure it ends with a period
+            if not result_text.endswith('.'):
+                result_text += '.'
+            
+            return f"Wikipedia - {page_title}:\n\n{result_text}"
+            
+        except urllib.error.URLError as e:
+            return f"Network error accessing Wikipedia: {str(e)}"
+        except json.JSONDecodeError as e:
+            return f"Error parsing Wikipedia response: {str(e)}"
+        except Exception as e:
+            return f"Error searching Wikipedia: {str(e)}"
+
+# Automatic tool discovery and registration
+def _iter_tool_classes(module):
+    """Discover all BaseTool subclasses defined in this module"""
+    for _, obj in inspect.getmembers(module, inspect.isclass):
+        # Only classes defined in this file
+        if obj.__module__ != module.__name__:
+            continue
+        # Skip BaseTool itself and non-subclasses
+        if not issubclass(obj, BaseTool) or obj is BaseTool:
+            continue
+        # Skip abstract classes
+        if inspect.isabstract(obj):
+            continue
+        # Allow opt-out via class attribute
+        if not getattr(obj, "AUTO_REGISTER", True):
+            continue
+        yield obj
+
+def _instantiate_tool(cls):
+    """Instantiate a tool class with zero-arg constructor"""
+    try:
+        return cls()
+    except TypeError as e:
+        raise TypeError(f"Auto-registration requires a no-arg constructor: {cls.__name__}: {e}")
+
+def _build_tools():
+    """Build the TOOLS dictionary from discovered tool classes"""
+    instances = [_instantiate_tool(cls) for cls in _iter_tool_classes(sys.modules[__name__])]
+    # Sort by tool name for deterministic order
+    instances.sort(key=lambda t: t.name)
+    tools = {}
+    for inst in instances:
+        if inst.name in tools:
+            raise ValueError(f"Duplicate tool name detected: {inst.name}")
+        tools[inst.name] = inst
+    return tools
+
+# Tool registry - automatically built from tool classes
+TOOLS: Dict[str, BaseTool] = _build_tools()
 
 def get_tool_schemas() -> List[Dict[str, Any]]:
     return [tool.schema for tool in TOOLS.values()]

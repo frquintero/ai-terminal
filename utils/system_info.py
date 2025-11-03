@@ -92,6 +92,59 @@ def get_cpu_info() -> tuple:
     
     return (cpu_model, cpu_cores)
 
+def get_git_info() -> Dict[str, str]:
+    """Gather git repository information for the current working directory"""
+    git_info = {}
+    
+    # Check if git is available
+    if not shutil.which('git'):
+        return git_info
+    
+    # Check if we're in a git repository
+    in_repo = get_command_output('git rev-parse --is-inside-work-tree')
+    if in_repo != 'true':
+        return git_info
+    
+    # Get repository root
+    repo_root = get_command_output('git rev-parse --show-toplevel')
+    if repo_root:
+        git_info['repo_root'] = repo_root
+    
+    # Get current branch
+    branch = get_command_output('git rev-parse --abbrev-ref HEAD')
+    if branch:
+        git_info['branch'] = branch
+    
+    # Get current commit hash (short)
+    commit_hash = get_command_output('git rev-parse --short HEAD')
+    if commit_hash:
+        git_info['commit'] = commit_hash
+    
+    # Get repository name (from remote origin)
+    repo_name = get_command_output('git rev-parse --abbrev-ref --symbolic-full-name @{u} | cut -d"/" -f1')
+    if not repo_name:
+        # Fallback: get from remote origin URL
+        origin_url = get_command_output('git config --get remote.origin.url')
+        if origin_url:
+            # Extract repo name from URL (e.g., git@github.com:user/repo.git -> repo)
+            repo_name = origin_url.rstrip('/').split('/')[-1].replace('.git', '')
+    if repo_name:
+        git_info['repo_name'] = repo_name
+    
+    # Get remote origin URL
+    origin_url = get_command_output('git config --get remote.origin.url')
+    if origin_url:
+        git_info['origin'] = origin_url
+    
+    # Check if there are uncommitted changes
+    uncommitted = get_command_output('git status --porcelain')
+    if uncommitted:
+        # Count the number of changes
+        change_count = len(uncommitted.strip().split('\n'))
+        git_info['uncommitted_changes'] = str(change_count)
+    
+    return git_info
+
 def get_system_info() -> Dict[str, str]:
     """Gather comprehensive system information"""
     info = {}
@@ -142,11 +195,20 @@ def get_system_info() -> Dict[str, str]:
     info['user'] = os.environ.get('USER', 'unknown')
     info['home'] = os.path.expanduser('~')
     
+    # PATH environment variable
+    path = os.environ.get('PATH', '')
+    if path:
+        info['path'] = path
+    
     # Check for common tools
     common_tools = ['git', 'docker', 'curl', 'wget', 'vim', 'nano', 'systemctl', 'apt', 'yum', 'dnf']
     available_tools = [tool for tool in common_tools if shutil.which(tool)]
     if available_tools:
         info['available_tools'] = ', '.join(available_tools)
+    
+    # Git information (if in a git repository)
+    git_info = get_git_info()
+    info.update(git_info)
     
     return info
 
@@ -167,8 +229,27 @@ def format_system_info(info: Dict[str, str]) -> str:
     # User context
     lines.append(f"User: {info['user']} (home: {info['home']})")
     
+    # PATH environment variable
+    if 'path' in info:
+        path_dirs = info['path'].split(':')
+        path_summary = ':'.join(path_dirs[:5])  # Show first 5 directories
+        if len(path_dirs) > 5:
+            path_summary += f":... ({len(path_dirs)} total)"
+        lines.append(f"PATH: {path_summary}")
+    
     # Available tools (if any)
     if 'available_tools' in info:
         lines.append(f"Tools: {info['available_tools']}")
+    
+    # Git information (if available)
+    if 'repo_name' in info:
+        git_line = f"Git: {info['repo_name']}"
+        if 'branch' in info:
+            git_line += f" @ {info['branch']}"
+        if 'commit' in info:
+            git_line += f" ({info['commit'][:7]})"
+        if 'uncommitted_changes' in info:
+            git_line += f" [{info['uncommitted_changes']} changes]"
+        lines.append(git_line)
     
     return '\n'.join(lines)

@@ -46,3 +46,7 @@ Thumbs.db
 
 # Session database
 logs/
+
+# Test data files
+*.csv
+test.csv
