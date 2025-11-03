@@ -215,7 +215,7 @@ You decide:
 - What patterns or examples to include
 - How detailed or concise the prompt should be
 
-Trust your judgment. Generate whatever prompt will produce the best result.
+Trust your judgment. Generate whatever prompt will produce the best result. Just be as concise as possible while still being clear and effective.
 
 Return JSON:
 {{
@@ -246,10 +246,10 @@ Return JSON:
 ```
 
 **Success Criteria**:
-- [ ] Generates valid prompts
+- [ ] Returns valid JSON with "system_prompt" field
 - [ ] <500ms overhead
-- [ ] Handles errors gracefully
-- [ ] Includes tool patterns when relevant
+- [ ] Fallback works on errors (returns base prompt)
+- [ ] Generated prompts lead to successful task execution
 
 ---
 
