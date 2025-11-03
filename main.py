@@ -28,6 +28,49 @@ def ensure_venv():
         print("Run: python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt")
         sys.exit(1)
 
+# Metadata / CLI
+VERSION = "1.01"
+
+def _print_help():
+    help_text = f"""
+ai-terminal {VERSION}
+
+Usage:
+  python main.py [--help] [--about] [--version]
+
+Flags:
+  -h, --help     Show this help message and exit
+  --about        Show a short about message and exit
+  --version      Print version and exit
+
+When run without flags the program starts the interactive AI-powered shell.
+"""
+    print(help_text)
+
+def _print_about():
+    about = (
+        "AI-Powered Linux Shell Terminal\n"
+        "Combines an AI agent with shell integration to interpret natural language and run commands.\n"
+        f"Version: {VERSION}\n"
+    )
+    print(about)
+
+def handle_cli_flags():
+    # Inspect only top-level flags; if any known flag is present print and exit
+    args = sys.argv[1:]
+    if not args:
+        return
+    for a in args:
+        if a in ("-h", "--help"):
+            _print_help(); sys.exit(0)
+        if a == "--about":
+            _print_about(); sys.exit(0)
+        if a == "--version":
+            print(VERSION); sys.exit(0)
+
+# Allow quick inspection of help/about/version without activating venv
+handle_cli_flags()
+
 # Ensure we're running in venv before importing dependencies
 ensure_venv()
 
@@ -45,9 +88,10 @@ def main():
         agent = MiniAgent()
         
         # Link AI shell to UI for dynamic prompt
-        from tools import TOOLS
+        from tools import TOOLS, RunCommandTool
         run_command = TOOLS.get("run_command")
-        if run_command and hasattr(run_command, "shell"):
+        # Narrow the type for Pylance by checking the concrete class
+        if isinstance(run_command, RunCommandTool) and hasattr(run_command, "shell"):
             ui.set_ai_shell(run_command.shell)
     except Exception as e:
         ui.error(f"Error initializing: {e}")
@@ -107,9 +151,10 @@ def main():
     finally:
         # Cleanup - close the persistent shell in RunCommandTool
         try:
-            from tools import TOOLS
+            from tools import TOOLS, RunCommandTool
             run_command = TOOLS.get("run_command")
-            if run_command and hasattr(run_command, "shell"):
+            if isinstance(run_command, RunCommandTool) and hasattr(run_command, "shell"):
+                # mypy/pylance-friendly check before accessing dynamic attribute
                 run_command.shell.close()
         except Exception:
             pass
