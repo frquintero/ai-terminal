@@ -89,6 +89,12 @@ Shell-First Philosophy:
 - Root privileges: use run_sudo_command (omit 'sudo' prefix)
 - External knowledge: use wikipedia_search for general knowledge, definitions, facts, or information not available in the local file system
 
+File operations with read_file/write_file:
+- CRITICAL: File paths for read_file and write_file are RELATIVE to the working directory - NEVER include 'ai-terminal-wd/' prefix
+- Correct: read_file(file_path="script.sh") for file at ai-terminal-wd/script.sh
+- Wrong: read_file(file_path="ai-terminal-wd/script.sh") - this causes double prefix error
+- Subdirectories work normally: write_file(file_path="logs/output.txt", content="...") creates ai-terminal-wd/logs/output.txt
+
 Tool efficiency rules:
 - For simple version/info queries, prefer a single tool call
 - If tool output answers the question, provide the final response without additional tools unless explicitly requested

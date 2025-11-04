@@ -107,13 +107,13 @@ class ReadFileTool(BaseTool):
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": f"Read the contents of a file. File path is relative to the isolated working directory ({WORKING_DIR_PREFIX})",
+                "description": f"Read the contents of a file. IMPORTANT: Do NOT include '{WORKING_DIR_PREFIX}/' prefix in file_path - it is automatically prepended. Example: use 'script.sh' not '{WORKING_DIR_PREFIX}/script.sh'",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "file_path": {
                             "type": "string",
-                            "description": f"The path to the file to read, relative to the isolated working directory ({WORKING_DIR_PREFIX})"
+                            "description": f"Path relative to working directory (WITHOUT '{WORKING_DIR_PREFIX}/' prefix). Examples: 'file.txt', 'subdir/data.csv', 'config/settings.json'"
                         }
                     },
                     "required": ["file_path"]
@@ -173,13 +173,13 @@ class WriteFileTool(BaseTool):
             "type": "function",
             "function": {
                 "name": "write_file",
-                "description": f"Create or overwrite a file with content. File path is relative to the isolated working directory ({WORKING_DIR_PREFIX})",
+                "description": f"Create or overwrite a file with content. IMPORTANT: Do NOT include '{WORKING_DIR_PREFIX}/' prefix in file_path - it is automatically prepended. Example: use 'output.txt' not '{WORKING_DIR_PREFIX}/output.txt'",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "file_path": {
                             "type": "string",
-                            "description": f"The path to the file to create or overwrite, relative to the isolated working directory ({WORKING_DIR_PREFIX})"
+                            "description": f"Path relative to working directory (WITHOUT '{WORKING_DIR_PREFIX}/' prefix). Examples: 'script.sh', 'logs/output.log', 'data/results.json'"
                         },
                         "content": {
                             "type": "string",
