@@ -48,12 +48,6 @@ class MiniAgent:
         # Tool output collector for deterministic rendering
         self._current_step_tool_outputs = []
         
-        # Store system context for appending to generated prompts
-        self.system_context = system_context
-        
-        # Build tool catalog once per session for self-prompting
-        self.tool_catalog = self._build_tool_catalog()
-        
         # Build system prompt with available tools
         system_prompt = self._build_system_prompt(system_context)
         self.message_history = [{"role": "system", "content": system_prompt}]
@@ -62,135 +56,7 @@ class MiniAgent:
         """Clear all secrets from memory"""
         self.secrets.clear()
     
-    def _build_tool_catalog(self) -> dict:
-        """Build tool catalog with examples for self-prompting"""
-        catalog = []
-        
-        for tool in TOOLS.values():
-            tool_info = {
-                "name": tool.name,
-                "description": tool.description
-            }
-            
-            # Include examples if available
-            if tool.usage_examples:
-                tool_info["examples"] = tool.usage_examples
-            
-            catalog.append(tool_info)
-        
-        return {"tools": catalog}
-    
-    def _strip_think_tags(self, content: str) -> str:
-        """Remove <think>...</think> tags from MiniMax responses"""
-        import re
-        # Remove <think>...</think> blocks (including nested content)
-        cleaned = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
-        return cleaned.strip()
-    
-    def _extract_json_from_response(self, content: str) -> dict:
-        """Extract and parse JSON from response, handling MiniMax <think> tags"""
-        # Strip <think> tags first
-        cleaned = self._strip_think_tags(content)
-        
-        # Try direct parse
-        try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError:
-            pass
-        
-        # Try to find first JSON object
-        start = cleaned.find('{')
-        if start == -1:
-            raise ValueError("No JSON object found in response")
-        
-        # Find matching closing brace
-        depth = 0
-        for i, ch in enumerate(cleaned[start:], start=start):
-            if ch == '{':
-                depth += 1
-            elif ch == '}':
-                depth -= 1
-                if depth == 0:
-                    json_str = cleaned[start:i+1]
-                    return json.loads(json_str)
-        
-        raise ValueError("Could not extract valid JSON object")
-    
-    def _generate_execution_prompt(self, user_query: str) -> dict:
-        """LLM generates optimal execution prompt for this query"""
-        
-        # Truncate examples if catalog is too large
-        catalog_str = json.dumps(self.tool_catalog, indent=2)
-        if len(catalog_str) > 4000:
-            # Simplified catalog without examples for meta-prompt
-            simple_catalog = {
-                "tools": [
-                    {"name": t.name, "description": t.description}
-                    for t in TOOLS.values()
-                ]
-            }
-            catalog_str = json.dumps(simple_catalog, indent=2)
-        
-        meta_prompt = f"""You are a meta-prompt generator. Analyze the user query and produce a minimal JSON configuration.
 
-USER QUERY:
-{user_query}
-
-TOOL CATALOG:
-{catalog_str}
-
-CONVENTIONS:
-- Python sandbox file access: use os.environ["SANDBOX_PROJECT"] for file paths
-- Tool selection: run_command (shell), run_python_sandbox (data/plots), run_interactive (vim/top), run_sudo_command (root), wikipedia_search (facts)
-- Use only tool names from catalog exactly as given
-- Prefer single simple tool call when sufficient
-
-OUTPUT JSON (exact keys only; keep concise):
-{{
-  "role": "One clear role (e.g., 'Shell expert', 'Data analyst', 'Assistant')",
-  "tools": ["Exact tool names from catalog as needed"],
-  "system_prompt": "One terse sentence: what to do and how"
-}}"""
-        
-        try:
-            response = self.client.chat.completions.create(
-                model=self.config.model,
-                messages=[
-                    {"role": "system", "content": "Meta-prompt generator. Return only JSON. Exact keys."},
-                    {"role": "user", "content": meta_prompt}
-                ],
-                temperature=0.2,  # Low creativity, focused
-                max_tokens=500,  # Account for <think> tags + JSON response
-                response_format={"type": "json_object"}
-            )
-            
-            # Validate response
-            if not response or not response.choices or not response.choices[0].message.content:
-                raise ValueError("Empty or invalid response from API")
-            
-            content = response.choices[0].message.content
-            
-            # Log raw response for debugging
-            self._log("PROMPT_GEN_RAW", content[:2000] if len(content) > 2000 else content)
-            
-            # Extract JSON, handling <think> tags
-            result = self._extract_json_from_response(content)
-            
-            if "system_prompt" not in result:
-                raise ValueError("Response missing 'system_prompt' field")
-            
-            self._log("GENERATED_PROMPT", json.dumps(result))
-            return result  # Return full dictionary with all fields
-            
-        except Exception as e:
-            # Fallback to minimal prompt
-            self._log("PROMPT_GEN_ERROR", str(e))
-            return {
-                "role": "Assistant",
-                "tools": [],
-                "system_prompt": "Help the user with their request."
-            }
-    
     def _format_tools_for_prompt(self) -> str:
         """Generate a formatted list of available agent tools for the system prompt"""
         lines = ["Available agent tools:"]
@@ -423,42 +289,6 @@ Rendering rules:
         
         # Log incoming user query
         self._log("USER_QUERY", user_input)
-        
-        # SELF-PROMPTING: Generate optimal prompt for this query
-        prompt_data = self._generate_execution_prompt(user_input)
-        
-        # Build minimal prompt from meta-LLM output
-        prompt_parts = []
-        
-        # Role definition
-        if prompt_data.get("role"):
-            prompt_parts.append(f"Role: {prompt_data['role']}")
-        
-        # Core instruction
-        if prompt_data.get("system_prompt"):
-            prompt_parts.append(prompt_data["system_prompt"])
-        
-        # Recommended tools (if any)
-        if prompt_data.get("tools") and len(prompt_data["tools"]) > 0:
-            tools_list = ", ".join(prompt_data["tools"])
-            prompt_parts.append(f"Tools: {tools_list}")
-        
-        # Combine (terse, single-line format)
-        custom_prompt = " | ".join(prompt_parts)
-        
-        # Append system context to generated prompt
-        full_prompt = f"{custom_prompt}\n\n{self.system_context}"
-        
-        # Update system message with generated prompt
-        self.message_history[0]["content"] = full_prompt
-        
-        # Log dynamic prompt info
-        self._log("DYNAMIC_PROMPT", json.dumps({
-            "length": len(full_prompt),
-            "query_preview": user_input[:100],
-            "role": prompt_data.get("role", ""),
-            "tools": prompt_data.get("tools", [])
-        }))
         
         self.message_history.append({"role": "user", "content": user_input})
         
