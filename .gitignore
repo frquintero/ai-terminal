@@ -55,3 +55,6 @@ test.csv
 sandbox_runs/
 test_sandbox/
 sandbox_venv/
+
+# Working directory for file operations
+ai-terminal-wd/
