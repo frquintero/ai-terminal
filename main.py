@@ -78,10 +78,18 @@ from agent import MiniAgent
 from ui_formatter import ui, console
 from rich.prompt import Prompt
 import getpass
+from tools import WORKING_DIR_PREFIX
 
 def main():
     # Print banner
     ui.print_banner()
+    
+    # Ensure working directory exists
+    try:
+        os.makedirs(WORKING_DIR_PREFIX, exist_ok=True)
+    except Exception as e:
+        ui.error(f"Failed to create working directory '{WORKING_DIR_PREFIX}': {e}")
+        sys.exit(1)
 
     # Initialize components
     try:
