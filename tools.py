@@ -88,8 +88,9 @@ class BaseTool(ABC):
 
 class ReadFileTool(BaseTool):
     """
-    Read file contents into memory from the isolated working directory.
+    Read file contents into memory.
     
+    Searches in: 1) Working directory (ai-terminal-wd/), 2) App directory (project root)
     Use for: Small to medium text files (< 5MB)
     Don't use for: Large files, binary files, or when you only need portions
     Alternative: Use run_command with head/tail/grep for large files
@@ -104,7 +105,7 @@ class ReadFileTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return f"Read the contents of a file from the isolated working directory ({WORKING_DIR_PREFIX})"
+        return f"Read the contents of a file (searches in {WORKING_DIR_PREFIX}/ first, then app directory)"
 
     @property
     def schema(self) -> Dict[str, Any]:
@@ -112,7 +113,7 @@ class ReadFileTool(BaseTool):
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": f"Read the contents of a file. IMPORTANT: Do NOT include '{WORKING_DIR_PREFIX}/' prefix in file_path - it is automatically prepended. Example: use 'script.sh' not '{WORKING_DIR_PREFIX}/script.sh'",
+                "description": f"Read file contents. Searches {WORKING_DIR_PREFIX}/ first, then app directory. Use relative paths only (e.g., 'script.sh' not '{WORKING_DIR_PREFIX}/script.sh')",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -128,28 +129,42 @@ class ReadFileTool(BaseTool):
 
     def execute(self, file_path: str) -> str:
         """
-        Read and return file contents from isolated working directory.
+        Read and return file contents.
+        
+        Search order:
+        1. Working directory (ai-terminal-wd/)
+        2. Application directory (project root)
         
         Guards:
         - File size limit to avoid memory exhaustion
         - UTF-8 encoding required (text files only)
         """
-        # Prepend working directory prefix to isolate file operations
-        isolated_path = os.path.join(_get_working_dir_path(), file_path)
+        # Try working directory first
+        working_dir_path = os.path.join(_get_working_dir_path(), file_path)
+        
+        # If not in working dir, try app directory (project root)
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        app_dir_path = os.path.join(app_dir, file_path)
+        
+        # Determine which path to use
+        if os.path.exists(working_dir_path):
+            target_path = working_dir_path
+        elif os.path.exists(app_dir_path):
+            target_path = app_dir_path
+        else:
+            return f"Error: File not found in working directory or app directory: {file_path}"
         
         try:
             # Check file size before reading
-            size = os.path.getsize(isolated_path)
+            size = os.path.getsize(target_path)
             if size > self.MAX_BYTES:
                 return (
                     f"File is {size} bytes; exceeds READ_FILE_MAX_BYTES={self.MAX_BYTES}. "
                     f"Use run_command with head/tail/less for large files."
                 )
             
-            with open(isolated_path, 'r', encoding='utf-8') as f:
+            with open(target_path, 'r', encoding='utf-8') as f:
                 return f.read()
-        except FileNotFoundError:
-            return f"Error: File not found: {isolated_path}"
         except UnicodeDecodeError:
             return f"Error: File is not valid UTF-8 text. Use run_command with cat/hexdump for binary files."
         except Exception as e:
