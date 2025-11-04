@@ -88,12 +88,7 @@ Shell-First Philosophy:
 - Interactive tools (vim, nano, less, top, htop, man, ssh, mysql, python REPL): use run_interactive
 - Root privileges: use run_sudo_command (omit 'sudo' prefix)
 - External knowledge: use wikipedia_search for general knowledge, definitions, facts, or information not available in the local file system
-
-File operations with read_file/write_file:
-- CRITICAL: File paths for read_file and write_file are RELATIVE to the working directory - NEVER include '{WORKING_DIR_PREFIX}/' prefix
-- Correct: read_file(file_path="script.sh") for file at {WORKING_DIR_PREFIX}/script.sh
-- Wrong: read_file(file_path="{WORKING_DIR_PREFIX}/script.sh") - this causes double prefix error
-- Subdirectories work normally: write_file(file_path="logs/output.txt", content="...") creates {WORKING_DIR_PREFIX}/logs/output.txt
+- File operations (read_file/write_file): Use relative paths only (e.g., "script.sh" not "{WORKING_DIR_PREFIX}/script.sh")
 
 Tool efficiency rules:
 - For simple version/info queries, prefer a single tool call
