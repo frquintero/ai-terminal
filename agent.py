@@ -131,46 +131,25 @@ class MiniAgent:
             }
             catalog_str = json.dumps(simple_catalog, indent=2)
         
-        meta_prompt = f"""You are a meta-prompt generator for an AI assistant. Produce a compact JSON that configures the assistant's role, tool choices, and task-specific guidance for the given user query.
+        meta_prompt = f"""You are a meta-prompt generator. Analyze the user query and produce a minimal JSON configuration.
 
 USER QUERY:
 {user_query}
 
-TOOL CATALOG (names, descriptions, optional usage examples):
+TOOL CATALOG:
 {catalog_str}
 
-GLOBAL CONVENTIONS AND HEURISTICS (must follow):
-- Do not invent tools or examples. Use only tool names from the catalog exactly as given.
-- If a tool has usage examples in the catalog, you may copy them verbatim (you may trim for brevity). If no examples are available, set "examples": [].
-- Python sandbox file access: always use SANDBOX_PROJECT. Example:
-  import os, pandas as pd
-  base = os.environ["SANDBOX_PROJECT"]
-  df = pd.read_csv(os.path.join(base, "data.csv"))
-- Tool selection:
-  - Simple shell/file ops: run_command
-  - Data analysis/plots or nontrivial Python: run_python_sandbox (resource-limited; plots auto-captured)
-  - Interactive sessions: run_interactive
-  - Root tasks: run_sudo_command (omit "sudo" in the command; password handled separately)
-  - External general knowledge: wikipedia_search
-- Cost/efficiency: prefer a single simple tool call when sufficient. Do not use tools for pure conversation.
-- If the catalog appears truncated or lacks examples, treat examples as unavailable.
+CONVENTIONS:
+- Python sandbox file access: use os.environ["SANDBOX_PROJECT"] for file paths
+- Tool selection: run_command (shell), run_python_sandbox (data/plots), run_interactive (vim/top), run_sudo_command (root), wikipedia_search (facts)
+- Use only tool names from catalog exactly as given
+- Prefer single simple tool call when sufficient
 
-YOUR TASK:
-Analyze the user query and output JSON only (no commentary, no markdown). Keep it concise and directly usable by the assistant.
-
-DECISION RULES:
-- Choose one clear role that best fits the task.
-- Pick 0–3 relevant tools; omit irrelevant ones.
-- "system_prompt" should be a crisp instruction for how to approach the task with the chosen tools and conventions (not a paraphrase of the user query).
-- If examples are unavailable, do not fabricate. Put task-specific instructions, inputs/outputs, and key steps in "details" instead.
-
-OUTPUT JSON (exact keys only; keep under ~1200 characters total):
+OUTPUT JSON (exact keys only; under 200 characters):
 {{
-  "system_prompt": "Concise instruction the assistant will follow for this query, reflecting the chosen role, tools, and conventions.",
-  "role": "One role/identity best suited to this query (e.g., 'Shell automation expert', 'Data analysis specialist', 'Code reviewer').",
-  "tools": ["Exact tool names from the catalog, 0–3 items."],
-  "examples": ["Only from catalog examples, or [] if none are available or necessary."],
-  "details": "Concrete constraints, inputs/outputs, safety notes, and minimal steps. If examples are unavailable, provide actionable guidance here following the conventions."
+  "role": "One clear role (e.g., 'Shell expert', 'Data analyst', 'Assistant')",
+  "tools": ["0-2 exact tool names from catalog"],
+  "system_prompt": "One terse sentence: what to do and how"
 }}"""
         
         try:
@@ -181,7 +160,7 @@ OUTPUT JSON (exact keys only; keep under ~1200 characters total):
                     {"role": "user", "content": meta_prompt}
                 ],
                 temperature=0.2,  # Low creativity, focused
-                max_tokens=800,  # Increased for longer meta-prompts
+                max_tokens=300,  # Minimal meta-prompt output + <think> tags
                 response_format={"type": "json_object"}
             )
             
@@ -207,11 +186,9 @@ OUTPUT JSON (exact keys only; keep under ~1200 characters total):
             # Fallback to minimal prompt
             self._log("PROMPT_GEN_ERROR", str(e))
             return {
-                "system_prompt": "Shell automation expert and conversational assistant.",
-                "role": "Friendly and helpful assistant",
+                "role": "Assistant",
                 "tools": [],
-                "examples": [],
-                "details": ""
+                "system_prompt": "Help the user with their request."
             }
     
     def _format_tools_for_prompt(self) -> str:
@@ -445,34 +422,24 @@ Rendering rules:
         # SELF-PROMPTING: Generate optimal prompt for this query
         prompt_data = self._generate_execution_prompt(user_input)
         
-        # Build rich prompt from all fields
+        # Build minimal prompt from meta-LLM output
         prompt_parts = []
         
         # Role definition
         if prompt_data.get("role"):
-            prompt_parts.append(f"You are: {prompt_data['role']}")
+            prompt_parts.append(f"Role: {prompt_data['role']}")
         
         # Core instruction
         if prompt_data.get("system_prompt"):
             prompt_parts.append(prompt_data["system_prompt"])
         
-        # Recommended tools
+        # Recommended tools (if any)
         if prompt_data.get("tools") and len(prompt_data["tools"]) > 0:
             tools_list = ", ".join(prompt_data["tools"])
-            prompt_parts.append(f"\nRelevant tools for this task: {tools_list}")
+            prompt_parts.append(f"Tools: {tools_list}")
         
-        # Usage examples
-        if prompt_data.get("examples") and len(prompt_data["examples"]) > 0:
-            prompt_parts.append("\nKey patterns to follow:")
-            for example in prompt_data["examples"]:
-                prompt_parts.append(f"- {example}")
-        
-        # Additional details
-        if prompt_data.get("details"):
-            prompt_parts.append(f"\nAdditional guidance: {prompt_data['details']}")
-        
-        # Combine all parts
-        custom_prompt = "\n".join(prompt_parts)
+        # Combine (terse, single-line format)
+        custom_prompt = " | ".join(prompt_parts)
         
         # Append system context to generated prompt
         full_prompt = f"{custom_prompt}\n\n{self.system_context}"
@@ -485,8 +452,7 @@ Rendering rules:
             "length": len(full_prompt),
             "query_preview": user_input[:100],
             "role": prompt_data.get("role", ""),
-            "tools_count": len(prompt_data.get("tools", [])),
-            "examples_count": len(prompt_data.get("examples", []))
+            "tools": prompt_data.get("tools", [])
         }))
         
         self.message_history.append({"role": "user", "content": user_input})
