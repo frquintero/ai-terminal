@@ -77,7 +77,6 @@ ensure_venv()
 from agent import MiniAgent
 from ui_formatter import ui, console
 from rich.prompt import Prompt
-import getpass
 from tools import WORKING_DIR_PREFIX
 
 def main():
@@ -125,19 +124,6 @@ def main():
 
                 # Process input through AI agent
                 result = agent.process_input(user_input)
-                
-                # Handle user input requests (e.g., sudo password)
-                if "request" in result and result["request"]:
-                    req = result["request"]
-                    if req.get("secret"):
-                        # Use getpass for hidden input
-                        value = getpass.getpass(req["prompt"] + ": ")
-                    else:
-                        # Regular visible input
-                        value = input(req["prompt"] + ": ").strip()
-                    
-                    # Resume agent with provided secret
-                    result = agent.provide_secret(req["id"], value)
 
                 # Display response
                 if result["error"]:
