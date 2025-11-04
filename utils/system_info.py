@@ -216,15 +216,11 @@ def format_system_info(info: Dict[str, str]) -> str:
     """Format system info as a compact string for the AI agent"""
     lines = []
     
-    # System: OS, shell, hardware resources
+    # System: OS and shell only
     os_name = info.get('distribution', info['os']).split('(')[0].strip()  # Remove redundant arch
     shell = info.get('shell', '').split('/')[-1] if 'shell' in info else 'unknown'
-    cores = info.get('cpu_cores', '?')
-    mem_total = info.get('memory_total', '?')
-    mem_avail = info.get('memory_available', '?')
-    disk = info.get('disk_root', '?')
     
-    lines.append(f"System: {os_name}, {shell} shell, {cores} cores, {mem_total} RAM ({mem_avail} free), {disk} disk")
+    lines.append(f"System: {os_name}, {shell} shell")
     
     # User context
     lines.append(f"User: {info['user']} (home: {info['home']})")
@@ -236,20 +232,5 @@ def format_system_info(info: Dict[str, str]) -> str:
         if len(path_dirs) > 5:
             path_summary += f":... ({len(path_dirs)} total)"
         lines.append(f"PATH: {path_summary}")
-    
-    # Available tools (if any)
-    if 'available_tools' in info:
-        lines.append(f"Tools: {info['available_tools']}")
-    
-    # Git information (if available)
-    if 'repo_name' in info:
-        git_line = f"Git: {info['repo_name']}"
-        if 'branch' in info:
-            git_line += f" @ {info['branch']}"
-        if 'commit' in info:
-            git_line += f" ({info['commit'][:7]})"
-        if 'uncommitted_changes' in info:
-            git_line += f" [{info['uncommitted_changes']} changes]"
-        lines.append(git_line)
     
     return '\n'.join(lines)

@@ -145,10 +145,10 @@ CONVENTIONS:
 - Use only tool names from catalog exactly as given
 - Prefer single simple tool call when sufficient
 
-OUTPUT JSON (exact keys only; under 200 characters):
+OUTPUT JSON (exact keys only; keep concise):
 {{
   "role": "One clear role (e.g., 'Shell expert', 'Data analyst', 'Assistant')",
-  "tools": ["0-2 exact tool names from catalog"],
+  "tools": ["Exact tool names from catalog as needed"],
   "system_prompt": "One terse sentence: what to do and how"
 }}"""
         
@@ -160,7 +160,7 @@ OUTPUT JSON (exact keys only; under 200 characters):
                     {"role": "user", "content": meta_prompt}
                 ],
                 temperature=0.2,  # Low creativity, focused
-                max_tokens=300,  # Minimal meta-prompt output + <think> tags
+                max_tokens=500,  # Account for <think> tags + JSON response
                 response_format={"type": "json_object"}
             )
             
