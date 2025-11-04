@@ -19,6 +19,13 @@ from shell_integration import ShellIntegration
 
 
 # ============================================================================
+# Working Directory Isolation
+# ============================================================================
+
+WORKING_DIR_PREFIX = "ai-terminal-wd"
+
+
+# ============================================================================
 # Base Tool Interface
 # ============================================================================
 
@@ -76,7 +83,7 @@ class BaseTool(ABC):
 
 class ReadFileTool(BaseTool):
     """
-    Read file contents into memory.
+    Read file contents into memory from the isolated working directory.
     
     Use for: Small to medium text files (< 5MB)
     Don't use for: Large files, binary files, or when you only need portions
@@ -92,7 +99,7 @@ class ReadFileTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Read the contents of a file"
+        return f"Read the contents of a file from the isolated working directory ({WORKING_DIR_PREFIX})"
 
     @property
     def schema(self) -> Dict[str, Any]:
@@ -100,13 +107,13 @@ class ReadFileTool(BaseTool):
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "Read the contents of a file",
+                "description": f"Read the contents of a file. File path is relative to the isolated working directory ({WORKING_DIR_PREFIX})",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "file_path": {
                             "type": "string",
-                            "description": "The path to the file to read"
+                            "description": f"The path to the file to read, relative to the isolated working directory ({WORKING_DIR_PREFIX})"
                         }
                     },
                     "required": ["file_path"]
@@ -116,25 +123,28 @@ class ReadFileTool(BaseTool):
 
     def execute(self, file_path: str) -> str:
         """
-        Read and return file contents.
+        Read and return file contents from isolated working directory.
         
         Guards:
         - File size limit to avoid memory exhaustion
         - UTF-8 encoding required (text files only)
         """
+        # Prepend working directory prefix to isolate file operations
+        isolated_path = os.path.join(WORKING_DIR_PREFIX, file_path)
+        
         try:
             # Check file size before reading
-            size = os.path.getsize(file_path)
+            size = os.path.getsize(isolated_path)
             if size > self.MAX_BYTES:
                 return (
                     f"File is {size} bytes; exceeds READ_FILE_MAX_BYTES={self.MAX_BYTES}. "
                     f"Use run_command with head/tail/less for large files."
                 )
             
-            with open(file_path, 'r', encoding='utf-8') as f:
+            with open(isolated_path, 'r', encoding='utf-8') as f:
                 return f.read()
         except FileNotFoundError:
-            return f"Error: File not found: {file_path}"
+            return f"Error: File not found: {isolated_path}"
         except UnicodeDecodeError:
             return f"Error: File is not valid UTF-8 text. Use run_command with cat/hexdump for binary files."
         except Exception as e:
@@ -143,7 +153,7 @@ class ReadFileTool(BaseTool):
 
 class WriteFileTool(BaseTool):
     """
-    Create or overwrite files with text content.
+    Create or overwrite files with text content in the isolated working directory.
     
     Use for: Config files, scripts, data files
     Note: For executable scripts, use run_command to chmod +x after writing
@@ -155,7 +165,7 @@ class WriteFileTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Create or overwrite a file with content"
+        return f"Create or overwrite a file with content in the isolated working directory ({WORKING_DIR_PREFIX})"
 
     @property
     def schema(self) -> Dict[str, Any]:
@@ -163,13 +173,13 @@ class WriteFileTool(BaseTool):
             "type": "function",
             "function": {
                 "name": "write_file",
-                "description": "Create or overwrite a file with content",
+                "description": f"Create or overwrite a file with content. File path is relative to the isolated working directory ({WORKING_DIR_PREFIX})",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "file_path": {
                             "type": "string",
-                            "description": "The path to the file to create or overwrite"
+                            "description": f"The path to the file to create or overwrite, relative to the isolated working directory ({WORKING_DIR_PREFIX})"
                         },
                         "content": {
                             "type": "string",
@@ -184,27 +194,33 @@ class WriteFileTool(BaseTool):
     @property
     def usage_examples(self) -> List[str]:
         return [
-            "write_file('/home/user/script.sh', '#!/bin/bash\\necho Hello')",
-            "write_file('./config/settings.json', '{\"debug\": true}')",
+            "write_file('script.sh', '#!/bin/bash\\necho Hello')",
+            "write_file('config/settings.json', '{\"debug\": true}')",
             "write_file('output/results.txt', 'Analysis complete\\nTotal: 100')"
         ]
 
     def execute(self, file_path: str, content: str) -> str:
         """
-        Write content to file, creating parent directories if needed.
+        Write content to file in isolated working directory, creating parent directories if needed.
         
         Security: No path traversal checks - agent should validate paths
         """
+        # Prepend working directory prefix to isolate file operations
+        isolated_path = os.path.join(WORKING_DIR_PREFIX, file_path)
+        
         try:
+            # Ensure base working directory exists
+            os.makedirs(WORKING_DIR_PREFIX, exist_ok=True)
+            
             # Create parent directories if needed
-            dirpath = os.path.dirname(file_path)
+            dirpath = os.path.dirname(isolated_path)
             if dirpath:
                 os.makedirs(dirpath, exist_ok=True)
             
-            with open(file_path, 'w', encoding='utf-8') as f:
+            with open(isolated_path, 'w', encoding='utf-8') as f:
                 f.write(content)
             
-            return f"File written successfully: {file_path}"
+            return f"File written successfully: {isolated_path}"
         except Exception as e:
             return f"Error writing file: {str(e)}"
 
