@@ -1,41 +1,91 @@
+"""
+AI Terminal Tool Registry
+
+Provides shell-first tools for the AI agent to interact with the system.
+Philosophy: Prefer shell commands (run_command) over Python for most tasks.
+Use Python sandbox only for visualization, ML, or explicit Python requirements.
+"""
+
 from abc import ABC, abstractmethod
 import os
 import subprocess
 import sys
 import shlex
-import urllib.request
-import urllib.parse
+import shutil
 import json
 import inspect
 from typing import Dict, Any, List, Optional
 from shell_integration import ShellIntegration
 
+
+# ============================================================================
+# Base Tool Interface
+# ============================================================================
+
 class BaseTool(ABC):
+    """
+    Abstract base class for all tools available to the AI agent.
+    
+    Each tool must implement:
+    - name: Unique identifier for the tool
+    - description: Brief description of what the tool does
+    - schema: JSON schema for tool parameters
+    - execute: Method that performs the tool's action
+    """
+    
     @property
     @abstractmethod
     def name(self) -> str:
+        """Unique tool identifier"""
         pass
 
     @property
     @abstractmethod
     def description(self) -> str:
+        """Brief description of tool purpose"""
         pass
 
     @property
     @abstractmethod
     def schema(self) -> Dict[str, Any]:
+        """JSON schema defining tool parameters for LLM"""
         pass
 
     @property
     def usage_examples(self) -> Optional[List[str]]:
-        """Usage examples for this tool. Override in subclasses to provide examples."""
+        """
+        Optional usage examples for this tool.
+        Override in subclasses to provide common patterns.
+        """
         return None
 
     @abstractmethod
     def execute(self, **kwargs) -> str:
+        """
+        Execute the tool's action.
+        
+        Returns:
+            String result to be passed back to the LLM
+        """
         pass
 
+
+# ============================================================================
+# File Operations Tools
+# ============================================================================
+
 class ReadFileTool(BaseTool):
+    """
+    Read file contents into memory.
+    
+    Use for: Small to medium text files (< 5MB)
+    Don't use for: Large files, binary files, or when you only need portions
+    Alternative: Use run_command with head/tail/grep for large files
+    """
+    
+    # Maximum file size to read (5MB default, configurable via env)
+    MAX_BYTES = int(os.getenv("READ_FILE_MAX_BYTES", str(5 * 1024 * 1024)))
+    
     @property
     def name(self) -> str:
         return "read_file"
@@ -65,13 +115,40 @@ class ReadFileTool(BaseTool):
         }
 
     def execute(self, file_path: str) -> str:
+        """
+        Read and return file contents.
+        
+        Guards:
+        - File size limit to avoid memory exhaustion
+        - UTF-8 encoding required (text files only)
+        """
         try:
+            # Check file size before reading
+            size = os.path.getsize(file_path)
+            if size > self.MAX_BYTES:
+                return (
+                    f"File is {size} bytes; exceeds READ_FILE_MAX_BYTES={self.MAX_BYTES}. "
+                    f"Use run_command with head/tail/less for large files."
+                )
+            
             with open(file_path, 'r', encoding='utf-8') as f:
                 return f.read()
+        except FileNotFoundError:
+            return f"Error: File not found: {file_path}"
+        except UnicodeDecodeError:
+            return f"Error: File is not valid UTF-8 text. Use run_command with cat/hexdump for binary files."
         except Exception as e:
             return f"Error reading file: {str(e)}"
 
+
 class WriteFileTool(BaseTool):
+    """
+    Create or overwrite files with text content.
+    
+    Use for: Config files, scripts, data files
+    Note: For executable scripts, use run_command to chmod +x after writing
+    """
+    
     @property
     def name(self) -> str:
         return "write_file"
@@ -106,7 +183,6 @@ class WriteFileTool(BaseTool):
     
     @property
     def usage_examples(self) -> List[str]:
-        """Common file writing patterns"""
         return [
             "write_file('/home/user/script.sh', '#!/bin/bash\\necho Hello')",
             "write_file('./config/settings.json', '{\"debug\": true}')",
@@ -114,17 +190,42 @@ class WriteFileTool(BaseTool):
         ]
 
     def execute(self, file_path: str, content: str) -> str:
+        """
+        Write content to file, creating parent directories if needed.
+        
+        Security: No path traversal checks - agent should validate paths
+        """
         try:
+            # Create parent directories if needed
             dirpath = os.path.dirname(file_path)
-            if dirpath:  # Only create dirs if path contains directory component
+            if dirpath:
                 os.makedirs(dirpath, exist_ok=True)
+            
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(content)
+            
             return f"File written successfully: {file_path}"
         except Exception as e:
             return f"Error writing file: {str(e)}"
 
+
+# ============================================================================
+# Shell Command Execution Tools
+# ============================================================================
+
 class RunCommandTool(BaseTool):
+    """
+    Execute non-interactive shell commands.
+    
+    Use for: File operations, text processing, system queries, shell pipelines
+    Don't use for: Interactive programs (vim, top), sudo commands, Python REPL
+    
+    Guards:
+    - Blocks interactive commands → redirect to run_interactive
+    - Blocks sudo/doas → redirect to run_sudo_command  
+    - Blocks package managers without --noconfirm → requires explicit confirmation bypass
+    """
+    
     def __init__(self, shell: 'ShellIntegration' = None):
         self.shell = shell or ShellIntegration()
 
@@ -158,7 +259,6 @@ class RunCommandTool(BaseTool):
     
     @property
     def usage_examples(self) -> List[str]:
-        """Common shell command patterns"""
         return [
             "ls -la /home/user/projects",
             "grep -r 'TODO' ./src",
@@ -168,164 +268,132 @@ class RunCommandTool(BaseTool):
         ]
 
     def execute(self, command: str) -> str:
+        """
+        Execute shell command with safety guards.
+        
+        Protection layers:
+        1. Sudo detection → redirect to run_sudo_command
+        2. Package manager confirmation → enforce --noconfirm
+        3. Interactive command detection → redirect to run_interactive
+        4. Smart bypass for safe flags (--version, --help, -c for interpreters)
+        """
         try:
-            # Guard against interactive commands to prevent timeouts
+            # Parse command tokens
             tokens = shlex.split(command) if command.strip() else []
             if not tokens:
                 return "Error: Empty command"
             
-            # Extract command names (skip flags starting with -)
-            cmd_names = [os.path.basename(t) for t in tokens if not t.startswith('-')]
+            # Control operators that delimit simple commands in a pipeline
+            CONTROL_OPS = {'|', '||', '&&', ';'}
             
-            # Guard 1: Check for sudo/doas - redirect to run_sudo_command
-            if cmd_names and cmd_names[0] in ('sudo', 'doas'):
-                return "Error: This command uses sudo. Use run_sudo_command tool to handle password prompts safely."
+            # Extract first simple command (before any pipe/control operator)
+            first_cmd_tokens = []
+            for t in tokens:
+                if t in CONTROL_OPS:
+                    break
+                first_cmd_tokens.append(t)
             
-            # Guard 2: Check for package managers that may require confirmation and/or sudo
-            if cmd_names:
-                base_cmd = cmd_names[0]
-                if base_cmd in {'yay', 'pacman'}:
-                    # Check if this is a privileged operation (S/U/R flags)
-                    flags = [t for t in tokens if t.startswith('-')]
+            if not first_cmd_tokens:
+                return "Error: Empty command"
+            
+            # Identify the actual command being executed
+            base = first_cmd_tokens[0]
+            base_name = os.path.basename(base)
+            
+            # Handle sudo/doas prefix
+            if base_name in ('sudo', 'doas'):
+                if len(first_cmd_tokens) < 2:
+                    return "Error: sudo/doas used without a target command."
+                target_name = os.path.basename(first_cmd_tokens[1])
+            else:
+                target_name = base_name
+            
+            # ----------------------------------------------------------------
+            # GUARD 1: Redirect sudo/doas to run_sudo_command
+            # ----------------------------------------------------------------
+            if base_name in ('sudo', 'doas'):
+                return (
+                    "Error: This command uses sudo. "
+                    "Use run_sudo_command tool to handle password prompts safely."
+                )
+            
+            # ----------------------------------------------------------------
+            # GUARD 2: Package manager operations require confirmation bypass
+            # ----------------------------------------------------------------
+            if target_name in {'yay', 'pacman', 'apt', 'apt-get', 'dnf', 'yum', 'zypper', 'apk'}:
+                flags = [t for t in first_cmd_tokens[1:] if t.startswith('-')]
+                
+                # Arch-based package managers
+                if target_name in {'pacman', 'yay'}:
+                    # Check for system-modifying operations: -S (sync/install), -R (remove), -U (upgrade)
                     has_privileged_operation = any(
                         any(c in flag for c in ['S', 'R', 'U']) 
                         for flag in flags
                     )
-                    
-                    if has_privileged_operation:
-                        # These operations require sudo - enforce it
+                    if has_privileged_operation and '--noconfirm' not in tokens:
                         return (
-                            f"Error: Package manager command '{base_cmd}' with install/update/remove operations requires root privileges. "
-                            f"Use run_sudo_command tool with --noconfirm flag. "
-                            f"Example: run_sudo_command('{command} --noconfirm', password='your_password')"
+                            f"Error: Package manager '{target_name}' requires root privileges and confirmation. "
+                            f"Use run_sudo_command with --noconfirm flag. "
+                            f"Example: run_sudo_command('{command} --noconfirm', password='...')"
                         )
-            
-            # Guard 3: Check if any command name is interactive
-            is_interactive = False
-            interactive_cmd = None
-            
-            if cmd_names:
-                # Check first command
-                if cmd_names[0] in InteractiveCommandTool.INTERACTIVE_COMMANDS:
-                    is_interactive = True
-                    interactive_cmd = cmd_names[0]
-                # Check sudo/doas followed by interactive command (shouldn't reach here due to Guard 1)
-                elif cmd_names[0] in ('sudo', 'doas') and len(cmd_names) > 1:
-                    if cmd_names[1] in InteractiveCommandTool.INTERACTIVE_COMMANDS:
-                        is_interactive = True
-                        interactive_cmd = cmd_names[1]
-                # Check for interactive command anywhere (catches /usr/bin/vim, etc.)
+                
+                # Other package managers (apt, dnf, yum, zypper, apk)
                 else:
-                    for name in cmd_names:
-                        if name in InteractiveCommandTool.INTERACTIVE_COMMANDS:
-                            is_interactive = True
-                            interactive_cmd = name
-                            break
+                    return (
+                        f"Error: Package manager '{target_name}' likely requires root privileges. "
+                        f"Use run_sudo_command with appropriate non-interactive flags (e.g., -y for apt/dnf)."
+                    )
             
-            if is_interactive:
-                # Smart guard: allow non-interactive usage patterns
+            # ----------------------------------------------------------------
+            # GUARD 3: Interactive command detection with smart bypass
+            # ----------------------------------------------------------------
+            cmd_is_interactive = target_name in InteractiveCommandTool.INTERACTIVE_COMMANDS
+            
+            if cmd_is_interactive:
+                # Safe flags that allow non-interactive usage
                 SAFE_GLOBAL_FLAGS = {'--version', '-V', '--help', '-h'}
                 INTERPRETERS = {'python', 'python3', 'node', 'ruby', 'bash', 'sh', 'zsh'}
                 
-                # Check for universal safe flags
-                safe_global = any(flag in SAFE_GLOBAL_FLAGS for flag in tokens)
+                # Check for universal safe flags (version/help)
+                safe_global = any(flag in SAFE_GLOBAL_FLAGS for flag in first_cmd_tokens)
                 
-                # Check for interpreter safe modes
+                # Check for interpreter safe modes (script execution)
                 interpreter_safe = False
-                if interactive_cmd in INTERPRETERS:
-                    # Check for script execution flags
+                if target_name in INTERPRETERS:
+                    # Flags that execute code without REPL: -c, -m, -e
                     script_flags = {'-c', '-m', '-e'}
-                    if any(flag in script_flags for flag in tokens):
+                    if any(flag in script_flags for flag in first_cmd_tokens):
                         interpreter_safe = True
-                    # Check for script file argument (heuristic: command + arguments > 1)
-                    elif len(cmd_names) > 1:
+                    # Heuristic: if there are additional args, likely executing a script
+                    elif len(first_cmd_tokens) > 1:
                         interpreter_safe = True
                 
-                # Bypass guard if safe pattern detected
+                # Bypass interactive guard if safe pattern detected
                 if safe_global or interpreter_safe:
                     return self.shell.run_command(command)
                 
-                return f"Error: '{interactive_cmd}' is an interactive command. Use run_interactive tool instead to avoid timeout."
+                # Block interactive usage
+                return (
+                    f"Error: '{target_name}' is an interactive command. "
+                    f"Use run_interactive tool to avoid timeout."
+                )
             
+            # Execute command via shell integration
             return self.shell.run_command(command)
+            
         except Exception as e:
             return f"Error executing command: {str(e)}"
 
-class ChatTool(BaseTool):
-    # Deprecated: Assistants should respond directly without tools for conversation
-    AUTO_REGISTER = False
-    
-    @property
-    def name(self) -> str:
-        return "chat"
-
-    @property
-    def description(self) -> str:
-        return "Provide a conversational response"
-
-    @property
-    def schema(self) -> Dict[str, Any]:
-        return {
-            "type": "function",
-            "function": {
-                "name": "chat",
-                "description": "Provide a conversational response",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "message": {
-                            "type": "string",
-                            "description": "The conversational message"
-                        }
-                    },
-                    "required": ["message"]
-                }
-            }
-        }
-
-    def execute(self, message: str) -> str:
-        return message  # For now, just echo; in agent, this will be handled by AI
-
-class ContentProcessingTool(BaseTool):
-    @property
-    def name(self) -> str:
-        return "process_content"
-
-    @property
-    def description(self) -> str:
-        return "Analyze and process text content"
-
-    @property
-    def schema(self) -> Dict[str, Any]:
-        return {
-            "type": "function",
-            "function": {
-                "name": "process_content",
-                "description": "Analyze and process text content",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "content": {
-                            "type": "string",
-                            "description": "The text content to process"
-                        },
-                        "task": {
-                            "type": "string",
-                            "description": "The processing task (e.g., summarize, analyze)"
-                        }
-                    },
-                    "required": ["content", "task"]
-                }
-            }
-        }
-
-    def execute(self, content: str, task: str) -> str:
-        # Placeholder; in practice, this might call AI or simple processing
-        if task.lower() == "summarize":
-            return f"Summary: {content[:100]}..."  # Simple truncation for now
-        return f"Processed content for task '{task}': {content}"
 
 class SudoRunCommandTool(BaseTool):
+    """
+    Execute commands with sudo privileges.
+    
+    Use for: System administration tasks requiring root
+    Handles: Password prompts, passwordless sudo
+    Guard: Package managers must include --noconfirm to avoid interactive prompts
+    """
+    
     def __init__(self, shell: 'ShellIntegration' = None):
         self.shell = shell or ShellIntegration()
     
@@ -367,20 +435,25 @@ class SudoRunCommandTool(BaseTool):
         }
     
     def execute(self, command: str, password: str = None, timeout: int = 60) -> str:
+        """
+        Execute command with sudo, enforcing non-interactive package manager usage.
+        
+        Security: Password is never logged or persisted
+        """
         try:
-            # Parse command to check for package manager operations
+            # Parse command to detect package managers
             tokens = shlex.split(command) if command.strip() else []
             if not tokens:
                 return "Error: Empty command"
             
             cmd_names = [os.path.basename(t) for t in tokens if not t.startswith('-')]
             
-            # Guard: Check for package managers that may require confirmation
+            # Enforce --noconfirm for package managers to avoid hanging on prompts
             if cmd_names:
                 base_cmd = cmd_names[0]
                 if base_cmd in {'yay', 'pacman'}:
-                    # Check if this is a prompt-prone operation (S/U/R flags)
                     flags = [t for t in tokens if t.startswith('-')]
+                    # Check for operations that modify system state
                     has_prompt_operation = any(
                         any(c in flag for c in ['S', 'R', 'U']) 
                         for flag in flags
@@ -388,17 +461,28 @@ class SudoRunCommandTool(BaseTool):
                     
                     if has_prompt_operation and '--noconfirm' not in tokens:
                         return (
-                            f"Error: Package manager command '{base_cmd}' may prompt for confirmation. "
-                            f"Add --noconfirm to the command to run non-interactively. "
+                            f"Error: Package manager '{base_cmd}' may prompt for confirmation. "
+                            f"Add --noconfirm to run non-interactively. "
                             f"Example: '{command} --noconfirm'"
                         )
             
+            # Execute via shell integration
             return self.shell.run_sudo_command(command, password, timeout)
+            
         except Exception as e:
             return f"Error executing sudo command: {str(e)}"
 
+
 class InteractiveCommandTool(BaseTool):
-    # List of known interactive commands that require TTY
+    """
+    Execute interactive programs that require TTY (terminal control).
+    
+    Use for: Text editors (vim, nano), TUI programs (top, htop), interactive shells
+    Requires: TTY-enabled environment (won't work in background/cron jobs)
+    Note: Agent cannot interact with the program - user controls it directly
+    """
+    
+    # Commands known to require full terminal control
     INTERACTIVE_COMMANDS = {
         'vim', 'vi', 'nano', 'emacs', 'less', 'more', 'top', 'htop', 
         'man', 'ssh', 'mysql', 'psql', 'mongo', 'python', 'python3',
@@ -435,7 +519,6 @@ class InteractiveCommandTool(BaseTool):
     
     @property
     def usage_examples(self) -> List[str]:
-        """Common interactive command patterns"""
         return [
             "vim /etc/hosts",
             "nano ~/.bashrc",
@@ -444,8 +527,16 @@ class InteractiveCommandTool(BaseTool):
         ]
     
     def execute(self, command: str) -> str:
+        """
+        Pass full terminal control to the command.
+        
+        Limitations:
+        - Requires TTY (fails in non-interactive contexts)
+        - Agent cannot see or control the program
+        - User must interact directly
+        """
         try:
-            # Verify TTY is available for interactive commands
+            # Verify TTY availability
             if not sys.stdin.isatty() or not sys.stdout.isatty():
                 return "Interactive commands require a TTY; cannot run in non-interactive environment."
             
@@ -458,108 +549,44 @@ class InteractiveCommandTool(BaseTool):
                 stderr=sys.stderr
             )
             
+            # Report exit status
             if result.returncode == 0:
                 return f"Interactive command '{command}' completed successfully."
             else:
                 return f"Interactive command '{command}' exited with code {result.returncode}."
+                
         except KeyboardInterrupt:
             return f"Interactive command '{command}' was interrupted by user."
         except Exception as e:
             return f"Error executing interactive command: {str(e)}"
 
-class WikipediaSearchTool(BaseTool):
-    @property
-    def name(self) -> str:
-        return "wikipedia_search"
-    
-    @property
-    def description(self) -> str:
-        return "Search Wikipedia for general knowledge, definitions, or external information"
-    
-    @property
-    def schema(self) -> Dict[str, Any]:
-        return {
-            "type": "function",
-            "function": {
-                "name": "wikipedia_search",
-                "description": "Search Wikipedia for general knowledge, definitions, or external information",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "The search query or topic to look up on Wikipedia"
-                        },
-                        "sentences": {
-                            "type": "integer",
-                            "description": "Number of sentences to return (default: 3)",
-                            "default": 3
-                        }
-                    },
-                    "required": ["query"]
-                }
-            }
-        }
-    
-    def execute(self, query: str, sentences: int = 3) -> str:
-        try:
-            # Create a request with User-Agent header (Wikipedia requires it)
-            headers = {
-                'User-Agent': 'AI-Terminal/1.0 (https://github.com/frquintero/ai-terminal) Python-urllib'
-            }
-            
-            # Step 1: Search for the page title
-            search_url = f"https://en.wikipedia.org/w/api.php?action=query&format=json&list=search&srsearch={urllib.parse.quote(query)}&srlimit=1"
-            
-            request = urllib.request.Request(search_url, headers=headers)
-            with urllib.request.urlopen(request, timeout=10) as response:
-                search_data = json.loads(response.read().decode())
-            
-            # Check if we got any results
-            if not search_data.get('query', {}).get('search'):
-                return f"No Wikipedia results found for '{query}'"
-            
-            # Get the first search result's title
-            page_title = search_data['query']['search'][0]['title']
-            
-            # Step 2: Fetch the page extract
-            extract_url = f"https://en.wikipedia.org/w/api.php?action=query&format=json&prop=extracts&exintro=1&explaintext=1&titles={urllib.parse.quote(page_title)}"
-            
-            request = urllib.request.Request(extract_url, headers=headers)
-            with urllib.request.urlopen(request, timeout=10) as response:
-                extract_data = json.loads(response.read().decode())
-            
-            # Extract the content
-            pages = extract_data.get('query', {}).get('pages', {})
-            if not pages:
-                return f"Could not retrieve content for '{page_title}'"
-            
-            page = list(pages.values())[0]
-            extract = page.get('extract', '')
-            
-            if not extract:
-                return f"No content available for '{page_title}'"
-            
-            # Split into sentences and take the requested number
-            # Simple sentence splitting (could be improved)
-            sentence_list = extract.replace('.\n', '. ').split('. ')
-            result_sentences = sentence_list[:sentences]
-            result_text = '. '.join(result_sentences)
-            
-            # Ensure it ends with a period
-            if not result_text.endswith('.'):
-                result_text += '.'
-            
-            return f"Wikipedia - {page_title}:\n\n{result_text}"
-            
-        except urllib.error.URLError as e:
-            return f"Network error accessing Wikipedia: {str(e)}"
-        except json.JSONDecodeError as e:
-            return f"Error parsing Wikipedia response: {str(e)}"
-        except Exception as e:
-            return f"Error searching Wikipedia: {str(e)}"
+
+# ============================================================================
+# Python Sandbox Tool
+# ============================================================================
 
 class RunPythonSandboxTool(BaseTool):
+    """
+    Execute Python code in an isolated, resource-limited sandbox.
+    
+    Use ONLY for:
+    - Data visualization/plotting (matplotlib, seaborn)
+    - Complex algorithms, ML, scientific computing (numpy, scipy, sklearn)
+    - API calls or database operations requiring Python libraries
+    - Explicit Python library usage (pandas, requests, etc.)
+    
+    DON'T use for:
+    - File operations (use run_command with cat/grep/sed/awk)
+    - Text processing (use run_command with shell pipelines)
+    - System queries (use run_command)
+    
+    Features:
+    - Resource limits (CPU, memory, file size)
+    - Auto-capture matplotlib plots to artifacts
+    - Project file access via SANDBOX_PROJECT env var
+    - Optional network isolation
+    """
+    
     @property
     def name(self) -> str:
         return "run_python_sandbox"
@@ -602,7 +629,7 @@ class RunPythonSandboxTool(BaseTool):
     
     @property
     def usage_examples(self) -> List[str]:
-        """Critical usage examples for sandbox file I/O patterns"""
+        """Critical patterns for sandbox file I/O"""
         return [
             """# Reading project CSV files
 import os
@@ -628,9 +655,23 @@ with open(os.path.join(project_dir, 'output.txt'), 'w') as f:
         ]
     
     def execute(self, code: str = None, file_path: str = None, timeout: int = None, return_artifacts: bool = True) -> str:
-        import tempfile
+        """
+        Execute Python code in sandboxed environment.
+        
+        Sandbox protections:
+        - CPU time limit (SANDBOX_MAX_CPU_SEC, default 20s)
+        - Memory limit (SANDBOX_MAX_MEM_MB, default 1024MB)
+        - File size limit (SANDBOX_MAX_FSIZE_MB, default 50MB)
+        - Optional network isolation (SANDBOX_DISABLE_NETWORK=1)
+        - Optional project write protection (SANDBOX_ALLOW_PROJECT_WRITES=0)
+        
+        Environment:
+        - SANDBOX_PROJECT: Path to project directory for file access
+        - Matplotlib configured for non-interactive backend
+        - Plots automatically saved to artifacts/
+        """
         import uuid
-        import shutil
+        import shutil as _shutil
         import textwrap
         import signal
         from pathlib import Path
@@ -642,13 +683,13 @@ with open(os.path.join(project_dir, 'output.txt'), 'w') as f:
         # Optional POSIX resource limits
         try:
             import resource
-        except Exception:
+        except ImportError:
             resource = None
         
         # Capture original working directory for project file access
         original_cwd = Path(os.getcwd()).resolve()
         
-        # Setup run directory
+        # Setup isolated run directory
         base = os.getenv("SANDBOX_PATH", "./sandbox_runs")
         run_id = str(uuid.uuid4())
         run_dir = (Path(base) / "runs" / run_id).resolve()
@@ -668,30 +709,27 @@ with open(os.path.join(project_dir, 'output.txt'), 'w') as f:
             # Symlink not supported (e.g., Windows without privileges)
             project_mount = original_cwd
         
-        # Prepare code
+        # Prepare script
         try:
             if file_path:
                 src = Path(file_path)
                 if not src.exists():
                     return f"Error: file not found: {file_path}"
                 script_path = run_dir / src.name
-                shutil.copy2(src, script_path)
+                _shutil.copy2(src, script_path)
             else:
                 script_path = run_dir / "script.py"
                 script_path.write_text(code or "", encoding='utf-8')
         except Exception as e:
             return f"Error preparing script: {str(e)}"
         
-        # Inject plotting/network prologue + epilogue
+        # ----------------------------------------------------------------
+        # Inject sandbox prologue and epilogue
+        # ----------------------------------------------------------------
+        
         disable_net = os.getenv("SANDBOX_DISABLE_NETWORK", "0") in ("1", "true", "yes")
         
-        # Expose project directory via environment variable
-        project_guard = """
-# Expose project directory for convenient access
-PROJECT_DIR = os.environ.get("SANDBOX_PROJECT")
-"""
-        
-        # Write protection for project directory (always inject, check happens at runtime)
+        # Write protection for project directory
         write_protection = """
 # Write protection for project directory
 _allow_writes = os.environ.get("SANDBOX_ALLOW_PROJECT_WRITES", "1") in ("1", "true", "yes")
@@ -708,7 +746,7 @@ if not _allow_writes:
                 if real_path.startswith(_real_project + os.sep) or real_path == _real_project:
                     raise PermissionError(f"Write access to project directory is disabled (SANDBOX_ALLOW_PROJECT_WRITES=0): {file}")
             except PermissionError:
-                raise  # Re-raise PermissionError, don't catch it!
+                raise  # Re-raise PermissionError
             except (OSError, ValueError):
                 pass  # Only catch path resolution errors
         return _original_open(file, mode, *args, **kwargs)
@@ -721,7 +759,7 @@ if not _allow_writes:
 import os
 import sys
 {write_protection}
-# plotting safe mode (optional - only if matplotlib is available)
+# Matplotlib: configure non-interactive backend
 try:
     import matplotlib
     matplotlib.use("Agg")
@@ -729,12 +767,11 @@ try:
     def _no_show(*args, **kwargs): pass
     plt.show = _no_show
 except ImportError:
-    pass  # matplotlib not available, skip plotting setup
-# optional network disable
+    pass  # matplotlib not available
+# Optional network isolation
 {disable_net}
-{project_guard}
 """.format(
-    disable_net=textwrap.dedent("""
+            disable_net=textwrap.dedent("""
 try:
     import socket
     class _BlockedSocket(socket.socket):
@@ -743,13 +780,12 @@ try:
     socket.create_connection = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("Network disabled"))
 except Exception: pass
 """) if disable_net else "",
-    project_guard=project_guard,
-    write_protection=write_protection
-)
+            write_protection=write_protection
+        )
 
-        # Use relative path for epilogue since we run with cwd=run_dir
+        # Auto-save matplotlib figures to artifacts
         epilogue = """
-# auto-save figures (if matplotlib is available)
+# Auto-save matplotlib figures
 try:
     import matplotlib.pyplot as _plt
     import os
@@ -764,19 +800,22 @@ except Exception as _e:
     print(f"[sandbox] plot save error: {_e}", file=sys.stderr)
 """
 
-        # Rebuild script with wrappers
+        # Inject prologue and epilogue into script
         try:
             original = script_path.read_text(encoding='utf-8')
             script_path.write_text(prologue + "\n" + original + "\n" + epilogue, encoding='utf-8')
         except Exception as e:
             return f"Error injecting sandbox wrappers: {str(e)}"
         
+        # ----------------------------------------------------------------
+        # Configure execution environment
+        # ----------------------------------------------------------------
+        
         # Python binary
         py = os.getenv("SANDBOX_PYTHON") or sys.executable
-        # Use relative path since we set cwd to run_dir
         args = [py, "-I", "-B", script_path.name]
         
-        # Env
+        # Minimal environment
         env = {
             "PATH": "/usr/bin:/bin",
             "HOME": str(run_dir),
@@ -788,41 +827,45 @@ except Exception as _e:
             "MKL_NUM_THREADS": "1",
             "NUMEXPR_NUM_THREADS": "1",
             "SANDBOX_ORIGINAL_CWD": str(original_cwd),
-            "SANDBOX_PROJECT": str(project_mount),
+            "SANDBOX_PROJECT": str(project_mount),  # Access project files via this path
             "SANDBOX_RUN_DIR": str(run_dir),
             "SANDBOX_ALLOW_PROJECT_WRITES": os.getenv("SANDBOX_ALLOW_PROJECT_WRITES", "1"),
         }
-        # Keep only safe inherited vars
+        # Preserve locale settings
         env.update({k: v for k, v in os.environ.items() if k in ("LC_ALL", "LANG")})
         
-        # Limits
+        # Resource limits (configurable via environment)
         max_cpu = int(os.getenv("SANDBOX_MAX_CPU_SEC", "20"))
         max_mem_mb = int(os.getenv("SANDBOX_MAX_MEM_MB", "1024"))
         max_fsize_mb = int(os.getenv("SANDBOX_MAX_FSIZE_MB", "50"))
         if timeout is None:
             timeout = int(os.getenv("SANDBOX_TIMEOUT", str(max_cpu)))
         
-        def _limit():
-            """Apply resource limits in subprocess (POSIX only)"""
+        def _apply_limits():
+            """Apply POSIX resource limits in subprocess"""
             try:
-                os.setsid()
+                os.setsid()  # Create new process group for clean termination
                 if resource:
+                    # CPU time limit
                     resource.setrlimit(resource.RLIMIT_CPU, (max_cpu, max_cpu))
-                    # Address space or data
+                    # Memory limit
                     if hasattr(resource, "RLIMIT_AS"):
                         resource.setrlimit(resource.RLIMIT_AS, (max_mem_mb * 1024 * 1024, max_mem_mb * 1024 * 1024))
                     elif hasattr(resource, "RLIMIT_DATA"):
                         resource.setrlimit(resource.RLIMIT_DATA, (max_mem_mb * 1024 * 1024, max_mem_mb * 1024 * 1024))
+                    # File size limit
                     resource.setrlimit(resource.RLIMIT_FSIZE, (max_fsize_mb * 1024 * 1024, max_fsize_mb * 1024 * 1024))
+                    # File descriptor limit
                     if hasattr(resource, "RLIMIT_NOFILE"):
                         resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
-                    # Note: RLIMIT_NPROC disabled to allow matplotlib threading for font management
-                    # if hasattr(resource, "RLIMIT_NPROC"):
-                    #     resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))
+                    # Note: RLIMIT_NPROC disabled to allow matplotlib threading
             except Exception:
-                pass
+                pass  # Resource limits not critical
         
-        # Run
+        # ----------------------------------------------------------------
+        # Execute sandboxed code
+        # ----------------------------------------------------------------
+        
         try:
             proc = subprocess.Popen(
                 args,
@@ -831,16 +874,18 @@ except Exception as _e:
                 stderr=subprocess.PIPE,
                 text=True,
                 env=env,
-                preexec_fn=_limit if os.name == "posix" else None
+                preexec_fn=_apply_limits if os.name == "posix" else None
             )
         except Exception as e:
             return f"Error starting sandbox process: {str(e)}"
         
+        # Wait for completion with timeout
         timed_out = False
         try:
             out, err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
+            # Kill process group to clean up any child processes
             try:
                 if os.name == "posix":
                     os.killpg(proc.pid, signal.SIGKILL)
@@ -852,7 +897,10 @@ except Exception as _e:
         except Exception as e:
             return f"Error executing sandbox: {str(e)}"
         
-        # Collect artifacts
+        # ----------------------------------------------------------------
+        # Collect artifacts (plots, exports)
+        # ----------------------------------------------------------------
+        
         artifacts = []
         if return_artifacts and artifacts_dir.exists():
             for p in sorted(artifacts_dir.glob("*")):
@@ -862,6 +910,7 @@ except Exception as _e:
                     except Exception:
                         pass
         
+        # Save execution manifest
         manifest = {
             "run_id": run_id,
             "run_dir": str(run_dir),
@@ -875,13 +924,17 @@ except Exception as _e:
         except Exception:
             pass  # Non-critical
         
-        # Build textual result
+        # ----------------------------------------------------------------
+        # Format result for agent
+        # ----------------------------------------------------------------
+        
         parts = []
         parts.append(f"[python-sandbox] run_id={run_id}")
         parts.append(f"Interpreter: {py}")
         parts.append(f"Project Mount: {project_mount}")
         parts.append(f"Timeout: {timeout}s (timed_out={timed_out})")
         parts.append(f"Exit code: {manifest['exit_code']}")
+        
         if out:
             parts.append("Stdout:\n" + out)
         if err:
@@ -890,12 +943,22 @@ except Exception as _e:
             parts.append("Artifacts:")
             for a in artifacts:
                 parts.append(f"- {a['path']} ({a['size']} bytes)")
+        
         parts.append(f"Manifest: {run_dir / 'manifest.json'}")
+        
         return "\n".join(parts)
 
-# Automatic tool discovery and registration
+
+# ============================================================================
+# Tool Registry - Automatic Discovery
+# ============================================================================
+
 def _iter_tool_classes(module):
-    """Discover all BaseTool subclasses defined in this module"""
+    """
+    Discover all BaseTool subclasses defined in this module.
+    
+    Auto-registers all concrete tool classes unless AUTO_REGISTER=False.
+    """
     for _, obj in inspect.getmembers(module, inspect.isclass):
         # Only classes defined in this file
         if obj.__module__ != module.__name__:
@@ -911,15 +974,26 @@ def _iter_tool_classes(module):
             continue
         yield obj
 
+
 def _instantiate_tool(cls):
-    """Instantiate a tool class with zero-arg constructor"""
+    """
+    Instantiate a tool class.
+    
+    Raises TypeError if class doesn't have a zero-arg constructor.
+    """
     try:
         return cls()
     except TypeError as e:
         raise TypeError(f"Auto-registration requires a no-arg constructor: {cls.__name__}: {e}")
 
+
 def _build_tools():
-    """Build the TOOLS dictionary from discovered tool classes"""
+    """
+    Build the TOOLS dictionary from discovered tool classes.
+    
+    Returns:
+        Dict mapping tool names to tool instances
+    """
     instances = [_instantiate_tool(cls) for cls in _iter_tool_classes(sys.modules[__name__])]
     # Sort by tool name for deterministic order
     instances.sort(key=lambda t: t.name)
@@ -930,8 +1004,15 @@ def _build_tools():
         tools[inst.name] = inst
     return tools
 
-# Tool registry - automatically built from tool classes
+
+# Global tool registry - automatically populated
 TOOLS: Dict[str, BaseTool] = _build_tools()
 
+
 def get_tool_schemas() -> List[Dict[str, Any]]:
+    """
+    Get JSON schemas for all registered tools.
+    
+    Used by the agent to provide tool definitions to the LLM.
+    """
     return [tool.schema for tool in TOOLS.values()]
