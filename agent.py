@@ -210,10 +210,15 @@ OUTPUT JSON (exact keys only; keep concise):
 
 {system_context}
 
-Decision-making:
-- Simple tasks (filtering, text processing, calculations): compose shell pipelines using grep, awk, sed, cut, sort, etc.
-- Complex Python/data analysis or plots: write Python code with write_file (or inline) and run with run_python_sandbox (resource-limited, auto-captures plots to artifacts). Access project files via os.environ['SANDBOX_PROJECT'] (e.g., pd.read_csv(os.path.join(os.environ['SANDBOX_PROJECT'], 'data.csv')))
-- Non-Python commands and simple shell pipelines: use run_command
+Shell-First Philosophy:
+- DEFAULT to run_command for ALL file operations (read, write, append, search), text processing, data extraction, filtering, calculations, and system tasks. Compose shell pipelines using grep, sed, awk, cut, sort, uniq, wc, head, tail, tr, paste, join, etc.
+- Use run_python_sandbox ONLY when:
+  * Task explicitly requires data visualization/plotting (matplotlib, seaborn, etc.)
+  * Complex algorithms, machine learning, or scientific computing (numpy, scipy, scikit-learn)
+  * API calls or database operations requiring Python libraries
+  * User explicitly mentions Python libraries (pandas, requests, etc.)
+  * Task involves Python scripts that use input() or require TTY interaction (NEVER use run_command for these)
+- When using run_python_sandbox: Access project files via os.environ['SANDBOX_PROJECT'] (e.g., pd.read_csv(os.path.join(os.environ['SANDBOX_PROJECT'], 'data.csv')))
 - Interactive tools (vim, nano, less, top, htop, man, ssh, mysql, python REPL): use run_interactive
 - Root privileges: use run_sudo_command (omit 'sudo' prefix)
 - External knowledge: use wikipedia_search for general knowledge, definitions, facts, or information not available in the local file system
