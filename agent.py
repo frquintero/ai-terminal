@@ -48,6 +48,12 @@ class MiniAgent:
         # Tool output collector for deterministic rendering
         self._current_step_tool_outputs = []
         
+        # Store system context for appending to generated prompts
+        self.system_context = system_context
+        
+        # Build tool catalog once per session for self-prompting
+        self.tool_catalog = self._build_tool_catalog()
+        
         # Build system prompt with available tools
         system_prompt = self._build_system_prompt(system_context)
         self.message_history = [{"role": "system", "content": system_prompt}]
@@ -55,6 +61,158 @@ class MiniAgent:
     def _clear_secrets(self):
         """Clear all secrets from memory"""
         self.secrets.clear()
+    
+    def _build_tool_catalog(self) -> dict:
+        """Build tool catalog with examples for self-prompting"""
+        catalog = []
+        
+        for tool in TOOLS.values():
+            tool_info = {
+                "name": tool.name,
+                "description": tool.description
+            }
+            
+            # Include examples if available
+            if tool.usage_examples:
+                tool_info["examples"] = tool.usage_examples
+            
+            catalog.append(tool_info)
+        
+        return {"tools": catalog}
+    
+    def _strip_think_tags(self, content: str) -> str:
+        """Remove <think>...</think> tags from MiniMax responses"""
+        import re
+        # Remove <think>...</think> blocks (including nested content)
+        cleaned = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
+        return cleaned.strip()
+    
+    def _extract_json_from_response(self, content: str) -> dict:
+        """Extract and parse JSON from response, handling MiniMax <think> tags"""
+        # Strip <think> tags first
+        cleaned = self._strip_think_tags(content)
+        
+        # Try direct parse
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            pass
+        
+        # Try to find first JSON object
+        start = cleaned.find('{')
+        if start == -1:
+            raise ValueError("No JSON object found in response")
+        
+        # Find matching closing brace
+        depth = 0
+        for i, ch in enumerate(cleaned[start:], start=start):
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    json_str = cleaned[start:i+1]
+                    return json.loads(json_str)
+        
+        raise ValueError("Could not extract valid JSON object")
+    
+    def _generate_execution_prompt(self, user_query: str) -> dict:
+        """LLM generates optimal execution prompt for this query"""
+        
+        # Truncate examples if catalog is too large
+        catalog_str = json.dumps(self.tool_catalog, indent=2)
+        if len(catalog_str) > 4000:
+            # Simplified catalog without examples for meta-prompt
+            simple_catalog = {
+                "tools": [
+                    {"name": t.name, "description": t.description}
+                    for t in TOOLS.values()
+                ]
+            }
+            catalog_str = json.dumps(simple_catalog, indent=2)
+        
+        meta_prompt = f"""You are a meta-prompt generator for an AI assistant. Produce a compact JSON that configures the assistant's role, tool choices, and task-specific guidance for the given user query.
+
+USER QUERY:
+{user_query}
+
+TOOL CATALOG (names, descriptions, optional usage examples):
+{catalog_str}
+
+GLOBAL CONVENTIONS AND HEURISTICS (must follow):
+- Do not invent tools or examples. Use only tool names from the catalog exactly as given.
+- If a tool has usage examples in the catalog, you may copy them verbatim (you may trim for brevity). If no examples are available, set "examples": [].
+- Python sandbox file access: always use SANDBOX_PROJECT. Example:
+  import os, pandas as pd
+  base = os.environ["SANDBOX_PROJECT"]
+  df = pd.read_csv(os.path.join(base, "data.csv"))
+- Tool selection:
+  - Simple shell/file ops: run_command
+  - Data analysis/plots or nontrivial Python: run_python_sandbox (resource-limited; plots auto-captured)
+  - Interactive sessions: run_interactive
+  - Root tasks: run_sudo_command (omit "sudo" in the command; password handled separately)
+  - External general knowledge: wikipedia_search
+- Cost/efficiency: prefer a single simple tool call when sufficient. Do not use tools for pure conversation.
+- If the catalog appears truncated or lacks examples, treat examples as unavailable.
+
+YOUR TASK:
+Analyze the user query and output JSON only (no commentary, no markdown). Keep it concise and directly usable by the assistant.
+
+DECISION RULES:
+- Choose one clear role that best fits the task.
+- Pick 0–3 relevant tools; omit irrelevant ones.
+- "system_prompt" should be a crisp instruction for how to approach the task with the chosen tools and conventions (not a paraphrase of the user query).
+- If examples are unavailable, do not fabricate. Put task-specific instructions, inputs/outputs, and key steps in "details" instead.
+
+OUTPUT JSON (exact keys only; keep under ~1200 characters total):
+{{
+  "system_prompt": "Concise instruction the assistant will follow for this query, reflecting the chosen role, tools, and conventions.",
+  "role": "One role/identity best suited to this query (e.g., 'Shell automation expert', 'Data analysis specialist', 'Code reviewer').",
+  "tools": ["Exact tool names from the catalog, 0–3 items."],
+  "examples": ["Only from catalog examples, or [] if none are available or necessary."],
+  "details": "Concrete constraints, inputs/outputs, safety notes, and minimal steps. If examples are unavailable, provide actionable guidance here following the conventions."
+}}"""
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=self.config.model,
+                messages=[
+                    {"role": "system", "content": "Meta-prompt generator. Return only JSON. Exact keys."},
+                    {"role": "user", "content": meta_prompt}
+                ],
+                temperature=0.2,  # Low creativity, focused
+                max_tokens=800,  # Increased for longer meta-prompts
+                response_format={"type": "json_object"}
+            )
+            
+            # Validate response
+            if not response or not response.choices or not response.choices[0].message.content:
+                raise ValueError("Empty or invalid response from API")
+            
+            content = response.choices[0].message.content
+            
+            # Log raw response for debugging
+            self._log("PROMPT_GEN_RAW", content[:2000] if len(content) > 2000 else content)
+            
+            # Extract JSON, handling <think> tags
+            result = self._extract_json_from_response(content)
+            
+            if "system_prompt" not in result:
+                raise ValueError("Response missing 'system_prompt' field")
+            
+            self._log("GENERATED_PROMPT", json.dumps(result))
+            return result  # Return full dictionary with all fields
+            
+        except Exception as e:
+            # Fallback to minimal prompt
+            self._log("PROMPT_GEN_ERROR", str(e))
+            return {
+                "system_prompt": "Shell automation expert and conversational assistant.",
+                "role": "Friendly and helpful assistant",
+                "tools": [],
+                "examples": [],
+                "details": ""
+            }
     
     def _format_tools_for_prompt(self) -> str:
         """Generate a formatted list of available agent tools for the system prompt"""
@@ -283,6 +441,53 @@ Rendering rules:
         
         # Log incoming user query
         self._log("USER_QUERY", user_input)
+        
+        # SELF-PROMPTING: Generate optimal prompt for this query
+        prompt_data = self._generate_execution_prompt(user_input)
+        
+        # Build rich prompt from all fields
+        prompt_parts = []
+        
+        # Role definition
+        if prompt_data.get("role"):
+            prompt_parts.append(f"You are: {prompt_data['role']}")
+        
+        # Core instruction
+        if prompt_data.get("system_prompt"):
+            prompt_parts.append(prompt_data["system_prompt"])
+        
+        # Recommended tools
+        if prompt_data.get("tools") and len(prompt_data["tools"]) > 0:
+            tools_list = ", ".join(prompt_data["tools"])
+            prompt_parts.append(f"\nRelevant tools for this task: {tools_list}")
+        
+        # Usage examples
+        if prompt_data.get("examples") and len(prompt_data["examples"]) > 0:
+            prompt_parts.append("\nKey patterns to follow:")
+            for example in prompt_data["examples"]:
+                prompt_parts.append(f"- {example}")
+        
+        # Additional details
+        if prompt_data.get("details"):
+            prompt_parts.append(f"\nAdditional guidance: {prompt_data['details']}")
+        
+        # Combine all parts
+        custom_prompt = "\n".join(prompt_parts)
+        
+        # Append system context to generated prompt
+        full_prompt = f"{custom_prompt}\n\n{self.system_context}"
+        
+        # Update system message with generated prompt
+        self.message_history[0]["content"] = full_prompt
+        
+        # Log dynamic prompt info
+        self._log("DYNAMIC_PROMPT", json.dumps({
+            "length": len(full_prompt),
+            "query_preview": user_input[:100],
+            "role": prompt_data.get("role", ""),
+            "tools_count": len(prompt_data.get("tools", [])),
+            "examples_count": len(prompt_data.get("examples", []))
+        }))
         
         self.message_history.append({"role": "user", "content": user_input})
         

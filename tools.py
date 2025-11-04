@@ -26,6 +26,11 @@ class BaseTool(ABC):
     def schema(self) -> Dict[str, Any]:
         pass
 
+    @property
+    def usage_examples(self) -> Optional[List[str]]:
+        """Usage examples for this tool. Override in subclasses to provide examples."""
+        return None
+
     @abstractmethod
     def execute(self, **kwargs) -> str:
         pass
@@ -98,6 +103,15 @@ class WriteFileTool(BaseTool):
                 }
             }
         }
+    
+    @property
+    def usage_examples(self) -> List[str]:
+        """Common file writing patterns"""
+        return [
+            "write_file('/home/user/script.sh', '#!/bin/bash\\necho Hello')",
+            "write_file('./config/settings.json', '{\"debug\": true}')",
+            "write_file('output/results.txt', 'Analysis complete\\nTotal: 100')"
+        ]
 
     def execute(self, file_path: str, content: str) -> str:
         try:
@@ -141,6 +155,17 @@ class RunCommandTool(BaseTool):
                 }
             }
         }
+    
+    @property
+    def usage_examples(self) -> List[str]:
+        """Common shell command patterns"""
+        return [
+            "ls -la /home/user/projects",
+            "grep -r 'TODO' ./src",
+            "find . -name '*.py' -type f",
+            "ps aux | grep python",
+            "df -h"
+        ]
 
     def execute(self, command: str) -> str:
         try:
@@ -408,6 +433,16 @@ class InteractiveCommandTool(BaseTool):
             }
         }
     
+    @property
+    def usage_examples(self) -> List[str]:
+        """Common interactive command patterns"""
+        return [
+            "vim /etc/hosts",
+            "nano ~/.bashrc",
+            "top",
+            "htop"
+        ]
+    
     def execute(self, command: str) -> str:
         try:
             # Verify TTY is available for interactive commands
@@ -565,6 +600,33 @@ class RunPythonSandboxTool(BaseTool):
             }
         }
     
+    @property
+    def usage_examples(self) -> List[str]:
+        """Critical usage examples for sandbox file I/O patterns"""
+        return [
+            """# Reading project CSV files
+import os
+import pandas as pd
+project_dir = os.environ['SANDBOX_PROJECT']
+df = pd.read_csv(os.path.join(project_dir, 'data.csv'))
+print(df.head())""",
+            
+            """# Creating plots (automatically saved to artifacts)
+import matplotlib.pyplot as plt
+import numpy as np
+x = np.linspace(0, 10, 100)
+plt.plot(x, np.sin(x))
+plt.title('Sine Wave')
+# Plot automatically saved to artifacts/plot_1.png""",
+            
+            """# Writing results back to project
+import os
+project_dir = os.environ['SANDBOX_PROJECT']
+with open(os.path.join(project_dir, 'output.txt'), 'w') as f:
+    f.write('Analysis results:\\n')
+    f.write('Mean: 42.5\\n')"""
+        ]
+    
     def execute(self, code: str = None, file_path: str = None, timeout: int = None, return_artifacts: bool = True) -> str:
         import tempfile
         import uuid
@@ -629,9 +691,36 @@ class RunPythonSandboxTool(BaseTool):
 PROJECT_DIR = os.environ.get("SANDBOX_PROJECT")
 """
         
+        # Write protection for project directory (always inject, check happens at runtime)
+        write_protection = """
+# Write protection for project directory
+_allow_writes = os.environ.get("SANDBOX_ALLOW_PROJECT_WRITES", "1") in ("1", "true", "yes")
+if not _allow_writes:
+    _original_open = open
+    _project_dir = os.environ.get("SANDBOX_PROJECT", "")
+    _real_project = os.path.realpath(_project_dir) if _project_dir else ""
+    
+    def _protected_open(file, mode='r', *args, **kwargs):
+        # Check if this is a write operation to project directory
+        if _real_project and ('w' in mode or 'a' in mode or 'x' in mode or '+' in mode):
+            try:
+                real_path = os.path.realpath(os.path.abspath(str(file)))
+                if real_path.startswith(_real_project + os.sep) or real_path == _real_project:
+                    raise PermissionError(f"Write access to project directory is disabled (SANDBOX_ALLOW_PROJECT_WRITES=0): {file}")
+            except PermissionError:
+                raise  # Re-raise PermissionError, don't catch it!
+            except (OSError, ValueError):
+                pass  # Only catch path resolution errors
+        return _original_open(file, mode, *args, **kwargs)
+    
+    import builtins
+    builtins.open = _protected_open
+"""
+        
         prologue = """
 import os
 import sys
+{write_protection}
 # plotting safe mode (optional - only if matplotlib is available)
 try:
     import matplotlib
@@ -654,7 +743,8 @@ try:
     socket.create_connection = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("Network disabled"))
 except Exception: pass
 """) if disable_net else "",
-    project_guard=project_guard
+    project_guard=project_guard,
+    write_protection=write_protection
 )
 
         # Use relative path for epilogue since we run with cwd=run_dir
@@ -700,6 +790,7 @@ except Exception as _e:
             "SANDBOX_ORIGINAL_CWD": str(original_cwd),
             "SANDBOX_PROJECT": str(project_mount),
             "SANDBOX_RUN_DIR": str(run_dir),
+            "SANDBOX_ALLOW_PROJECT_WRITES": os.getenv("SANDBOX_ALLOW_PROJECT_WRITES", "1"),
         }
         # Keep only safe inherited vars
         env.update({k: v for k, v in os.environ.items() if k in ("LC_ALL", "LANG")})

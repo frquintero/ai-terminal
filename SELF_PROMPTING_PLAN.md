@@ -448,7 +448,7 @@ def test_fallback_on_error():
 
 | Risk | Mitigation |
 |------|------------|
-| Prompt generation fails | Fallback to base prompt |
+| Prompt generation fails | Work with the team to debug and improve |
 | Generated prompts suboptimal | Logging for analysis, iterative tuning |
 | Performance overhead | <500ms target, async potential |
 | Breaking changes | Comprehensive regression suite |
