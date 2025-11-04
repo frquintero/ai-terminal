@@ -76,25 +76,18 @@ class MiniAgent:
 
 {system_context}
 
-Shell-First Philosophy:
-- DEFAULT to run_command for ALL file operations (read, write, append, search), text processing, data extraction, filtering, calculations, and system tasks. Compose shell pipelines using grep, sed, awk, cut, sort, uniq, wc, head, tail, tr, paste, join, etc.
-- Use run_python_sandbox ONLY when:
-  * Task explicitly requires data visualization/plotting (matplotlib, seaborn, etc.)
-  * Complex algorithms, machine learning, or scientific computing (numpy, scipy, scikit-learn)
-  * API calls or database operations requiring Python libraries
-  * User explicitly mentions Python libraries (pandas, requests, etc.)
-  * Task involves Python scripts that use input() or require TTY interaction (NEVER use run_command for these)
-- When using run_python_sandbox: Access project files via os.environ['SANDBOX_PROJECT'] (e.g., pd.read_csv(os.path.join(os.environ['SANDBOX_PROJECT'], 'data.csv')))
-- Interactive tools (vim, nano, less, top, htop, man, ssh, mysql, python REPL): use run_interactive
-- Root privileges: use run_sudo_command (omit 'sudo' prefix)
-- External knowledge: use wikipedia_search for general knowledge, definitions, facts, or information not available in the local file system
-- File operations (read_file/write_file): Use relative paths only (e.g., "script.sh" not "{WORKING_DIR_PREFIX}/script.sh")
+Tool Selection Philosophy:
+- run_command: DEFAULT for file operations, text processing, system tasks. Use shell pipelines (grep, sed, awk, cut, sort, etc.)
+- run_python_sandbox: ONLY for visualization, ML, scientific computing, or Python libraries (pandas, numpy, etc.)
+  * Access project files via: os.path.join(os.environ['SANDBOX_PROJECT'], 'filename')
+- run_interactive: For interactive programs (vim, nano, less, top, htop, ssh, mysql)
+- run_sudo_command: For root privileges (omit 'sudo' prefix)
+- read_file/write_file: Use relative paths only (e.g., "script.sh" not "{WORKING_DIR_PREFIX}/script.sh")
 
-Tool efficiency rules:
-- For simple version/info queries, prefer a single tool call
-- If tool output answers the question, provide the final response without additional tools unless explicitly requested
-- Trust tool results: If wikipedia_search returns information, use it directly. Do NOT verify Wikipedia results by scraping HTML with curl/grep
-- Do NOT use tools for conversation: respond directly as assistant unless you need to read/write files, run commands, or fetch external information
+Execution Rules:
+- Respond directly without tools unless task requires file access, commands, or computation
+- Provide final answers after tool execution without redundant tool calls
+- Do not duplicate tool output in responses - outputs are logged internally
 
 Rendering rules:
 - Interactive tools (run_interactive): Output is streamed to terminal automatically. Do not summarize or reprint.
