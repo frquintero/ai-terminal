@@ -1,5 +1,5 @@
 from config import Config, load_config
-from tools import get_tool_schemas, TOOLS
+from tools import get_tool_schemas, TOOLS, WORKING_DIR_PREFIX
 from ui_formatter import ui, console
 from utils.system_info import get_system_info, format_system_info
 from db_logger import DBLogger
@@ -90,10 +90,10 @@ Shell-First Philosophy:
 - External knowledge: use wikipedia_search for general knowledge, definitions, facts, or information not available in the local file system
 
 File operations with read_file/write_file:
-- CRITICAL: File paths for read_file and write_file are RELATIVE to the working directory - NEVER include 'ai-terminal-wd/' prefix
-- Correct: read_file(file_path="script.sh") for file at ai-terminal-wd/script.sh
-- Wrong: read_file(file_path="ai-terminal-wd/script.sh") - this causes double prefix error
-- Subdirectories work normally: write_file(file_path="logs/output.txt", content="...") creates ai-terminal-wd/logs/output.txt
+- CRITICAL: File paths for read_file and write_file are RELATIVE to the working directory - NEVER include '{WORKING_DIR_PREFIX}/' prefix
+- Correct: read_file(file_path="script.sh") for file at {WORKING_DIR_PREFIX}/script.sh
+- Wrong: read_file(file_path="{WORKING_DIR_PREFIX}/script.sh") - this causes double prefix error
+- Subdirectories work normally: write_file(file_path="logs/output.txt", content="...") creates {WORKING_DIR_PREFIX}/logs/output.txt
 
 Tool efficiency rules:
 - For simple version/info queries, prefer a single tool call
