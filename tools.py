@@ -24,6 +24,11 @@ from shell_integration import ShellIntegration
 
 WORKING_DIR_PREFIX = "ai-terminal-wd"
 
+def _get_working_dir_path() -> str:
+    """Get absolute path to working directory (relative to this script's location)"""
+    tools_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(tools_dir, WORKING_DIR_PREFIX)
+
 
 # ============================================================================
 # Base Tool Interface
@@ -130,7 +135,7 @@ class ReadFileTool(BaseTool):
         - UTF-8 encoding required (text files only)
         """
         # Prepend working directory prefix to isolate file operations
-        isolated_path = os.path.join(WORKING_DIR_PREFIX, file_path)
+        isolated_path = os.path.join(_get_working_dir_path(), file_path)
         
         try:
             # Check file size before reading
@@ -205,12 +210,13 @@ class WriteFileTool(BaseTool):
         
         Security: No path traversal checks - agent should validate paths
         """
-        # Prepend working directory prefix to isolate file operations
-        isolated_path = os.path.join(WORKING_DIR_PREFIX, file_path)
+        # Get absolute working directory path
+        working_dir = _get_working_dir_path()
+        isolated_path = os.path.join(working_dir, file_path)
         
         try:
             # Ensure base working directory exists
-            os.makedirs(WORKING_DIR_PREFIX, exist_ok=True)
+            os.makedirs(working_dir, exist_ok=True)
             
             # Create parent directories if needed
             dirpath = os.path.dirname(isolated_path)
