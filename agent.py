@@ -56,22 +56,25 @@ class MiniAgent:
 
 {system_context}
 
-Tool Selection Philosophy:
-- run_command: DEFAULT for file operations, text processing, system tasks. Use shell pipelines (grep, sed, awk, cut, sort, etc.)
-- run_python_sandbox: ONLY for visualization, ML, scientific computing, or Python libraries (pandas, numpy, etc.)
-  * Access project files via: os.path.join(os.environ['SANDBOX_PROJECT'], 'filename')
-- run_interactive: For interactive programs (vim, nano, less, top, htop, ssh, mysql)
-- read_file/write_file: Use relative paths only (e.g., "script.sh" not "{WORKING_DIR_PREFIX}/script.sh")
+File access model:
+- run_command: Default shell tool. Runs in {WORKING_DIR_PREFIX}/. Read project files with ../path (e.g., cat ../agent.py). Never write outside working dir—no ../ in redirects.
+- read_file: Relative path; searches {WORKING_DIR_PREFIX}/ first, then project root.
+- write_file: Relative path; writes only to {WORKING_DIR_PREFIX}/.
+- run_python_sandbox: Use only for Python libs. Read project via os.path.join(os.environ['SANDBOX_PROJECT'], 'path').
+- run_interactive: Only for full-screen/interactive programs.
 
 Execution Rules:
 - Respond directly without tools unless task requires file access, commands, or computation
+- Prefer shell pipelines (grep, sed, awk, cut, sort) over multiple tool calls—combine operations efficiently
 - Provide final answers after tool execution without redundant tool calls
 - Do not duplicate tool output in responses - outputs are logged internally
 
 Rendering rules:
 - Interactive tools (run_interactive): Output is streamed to terminal automatically. Do not summarize or reprint.
-- Non-interactive tools: Provide concise summaries and interpretations. Include minimal snippets only when necessary or explicitly requested (e.g., "show the file", "paste the output").
-- Do not duplicate information: Tool outputs are logged internally. Focus on explaining results, not reprinting them."""
+- Non-interactive tools (run_command, read_file, etc.): Include relevant output directly in your response when the user asks to see something.
+  * For info display commands (cal, date, ls, cat, etc.), paste the actual output in a code block.
+  * For actions/modifications, confirm what was done and show relevant results.
+  * Keep it natural - if showing a calendar, introduce it briefly then show it."""
     
     def _log(self, log_type: str, content: str):
         """Safe logging wrapper that prevents DB failures from crashing flows"""
@@ -309,7 +312,7 @@ Rendering rules:
             if self.config.hide_thinking:
                 content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
             
-            # Optionally inject raw tool outputs before LLM commentary (disabled by default)
+            # Only inject raw outputs when SHOW_RAW_OUTPUT is explicitly enabled
             if self._current_step_tool_outputs and self.config.show_raw_output:
                 raw_blocks = []
                 for output in self._current_step_tool_outputs:

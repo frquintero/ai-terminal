@@ -262,7 +262,10 @@ class RunCommandTool(BaseTool):
     """
     
     def __init__(self, shell: 'ShellIntegration' = None):
-        self.shell = shell or ShellIntegration()
+        # Initialize shell in the working directory so commands can access files
+        working_dir = _get_working_dir_path()
+        os.makedirs(working_dir, exist_ok=True)
+        self.shell = shell or ShellIntegration(working_dir=working_dir)
 
     @property
     def name(self) -> str:

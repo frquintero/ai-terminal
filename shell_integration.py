@@ -14,7 +14,7 @@ class ShellIntegration:
     - Exit code and PWD tracking
     """
     
-    def __init__(self):
+    def __init__(self, working_dir: str = None):
         # Generate random session tokens to prevent prompt confusion attacks
         self._token = os.urandom(8).hex()
         self.PROMPT = f"__AI_{self._token}__$ "
@@ -23,7 +23,11 @@ class ShellIntegration:
         self._sudo_prompt = f"__AI_SUDO_{self._token}__"
         
         self.shell = None
-        self.current_dir = os.path.expanduser('~')
+        # Set initial directory to working_dir if provided, otherwise home
+        if working_dir and os.path.isdir(working_dir):
+            self.current_dir = working_dir
+        else:
+            self.current_dir = os.path.expanduser('~')
         self._init_shell()
         
         # Ensure shell is closed on process exit
@@ -50,7 +54,8 @@ class ShellIntegration:
             args=args,
             encoding='utf-8',
             codec_errors='replace',  # Handle binary output gracefully
-            env=dict(os.environ, TERM='dumb')  # Reduce fancy output
+            env=dict(os.environ, TERM='dumb'),  # Reduce fancy output
+            cwd=self.current_dir  # Start in working directory
         )
         
         # Disable echo to prevent command echoing in output
