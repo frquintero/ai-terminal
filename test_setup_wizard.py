@@ -110,6 +110,45 @@ def test_connection_test():
     print("✓ Connection test (expected failure) passed")
 
 
+def test_discover_backends():
+    """Test backend discovery from config.py"""
+    from setup import discover_agent_backends
+    
+    backends = discover_agent_backends()
+    
+    assert len(backends) >= 2, "Should discover at least 2 backends"
+    
+    backend_types = [agent_type for agent_type, _, _ in backends]
+    assert 'minimax' in backend_types, "Should discover minimax backend"
+    assert 'kimi2' in backend_types, "Should discover kimi2 backend"
+    
+    print("✓ Backend discovery test passed")
+
+
+def test_load_existing_env():
+    """Test loading existing .env file"""
+    import tempfile
+    from setup import load_existing_env
+    
+    with tempfile.TemporaryDirectory() as tmpdir:
+        env_path = Path(tmpdir) / ".env"
+        env_path.write_text("""
+# Test config
+AGENT_TYPE=kimi2
+KIMI_2_API_KEY=sk-test123
+KIMI_2_MODEL=kimi-k2-turbo-preview
+MAX_TOKENS=2048
+""")
+        
+        config = load_existing_env(str(env_path))
+        
+        assert config['AGENT_TYPE'] == 'kimi2'
+        assert config['KIMI_2_API_KEY'] == 'sk-test123'
+        assert config['MAX_TOKENS'] == '2048'
+        
+        print("✓ Load existing .env test passed")
+
+
 if __name__ == "__main__":
     print("Testing setup.py wizard functions...\n")
     
@@ -117,5 +156,7 @@ if __name__ == "__main__":
     test_write_env_kimi2()
     test_write_env_custom()
     test_connection_test()
+    test_discover_backends()
+    test_load_existing_env()
     
     print("\n✅ All setup.py tests passed!")

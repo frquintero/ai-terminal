@@ -8,9 +8,11 @@ and profile management for multiple agent backends.
 
 import os
 import sys
+import re
+import ast
 import getpass
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, List, Tuple
 from openai import OpenAI
 
 
@@ -106,14 +108,20 @@ def prompt_string(question: str, default: Optional[str] = None, required: bool =
             sys.exit(0)
 
 
-def prompt_password(question: str) -> str:
+def prompt_password(question: str, default: Optional[str] = None) -> str:
     """Prompt user for password/API key (masked input)"""
-    prompt = f"\n{Colors.BOLD}{question}{Colors.END}\n{Colors.YELLOW}(input will be hidden){Colors.END}: "
+    if default:
+        masked = default[:8] + "..." + default[-4:] if len(default) > 12 else "***"
+        prompt = f"\n{Colors.BOLD}{question}{Colors.END}\n{Colors.GREEN}(press Enter to keep existing: {masked}){Colors.END}\n{Colors.YELLOW}(input will be hidden){Colors.END}: "
+    else:
+        prompt = f"\n{Colors.BOLD}{question}{Colors.END}\n{Colors.YELLOW}(input will be hidden){Colors.END}: "
     
     while True:
         try:
             value = getpass.getpass(prompt).strip()
-            if not value:
+            if not value and default:
+                return default
+            if not value and not default:
                 print_error("API key is required")
                 continue
             return value
@@ -192,6 +200,75 @@ def prompt_bool(question: str, default: bool = True) -> bool:
             sys.exit(0)
 
 
+def load_existing_env(filename: str = ".env") -> Dict[str, str]:
+    """Load existing .env file if it exists"""
+    filepath = Path(filename)
+    config = {}
+    
+    if not filepath.exists():
+        return config
+    
+    try:
+        for line in filepath.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            if '=' in line:
+                key, value = line.split('=', 1)
+                config[key.strip()] = value.strip()
+        
+        if config:
+            print_success(f"Loaded existing configuration from {filename}")
+    except Exception as e:
+        print_warning(f"Could not load {filename}: {e}")
+    
+    return config
+
+
+def discover_agent_backends() -> List[Tuple[str, str, str]]:
+    """
+    Discover supported agent backends by parsing config.py.
+    Returns list of (agent_type, description, api_endpoint)
+    """
+    backends = []
+    
+    try:
+        config_path = Path("config.py")
+        if not config_path.exists():
+            # Fallback to hardcoded list
+            return [
+                ("minimax", "MiniMax M2", "https://platform.minimaxi.com"),
+                ("kimi2", "Kimi K2 (Moonshot AI)", "https://platform.moonshot.ai")
+            ]
+        
+        config_code = config_path.read_text()
+        
+        # Parse if/elif blocks for agent_type
+        minimax_match = re.search(r"elif agent_type == ['\"]minimax['\"]:", config_code)
+        kimi_match = re.search(r"if agent_type == ['\"]kimi2['\"]:", config_code)
+        custom_match = re.search(r"elif agent_type == ['\"]custom['\"]:", config_code)
+        
+        if minimax_match or "MINIMAX_M2_API_KEY" in config_code:
+            backends.append(("minimax", "MiniMax M2", "https://platform.minimaxi.com"))
+        
+        if kimi_match or "KIMI_2_API_KEY" in config_code:
+            backends.append(("kimi2", "Kimi K2 (Moonshot AI)", "https://platform.moonshot.ai"))
+        
+        # Don't show custom unless explicitly requested
+        # if custom_match:
+        #     backends.append(("custom", "Custom OpenAI-compatible endpoint", "custom"))
+        
+    except Exception as e:
+        print_warning(f"Could not parse config.py: {e}")
+        # Fallback
+        backends = [
+            ("minimax", "MiniMax M2", "https://platform.minimaxi.com"),
+            ("kimi2", "Kimi K2 (Moonshot AI)", "https://platform.moonshot.ai")
+        ]
+    
+    return backends
+
+
 def test_connection(agent_type: str, api_key: str, model: str, base_url: str) -> bool:
     """Test API connection with minimal request"""
     print_info(f"Testing connection to {base_url}...")
@@ -217,63 +294,67 @@ def test_connection(agent_type: str, api_key: str, model: str, base_url: str) ->
         return False
 
 
-def configure_minimax() -> Dict[str, str]:
+def configure_minimax(existing: Dict[str, str]) -> Dict[str, str]:
     """Configure MiniMax M2 backend"""
     print_header("MiniMax M2 Configuration")
     
     config = {}
     config['AGENT_TYPE'] = 'minimax'
     
-    print_info("Get your API key from: https://platform.minimaxi.com")
-    config['MINIMAX_M2_API_KEY'] = prompt_password("Enter your MiniMax API key")
+    # Check for existing API key
+    existing_key = existing.get('MINIMAX_M2_API_KEY')
+    if existing_key:
+        print_success(f"Found existing API key: {existing_key[:8]}...{existing_key[-4:]}")
+    else:
+        print_info("Get your API key from: https://platform.minimaxi.com")
     
-    config['MINIMAX_MODEL'] = prompt_string("Model name", default="MiniMax-M2")
+    config['MINIMAX_M2_API_KEY'] = prompt_password("Enter your MiniMax API key", default=existing_key)
+    config['MINIMAX_MODEL'] = prompt_string("Model name", default=existing.get('MINIMAX_MODEL', 'MiniMax-M2'))
     
     return config
 
 
-def configure_kimi2() -> Dict[str, str]:
+def configure_kimi2(existing: Dict[str, str]) -> Dict[str, str]:
     """Configure Kimi K2 backend"""
     print_header("Kimi K2 Configuration")
     
     config = {}
     config['AGENT_TYPE'] = 'kimi2'
     
-    print_info("Get your API key from: https://platform.moonshot.ai")
-    config['KIMI_2_API_KEY'] = prompt_password("Enter your Kimi K2 API key")
+    # Check for existing API key
+    existing_key = existing.get('KIMI_2_API_KEY')
+    if existing_key:
+        print_success(f"Found existing API key: {existing_key[:8]}...{existing_key[-4:]}")
+    else:
+        print_info("Get your API key from: https://platform.moonshot.ai")
     
-    config['KIMI_2_MODEL'] = prompt_string("Model name", default="kimi-k2-turbo-preview")
-    config['KIMI_2_BASE_URL'] = prompt_string("Base URL", default="https://api.moonshot.ai/v1")
-    
-    return config
-
-
-def configure_custom() -> Dict[str, str]:
-    """Configure custom OpenAI-compatible backend"""
-    print_header("Custom Backend Configuration")
-    
-    config = {}
-    config['AGENT_TYPE'] = 'custom'
-    
-    config['CUSTOM_API_KEY'] = prompt_password("Enter your API key")
-    config['CUSTOM_MODEL'] = prompt_string("Model name", required=True)
-    config['CUSTOM_BASE_URL'] = prompt_string("Base URL (e.g., https://api.example.com/v1)", required=True)
+    config['KIMI_2_API_KEY'] = prompt_password("Enter your Kimi K2 API key", default=existing_key)
+    config['KIMI_2_MODEL'] = prompt_string("Model name", default=existing.get('KIMI_2_MODEL', 'kimi-k2-turbo-preview'))
+    config['KIMI_2_BASE_URL'] = prompt_string("Base URL", default=existing.get('KIMI_2_BASE_URL', 'https://api.moonshot.ai/v1'))
     
     return config
 
 
-def configure_shared_options() -> Dict[str, str]:
+def configure_shared_options(existing: Dict[str, str]) -> Dict[str, str]:
     """Configure shared model parameters"""
     print_header("Model Parameters")
     
     config = {}
     
     print_info("These settings control model behavior")
-    config['MAX_TOKENS'] = str(prompt_int("Max tokens per response", default=1024, min_val=1, max_val=32768))
-    config['TEMPERATURE'] = str(prompt_float("Temperature (0.0-2.0, higher = more creative)", default=0.7, min_val=0.0, max_val=2.0))
-    config['MAX_STEPS'] = str(prompt_int("Max tool calling steps", default=15, min_val=1, max_val=50))
-    config['HIDE_THINKING'] = 'true' if prompt_bool("Hide model thinking tags", default=True) else 'false'
-    config['SHOW_RAW_OUTPUT'] = 'false' if prompt_bool("Show clean summaries (hide raw tool outputs)", default=True) else 'true'
+    
+    # Load existing or use defaults
+    existing_tokens = int(existing.get('MAX_TOKENS', '1024'))
+    existing_temp = float(existing.get('TEMPERATURE', '0.7'))
+    existing_steps = int(existing.get('MAX_STEPS', '15'))
+    existing_hide = existing.get('HIDE_THINKING', 'true').lower() == 'true'
+    existing_raw = existing.get('SHOW_RAW_OUTPUT', 'false').lower() == 'true'
+    
+    config['MAX_TOKENS'] = str(prompt_int("Max tokens per response", default=existing_tokens, min_val=1, max_val=32768))
+    config['TEMPERATURE'] = str(prompt_float("Temperature (0.0-2.0, higher = more creative)", default=existing_temp, min_val=0.0, max_val=2.0))
+    config['MAX_STEPS'] = str(prompt_int("Max tool calling steps", default=existing_steps, min_val=1, max_val=50))
+    config['HIDE_THINKING'] = 'true' if prompt_bool("Hide model thinking tags", default=existing_hide) else 'false'
+    config['SHOW_RAW_OUTPUT'] = 'true' if prompt_bool("Show raw tool outputs", default=existing_raw) else 'false'
     
     return config
 
@@ -340,36 +421,55 @@ def main():
     print(f"{Colors.BOLD}This wizard will help you configure your AI agent backend.{Colors.END}")
     print("You can create multiple profiles by saving to different .env files.")
     
+    # Load existing configuration
+    existing = load_existing_env(".env")
+    
+    # Discover available backends from config.py
+    backends = discover_agent_backends()
+    
+    if not backends:
+        print_error("No agent backends found in config.py")
+        return
+    
+    # Determine default choice based on existing config
+    default_choice = 1
+    existing_type = existing.get('AGENT_TYPE')
+    if existing_type:
+        for i, (agent_type, _, _) in enumerate(backends, 1):
+            if agent_type == existing_type:
+                default_choice = i
+                print_info(f"Current backend: {existing_type}")
+                break
+    
     # Step 1: Choose provider
+    provider_choices = [f"{desc} ({url})" for _, desc, url in backends]
     provider_choice = prompt_choice(
         "Select your AI provider:",
-        [
-            "MiniMax M2 (https://platform.minimaxi.com)",
-            "Kimi K2 (Moonshot AI - https://platform.moonshot.ai)",
-            "Custom OpenAI-compatible endpoint"
-        ],
-        default=1
+        provider_choices,
+        default=default_choice
     )
     
+    # Get selected backend
+    selected_backend = backends[provider_choice - 1]
+    agent_type, _, _ = selected_backend
+    
     # Step 2: Configure backend
-    if provider_choice == 1:
-        config = configure_minimax()
+    if agent_type == 'minimax':
+        config = configure_minimax(existing)
         base_url = "https://api.minimax.io/v1"
         model = config['MINIMAX_MODEL']
         api_key = config['MINIMAX_M2_API_KEY']
-    elif provider_choice == 2:
-        config = configure_kimi2()
+    elif agent_type == 'kimi2':
+        config = configure_kimi2(existing)
         base_url = config['KIMI_2_BASE_URL']
         model = config['KIMI_2_MODEL']
         api_key = config['KIMI_2_API_KEY']
     else:
-        config = configure_custom()
-        base_url = config['CUSTOM_BASE_URL']
-        model = config['CUSTOM_MODEL']
-        api_key = config['CUSTOM_API_KEY']
+        print_error(f"Unknown backend: {agent_type}")
+        return
     
     # Step 3: Configure shared options
-    shared_config = configure_shared_options()
+    shared_config = configure_shared_options(existing)
     config.update(shared_config)
     
     # Step 4: Test connection
