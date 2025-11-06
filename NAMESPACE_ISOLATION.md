@@ -40,7 +40,22 @@ The agent can run commands in two modes:
 
 ## Quick Start
 
-### 1. Build Rootfs (One-time)
+### 1. Install debootstrap
+
+The build script will detect your OS and suggest the correct command:
+
+```bash
+# Arch/Manjaro
+sudo pacman -S debootstrap
+
+# Debian/Ubuntu
+sudo apt-get install debootstrap
+
+# Fedora/RHEL
+sudo dnf install debootstrap
+```
+
+### 2. Build Rootfs (One-time)
 
 ```bash
 # Requires: debootstrap, root privileges, ~500MB space
@@ -61,7 +76,7 @@ This creates a minimal Debian rootfs with:
 - Shell tools: grep, sed, awk, jq, csvkit, sqlite3, bc, curl, wget, git
 - Manifest: /etc/sandbox_manifest.json
 
-### 2. Enable Isolation
+### 3. Enable Isolation
 
 ```bash
 # Use isolated mode
@@ -71,7 +86,7 @@ export SANDBOX_ENABLE_ISOLATION=1
 python main.py
 ```
 
-### 3. Verify Isolation
+### 4. Verify Isolation
 
 Inside the agent, run:
 ```
