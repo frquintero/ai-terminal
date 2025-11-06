@@ -118,8 +118,8 @@ create_base_rootfs() {
     mkdir -p "$BUILD_DIR"
     rm -rf "$ROOTFS_DIR"
     
-    # Use snapshot.debian.org for reproducibility
-    local mirror="http://snapshot.debian.org/archive/debian/$DEBIAN_SNAPSHOT/"
+    # Use deb.debian.org for fast builds (snapshot.debian.org is extremely slow)
+    local mirror="http://deb.debian.org/debian/"
     
     debootstrap \
         --variant=minbase \
@@ -135,10 +135,10 @@ create_base_rootfs() {
 install_system_packages() {
     log_info "Installing system packages..."
     
-    # Configure apt to use snapshot for reproducibility
+    # Configure apt to use fast mirrors
     cat > "$ROOTFS_DIR/etc/apt/sources.list" <<EOF
-deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/$DEBIAN_SNAPSHOT/ $DEBIAN_RELEASE main
-deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/$DEBIAN_SNAPSHOT/ $DEBIAN_RELEASE-security main
+deb http://deb.debian.org/debian/ $DEBIAN_RELEASE main
+deb http://deb.debian.org/debian-security/ $DEBIAN_RELEASE-security main
 EOF
     
     # Prevent interactive prompts
@@ -146,7 +146,7 @@ EOF
     
     # Install packages
     chroot "$ROOTFS_DIR" bash -c "
-        apt-get update -o Acquire::Check-Valid-Until=false
+        apt-get update
         apt-get install -y --no-install-recommends \
             coreutils \
             bash \
@@ -195,17 +195,11 @@ setup_python_env() {
         # Upgrade pip
         /opt/venv/bin/pip install --no-cache-dir --upgrade pip
         
-        # Install data science packages with pinned versions
+        # Install core data science packages with pinned versions
         /opt/venv/bin/pip install --no-cache-dir \
             numpy==1.26.4 \
             pandas==2.2.2 \
-            scipy==1.13.0 \
-            scikit-learn==1.4.2 \
-            pyarrow==16.0.0 \
-            matplotlib==3.8.4 \
-            polars==0.20.31 \
-            requests==2.32.0 \
-            openpyxl==3.1.2
+            matplotlib==3.8.4
     "
     
     log_info "✓ Python environment created"
@@ -241,13 +235,7 @@ generate_manifest() {
   "python_packages": {
     "numpy": "1.26.4",
     "pandas": "2.2.2",
-    "scipy": "1.13.0",
-    "scikit-learn": "1.4.2",
-    "pyarrow": "16.0.0",
-    "matplotlib": "3.8.4",
-    "polars": "0.20.31",
-    "requests": "2.32.0",
-    "openpyxl": "3.1.2"
+    "matplotlib": "3.8.4"
   },
   "shell_commands": {
     "text_processing": [
@@ -347,7 +335,7 @@ verify_tools() {
     done
     
     # Verify Python packages
-    local py_pkgs=(numpy pandas scipy sklearn pyarrow matplotlib)
+    local py_pkgs=(numpy pandas matplotlib)
     for pkg in "${py_pkgs[@]}"; do
         if ! chroot "$ROOTFS_DIR" /opt/venv/bin/python -c "import $pkg" &>/dev/null; then
             log_warn "Missing Python package: $pkg"
