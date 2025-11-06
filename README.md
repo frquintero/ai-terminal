@@ -79,8 +79,15 @@ Deterministic rootfs-based isolation for reproducible command execution:
 - `SANDBOX_ROOTFS_SHA256` (optional) - Specific rootfs image SHA256 to use
 
 **To enable:**
-1. Build rootfs (one-time): `sudo ./build_rootfs.sh`
-2. Run agent with isolation: `SANDBOX_ENABLE_ISOLATION=1 python main.py`
+1. Build rootfs (one-time, ~6 min, ~234MB):
+   ```bash
+   sudo ./build_rootfs.sh
+   ```
+   This caches the rootfs in `~/.cache/agent_sandbox/images/` (auto-detects your user even with sudo)
+2. Run agent with isolation:
+   ```bash
+   SANDBOX_ENABLE_ISOLATION=1 python main.py
+   ```
 
 See [history/NAMESPACE_ISOLATION.md](history/NAMESPACE_ISOLATION.md) for full documentation.
 

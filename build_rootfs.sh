@@ -23,7 +23,14 @@ ROOTFS_DIR="$BUILD_DIR/rootfs"
 DEBIAN_SNAPSHOT="20241001T000000Z"
 DEBIAN_RELEASE="bookworm"
 PYTHON_VERSION="3.11"
-CACHE_DIR="$HOME/.cache/agent_sandbox/images"
+
+# Detect real user when running with sudo (cache in user's home, not /root/)
+if [[ -n "$SUDO_USER" ]]; then
+    REAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    CACHE_DIR="$REAL_HOME/.cache/agent_sandbox/images"
+else
+    CACHE_DIR="$HOME/.cache/agent_sandbox/images"
+fi
 
 # Color output
 RED='\033[0;31m'
@@ -364,10 +371,15 @@ package_rootfs() {
     
     log_info "Image SHA256: $sha256"
     
-    # Cache the image
+    # Cache the image (ensure user owns it if running with sudo)
     mkdir -p "$CACHE_DIR"
     local cached_path="$CACHE_DIR/${sha256}.tar.gz"
     cp "$tarball" "$cached_path"
+    
+    # Fix ownership if running with sudo
+    if [[ -n "$SUDO_USER" ]]; then
+        chown -R "$SUDO_USER:$SUDO_USER" "$CACHE_DIR"
+    fi
     
     # Create symlink with image name
     ln -sf "${sha256}.tar.gz" "$CACHE_DIR/${IMAGE_NAME}-latest.tar.gz"
