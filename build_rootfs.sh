@@ -35,6 +35,32 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $*"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 
+# Detect OS and suggest appropriate package install command
+detect_os_install_cmd() {
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        case "$ID" in
+            arch|manjaro)
+                echo "sudo pacman -S debootstrap"
+                ;;
+            ubuntu|debian|linuxmint|pop)
+                echo "sudo apt-get install debootstrap"
+                ;;
+            fedora|rhel|centos)
+                echo "sudo dnf install debootstrap"
+                ;;
+            opensuse*)
+                echo "sudo zypper install debootstrap"
+                ;;
+            *)
+                echo "Install debootstrap using your package manager"
+                ;;
+        esac
+    else
+        echo "Install debootstrap using your package manager"
+    fi
+}
+
 # Check prerequisites
 check_prereqs() {
     log_info "Checking prerequisites..."
@@ -44,7 +70,8 @@ check_prereqs() {
     fi
     
     if ! command -v debootstrap &>/dev/null; then
-        log_error "debootstrap not found. Install with: apt-get install debootstrap"
+        local install_cmd=$(detect_os_install_cmd)
+        log_error "debootstrap not found. Install with: $install_cmd"
     fi
     
     log_info "✓ Prerequisites satisfied"
