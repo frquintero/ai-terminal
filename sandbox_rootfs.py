@@ -91,6 +91,10 @@ def extract_rootfs(sha256: str, force: bool = False) -> Path:
     with tarfile.open(tarball, "r:gz") as tar:
         _safe_extract(tar, extract_path)
     
+    # Update directory mtime to current time (tar preserves old timestamps)
+    # This prevents cleanup from deleting the freshly extracted rootfs
+    os.utime(extract_path, None)
+    
     # Cleanup old extractions to save disk space
     cleanup_old_extractions(keep_latest=2)
     
