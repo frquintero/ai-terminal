@@ -15,6 +15,7 @@ import shutil
 import json
 import inspect
 from typing import Dict, Any, List, Optional
+from collections import deque
 from shell_integration import ShellIntegration
 
 
@@ -28,6 +29,14 @@ def _get_working_dir_path() -> str:
     """Get absolute path to working directory (relative to this script's location)"""
     tools_dir = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(tools_dir, WORKING_DIR_PREFIX)
+
+
+# ============================================================================
+# Context Tracking
+# ============================================================================
+
+# Track recently written files for context awareness
+_RECENT_WRITES: deque = deque(maxlen=100)
 
 
 # ============================================================================
@@ -241,6 +250,9 @@ class WriteFileTool(BaseTool):
             with open(isolated_path, 'w', encoding='utf-8') as f:
                 f.write(content)
             
+            # Track this write for context awareness
+            _RECENT_WRITES.append(file_path)
+            
             return f"File written successfully: {isolated_path}"
         except Exception as e:
             return f"Error writing file: {str(e)}"
@@ -263,9 +275,9 @@ class RunCommandTool(BaseTool):
     
     def __init__(self, shell: 'ShellIntegration' = None):
         # Initialize shell in the working directory so commands can access files
-        working_dir = _get_working_dir_path()
-        os.makedirs(working_dir, exist_ok=True)
-        self.shell = shell or ShellIntegration(working_dir=working_dir)
+        self.working_dir = _get_working_dir_path()
+        os.makedirs(self.working_dir, exist_ok=True)
+        self.shell = shell or ShellIntegration(working_dir=self.working_dir)
 
     @property
     def name(self) -> str:
@@ -363,7 +375,8 @@ class RunCommandTool(BaseTool):
                 
                 # Bypass interactive guard if safe pattern detected
                 if safe_global or interpreter_safe:
-                    return self.shell.run_command(command)
+                    wrapped = f"cd {shlex.quote(self.working_dir)}; {command}"
+                    return self.shell.run_command(wrapped)
                 
                 # Block interactive usage
                 return (
@@ -372,7 +385,9 @@ class RunCommandTool(BaseTool):
                 )
             
             # Execute command via shell integration
-            return self.shell.run_command(command)
+            # Force reset to working directory before each command (stateless cwd)
+            wrapped = f"cd {shlex.quote(self.working_dir)}; {command}"
+            return self.shell.run_command(wrapped)
             
         except Exception as e:
             return f"Error executing command: {str(e)}"
@@ -853,6 +868,70 @@ except Exception as _e:
         parts.append(f"Manifest: {run_dir / 'manifest.json'}")
         
         return "\n".join(parts)
+
+
+# ============================================================================
+# Context Tool
+# ============================================================================
+
+class GetContextTool(BaseTool):
+    """
+    Get agent execution context information.
+    
+    Returns JSON with:
+    - working_dir: Absolute path to working directory
+    - shell_cwd: Current shell working directory
+    - recent_writes: List of recently written files
+    
+    Use to: Check state without running pwd/ls commands
+    """
+    
+    @property
+    def name(self) -> str:
+        return "get_context"
+    
+    @property
+    def description(self) -> str:
+        return "Get execution context: working directory, shell cwd, and recently written files"
+    
+    @property
+    def schema(self) -> Dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": "get_context",
+                "description": "Get agent execution context (working_dir, shell_cwd, recent_writes). Use instead of pwd/ls to check state.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False
+                }
+            }
+        }
+    
+    def execute(self) -> str:
+        """Return execution context as JSON"""
+        working_dir = _get_working_dir_path()
+        
+        # Get shell cwd from the run_command tool instance if available
+        # Note: Access via module globals to avoid circular import during module load
+        shell_cwd = None
+        try:
+            tools_dict = globals().get("TOOLS", {})
+            if "run_command" in tools_dict:
+                rc_tool = tools_dict["run_command"]
+                if hasattr(rc_tool, "shell") and rc_tool.shell:
+                    shell_cwd = rc_tool.shell.get_current_dir()
+        except Exception:
+            pass
+        
+        context = {
+            "working_dir": working_dir,
+            "shell_cwd": shell_cwd,
+            "recent_writes": list(_RECENT_WRITES)
+        }
+        
+        return json.dumps(context, indent=2)
 
 
 # ============================================================================
