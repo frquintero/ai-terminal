@@ -24,9 +24,9 @@ load_dotenv()
 
 # Test configuration
 KIMI_API_KEY = os.getenv("KIMI_2_API_KEY")
-# Try OpenRouter by default (based on sk- key prefix pattern)
-KIMI_BASE_URL = os.getenv("KIMI_2_BASE_URL", "https://openrouter.ai/api/v1")
-KIMI_MODEL = os.getenv("KIMI_2_MODEL", "moonshot/kimi-k2-preview")
+# Official Moonshot platform endpoint (.cn not .ai)
+KIMI_BASE_URL = os.getenv("KIMI_2_BASE_URL", "https://api.moonshot.cn/v1")
+KIMI_MODEL = os.getenv("KIMI_2_MODEL", "kimi-k2-0905-preview")
 
 # Tool schemas for testing (simplified from tools.py)
 TOOL_SCHEMAS = [
