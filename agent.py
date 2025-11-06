@@ -135,13 +135,7 @@ Working directory and path rules:
 - read_file: Relative path; searches {WORKING_DIR_PREFIX}/ first, then project root.
 
 Tool usage notes:
-- get_context: Retrieve comprehensive session context including:
-  * Execution state (working_dir, shell_cwd, recent_writes)
-  * Session history (tool calls, commands, exit codes, errors)
-  * Configuration (sandbox limits, isolation status)
-  * Repository state (branch, uncommitted changes)
-  * Available interpreters and tools
-  Use for debugging, understanding session state, or checking recent results. Prefer this over pwd/ls/git status/env when you just need state.
+- get_context: Retrieve comprehensive session context: execution state (working_dir, shell_cwd, recent_writes), session history (tool calls, exit codes, errors), configuration (sandbox limits, isolation), repository state (branch, uncommitted changes), and available interpreters. Use for debugging or checking state. Prefer this over pwd/ls/git status/env when you just need state.
 - run_python_sandbox: Prefer writing a single consolidated script and running once. Before running a Python file, validate with: python -m py_compile ./file.py
 - run_interactive: Only for full-screen/interactive programs.
 
