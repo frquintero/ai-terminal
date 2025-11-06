@@ -133,7 +133,13 @@ File access model:
 - run_command: Always executes from {WORKING_DIR_PREFIX}/ (auto cd each call). Use relative paths like ./file.py. To read project files, use ../path (e.g., cat ../agent.py). Never write outside working dir—no ../ in redirects.
 - write_file: Paths are relative to {WORKING_DIR_PREFIX}/. Do NOT include the '{WORKING_DIR_PREFIX}/' prefix in file_path.
 - read_file: Relative path; searches {WORKING_DIR_PREFIX}/ first, then project root.
-- get_context: Use to query working_dir, shell_cwd, and files written this turn. Avoid redundant pwd/ls unless you truly need listing output.
+- get_context: Retrieve comprehensive session context including:
+  * Execution state (working_dir, shell_cwd, recent_writes)
+  * Session history (tool calls, commands, exit codes, errors)
+  * Configuration (sandbox limits, isolation status)
+  * Repository state (branch, uncommitted changes)
+  * Available interpreters and tools
+  Use for debugging, understanding session state, or checking recent results. Prefer this over redundant pwd/ls/git status commands.
 - run_python_sandbox: Prefer writing a single consolidated script and running once. Before running a Python file, validate with: python -m py_compile ./file.py
 - run_interactive: Only for full-screen/interactive programs.
 
@@ -141,7 +147,7 @@ Execution Rules:
 - Respond directly without tools unless task requires file access, commands, or computation
 - Plan your tools: write scripts once, then run them. Avoid multiple run_python_sandbox calls for separate demos—combine in one script with functions and run once
 - Prefer shell pipelines (grep, sed, awk, cut, sort) over multiple tool calls—combine operations efficiently
-- Use get_context to check state. Don't run pwd/ls unless you need listing output
+- Use get_context to check state and debug. Check exit codes from recent commands. Don't run pwd/ls/git status unless you truly need listing output.
 - Provide final answers after tool execution without redundant tool calls
 - Do not duplicate tool output in responses - outputs are logged internally
 
