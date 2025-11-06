@@ -131,7 +131,7 @@ create_base_rootfs() {
     
     debootstrap \
         --variant=minbase \
-        --include=ca-certificates,apt-transport-https \
+        --include=ca-certificates \
         "$DEBIAN_RELEASE" \
         "$ROOTFS_DIR" \
         "$mirror"
@@ -147,6 +147,7 @@ install_system_packages() {
     cat > "$ROOTFS_DIR/etc/apt/sources.list" <<EOF
 deb http://deb.debian.org/debian/ $DEBIAN_RELEASE main
 deb http://deb.debian.org/debian-security/ $DEBIAN_RELEASE-security main
+deb http://deb.debian.org/debian/ $DEBIAN_RELEASE-updates main
 EOF
     
     # Prevent interactive prompts
@@ -178,6 +179,7 @@ EOF
             bc \
             vim \
             nano \
+            less \
             git \
             make \
             python${PYTHON_VERSION} \
@@ -336,7 +338,7 @@ verify_tools() {
     )
     
     for tool in "${tools[@]}"; do
-        if ! chroot "$ROOTFS_DIR" which "$tool" &>/dev/null; then
+        if ! chroot "$ROOTFS_DIR" bash -c "command -v $tool >/dev/null 2>&1"; then
             log_warn "Missing tool: $tool"
             ((missing++))
         fi

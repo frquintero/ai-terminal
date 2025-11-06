@@ -736,6 +736,13 @@ except Exception as _e:
         py = os.getenv("SANDBOX_PYTHON") or sys.executable
         args = [py, "-I", "-B", script_path.name]
         
+        # Create isolated tmp directory
+        tmp_dir = run_dir / "tmp"
+        try:
+            os.makedirs(tmp_dir, mode=0o700, exist_ok=True)
+        except Exception:
+            pass
+        
         # Minimal environment
         env = {
             "PATH": "/usr/bin:/bin",
@@ -750,7 +757,8 @@ except Exception as _e:
             "SANDBOX_ORIGINAL_CWD": str(original_cwd),
             "SANDBOX_PROJECT": str(project_mount),  # Access project files via this path
             "SANDBOX_RUN_DIR": str(run_dir),
-            "SANDBOX_ALLOW_PROJECT_WRITES": os.getenv("SANDBOX_ALLOW_PROJECT_WRITES", "1"),
+            "SANDBOX_ALLOW_PROJECT_WRITES": os.getenv("SANDBOX_ALLOW_PROJECT_WRITES", "0"),  # Default: write-protected
+            "TMPDIR": str(tmp_dir),
         }
         # Preserve locale settings
         env.update({k: v for k, v in os.environ.items() if k in ("LC_ALL", "LANG")})
@@ -766,6 +774,7 @@ except Exception as _e:
             """Apply POSIX resource limits in subprocess"""
             try:
                 os.setsid()  # Create new process group for clean termination
+                os.umask(0o077)  # Tighten file permissions (owner-only)
                 if resource:
                     # CPU time limit
                     resource.setrlimit(resource.RLIMIT_CPU, (max_cpu, max_cpu))

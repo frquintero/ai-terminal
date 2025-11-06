@@ -54,16 +54,21 @@ class MiniAgent:
         if os.getenv("SANDBOX_ENABLE_ISOLATION") != "1":
             return None
         
-        # Try to load manifest from rootfs
-        manifest_path = Path("/etc/sandbox_manifest.json")
-        if manifest_path.exists():
-            try:
-                with open(manifest_path) as f:
-                    return json.load(f)
-            except Exception:
-                pass
-        
-        return None
+        # Load manifest from extracted rootfs (not host /etc)
+        try:
+            from sandbox_rootfs import get_rootfs_sha256, extract_rootfs, load_manifest
+            
+            sha256 = get_rootfs_sha256()
+            if not sha256:
+                return None
+            
+            # Extract rootfs (cached, fast if already extracted)
+            rootfs_path = extract_rootfs(sha256)
+            
+            # Load manifest from extracted rootfs
+            return load_manifest(rootfs_path)
+        except Exception:
+            return None
     
     def _format_sandbox_info(self, manifest: dict) -> str:
         """Format sandbox information for system prompt"""

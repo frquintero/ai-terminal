@@ -38,6 +38,27 @@ def verify_rootfs_exists(sha256: str) -> bool:
     return tarball.exists()
 
 
+def _safe_extract(tar: tarfile.TarFile, path: Path):
+    """
+    Safely extract tarball, preventing path traversal attacks.
+    
+    Args:
+        tar: Open tarfile object
+        path: Destination directory
+    """
+    def is_safe(member: tarfile.TarInfo) -> bool:
+        """Check if tar member is safe to extract"""
+        name = Path(member.name)
+        # Reject absolute paths or parent directory references
+        if name.is_absolute() or ".." in name.parts:
+            return False
+        return True
+    
+    # Filter to only safe members
+    safe_members = [m for m in tar.getmembers() if is_safe(m)]
+    tar.extractall(path, members=safe_members)
+
+
 def extract_rootfs(sha256: str, force: bool = False) -> Path:
     """
     Extract rootfs tarball to cache directory.
@@ -65,10 +86,13 @@ def extract_rootfs(sha256: str, force: bool = False) -> Path:
     if computed_sha256 != sha256:
         raise ValueError(f"SHA256 mismatch: expected {sha256}, got {computed_sha256}")
     
-    # Extract
+    # Extract safely
     extract_path.mkdir(parents=True, exist_ok=True)
     with tarfile.open(tarball, "r:gz") as tar:
-        tar.extractall(extract_path)
+        _safe_extract(tar, extract_path)
+    
+    # Cleanup old extractions to save disk space
+    cleanup_old_extractions(keep_latest=2)
     
     return extract_path
 

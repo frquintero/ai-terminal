@@ -105,17 +105,30 @@ class ShellIntegration:
             "/bin/bash", "--noprofile", "--norc", "-i"
         ]
         
-        # Spawn bwrap
-        self.shell = pexpect.spawn(
-            "bwrap",
-            bwrap_args,
-            encoding='utf-8',
-            codec_errors='replace',
-            env={"TERM": "dumb"}  # Minimal env
-        )
-        
-        # Note: In isolated mode, current_dir tracks /workspace inside container
-        # This is transparent to the rest of the code since we always cd to /workspace
+        # Spawn bwrap with error handling
+        try:
+            self.shell = pexpect.spawn(
+                "bwrap",
+                bwrap_args,
+                encoding='utf-8',
+                codec_errors='replace',
+                env={"TERM": "dumb"}  # Minimal env
+            )
+            
+            # Disable echo to prevent command echoing in output
+            self.shell.setecho(False)
+            
+            # Reduce noise early
+            self.shell.sendline('unset PROMPT_COMMAND 2>/dev/null; stty -echo 2>/dev/null || true')
+            
+            # Note: In isolated mode, current_dir tracks /workspace inside container
+            # This is transparent to the rest of the code since we always cd to /workspace
+        except Exception as e:
+            print(f"Warning: failed to start bubblewrap: {e}")
+            print("Falling back to direct shell")
+            self.isolation_enabled = False
+            self._init_shell()
+            return
     
     def _init_shell(self):
         """Initialize a controlled shell with predictable behavior"""
@@ -354,6 +367,10 @@ class ShellIntegration:
         Execute a sudo command with robust password handling.
         Uses sudo -S with a custom prompt to detect password requests.
         """
+        # Sudo not available in isolated mode (rootfs is read-only)
+        if self.isolation_enabled:
+            return "Error: sudo is not available in isolated mode. The rootfs is read-only and commands run with namespace root privileges. Use run_command instead."
+        
         try:
             # Wrap sudo command with custom prompt and markers
             sudo_cmd = f'sudo -S -p {self._shq(self._sudo_prompt)} {command}'
