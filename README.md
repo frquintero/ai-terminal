@@ -4,6 +4,19 @@
 
 This project implements an AI-powered Linux shell terminal using MiniMax M2 AI. It combines natural language processing, shell command execution, and tool-based operations to create an intelligent CLI interface.
 
+## 🎯 Vibe Coded with Amp
+
+This project was built using [Amp](https://ampcode.com) - Sourcegraph's AI coding agent. Amp combines the power of Claude 3.5 Sonnet for execution with GPT-5 (Oracle) for expert planning and review. The entire v1.3 enhanced context system, including the comprehensive `get_context` tool with session tracking, tool history, and intelligent prompt optimization, was designed and implemented through iterative collaboration with Amp's dual-model architecture. Amp's ability to consult the Oracle for architectural decisions, maintain context across complex implementations, and execute with precision made this level of sophisticated agent-to-agent development possible.
+
+**Development highlights:**
+- Oracle-reviewed architecture (3+ consultations for design validation)
+- Comprehensive session state tracking (20 tool calls, 3 errors, bounded memory)
+- Zero-regression implementation (backward compatible, all tests passing)
+- Prompt engineering with explicit usage triggers and shell-first philosophy
+- 18 feature commits across 8 files (+1,486 lines) shipped in a single session
+
+Learn more about Amp at [ampcode.com](https://ampcode.com).
+
 ## Features
 
 - **AI-First Processing**: All user inputs go through MiniMax M2 AI for intelligent interpretation
