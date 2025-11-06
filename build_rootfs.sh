@@ -18,7 +18,8 @@ set -euo pipefail
 
 # Configuration
 IMAGE_NAME="${1:-py-data-3.11}"
-BUILD_DIR="./rootfs_build"
+# Use /tmp for build to avoid permission issues on mounted drives
+BUILD_DIR="/tmp/rootfs_build_$$"
 ROOTFS_DIR="$BUILD_DIR/rootfs"
 DEBIAN_SNAPSHOT="20241001T000000Z"
 DEBIAN_RELEASE="bookworm"
