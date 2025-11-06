@@ -347,12 +347,14 @@ class RunCommandTool(BaseTool):
             # Identify the actual command being executed
             base = first_cmd_tokens[0]
             base_name = os.path.basename(base)
-            target_name = base_name
-            
+
             # ----------------------------------------------------------------
             # GUARD: Interactive command detection with smart bypass
             # ----------------------------------------------------------------
-            cmd_is_interactive = target_name in InteractiveCommandTool.INTERACTIVE_COMMANDS
+            # Check all tokens in the command for interactive programs
+            interactive_tokens = [os.path.basename(token) for token in first_cmd_tokens if os.path.basename(token) in InteractiveCommandTool.INTERACTIVE_COMMANDS]
+            cmd_is_interactive = bool(interactive_tokens)
+            target_name = interactive_tokens[0] if interactive_tokens else base_name
             
             if cmd_is_interactive:
                 # Safe flags that allow non-interactive usage
@@ -375,8 +377,8 @@ class RunCommandTool(BaseTool):
                 
                 # Bypass interactive guard if safe pattern detected
                 if safe_global or interpreter_safe:
-                    wrapped = f"cd {shlex.quote(self.working_dir)}; {command}"
-                    return self.shell.run_command(wrapped)
+                wrapped = f"cd {shlex.quote(self.working_dir)}; {command}"
+                return self.shell.run_command(wrapped, reset_dir=self.working_dir)
                 
                 # Block interactive usage
                 return (
@@ -387,7 +389,7 @@ class RunCommandTool(BaseTool):
             # Execute command via shell integration
             # Force reset to working directory before each command (stateless cwd)
             wrapped = f"cd {shlex.quote(self.working_dir)}; {command}"
-            return self.shell.run_command(wrapped)
+            return self.shell.run_command(wrapped, reset_dir=self.working_dir)
             
         except Exception as e:
             return f"Error executing command: {str(e)}"

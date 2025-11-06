@@ -241,12 +241,13 @@ class ShellIntegration:
         result = '\n'.join(normalized_lines)
         return result.strip()  # Final strip of whitespace
     
-    def run_command(self, command: str, timeout: int = 60) -> str:
+    def run_command(self, command: str, timeout: int = 60, reset_dir: str = None) -> str:
         """
         Execute a command with robust output parsing using start/end markers.
         
         Returns the command output as a clean string.
         Captures exit code and updates current directory automatically.
+        If reset_dir is provided, sets current_dir to reset_dir after command.
         
         In isolated mode, commands run inside /workspace container path.
         """
@@ -297,7 +298,9 @@ class ShellIntegration:
                 new_pwd = self.shell.match.group(2).strip()
                 
                 # Update tracked directory
-                if new_pwd and new_pwd.startswith('/'):
+                if reset_dir:
+                self.current_dir = reset_dir
+                elif new_pwd and new_pwd.startswith('/'):
                     self.current_dir = new_pwd
                 
                 # Step 3: Drain to prompt
