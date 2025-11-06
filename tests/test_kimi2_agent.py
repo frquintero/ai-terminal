@@ -24,9 +24,9 @@ load_dotenv()
 
 # Test configuration
 KIMI_API_KEY = os.getenv("KIMI_2_API_KEY")
-# Official Moonshot platform endpoint (.cn not .ai)
-KIMI_BASE_URL = os.getenv("KIMI_2_BASE_URL", "https://api.moonshot.cn/v1")
-KIMI_MODEL = os.getenv("KIMI_2_MODEL", "kimi-k2-0905-preview")
+# Official Moonshot platform endpoint
+KIMI_BASE_URL = os.getenv("KIMI_2_BASE_URL", "https://api.moonshot.ai/v1")
+KIMI_MODEL = os.getenv("KIMI_2_MODEL", "kimi-k2-turbo-preview")
 
 # Tool schemas for testing (simplified from tools.py)
 TOOL_SCHEMAS = [
