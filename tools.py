@@ -18,6 +18,7 @@ import re
 from typing import Dict, Any, List, Optional
 from collections import deque
 from shell_integration import ShellIntegration
+from command_parser import parse_command
 
 
 # ============================================================================
@@ -350,64 +351,19 @@ class RunCommandTool(BaseTool):
             base_name = os.path.basename(base)
 
             # ----------------------------------------------------------------
-            # GUARD: Interactive command detection with smart bypass
+            # GUARD: Interactive command detection using robust parser
             # ----------------------------------------------------------------
-            # Helper to detect environment variable assignments (NAME=value or NAME+=value)
-            def _is_env_assignment(word: str) -> bool:
-                return bool(re.match(r'^[A-Za-z_][A-Za-z0-9_]*\+?=.*', word))
+            is_interactive, reason = parse_command(command)
             
-            # Skip wrapper commands and environment assignments to find the actual executable
-            WRAPPER_COMMANDS = {'sudo', 'su', 'env', 'time', 'nice', 'nohup', 'strace', 'gdb', 'valgrind', 'timeout'}
-
-            # Scan through tokens, interleaving wrapper and assignment skipping
-            # Continue until we find a token that's neither wrapper nor assignment
-            i = 0
-            while i < len(first_cmd_tokens):
-                token = first_cmd_tokens[i]
-                if os.path.basename(token) in WRAPPER_COMMANDS or _is_env_assignment(token):
-                    i += 1
-                else:
-                    break
-            
-            # If only wrappers/assignments, allow the command (not interactive)
-            if i >= len(first_cmd_tokens):
-                wrapped = f"cd {shlex.quote(self.working_dir)}; {command}"
-                return self.shell.run_command(wrapped, reset_dir=self.working_dir)
-            
-            # Extract the actual command and remaining tokens
-            unwrapped_cmd = first_cmd_tokens[i]
-            target_name = os.path.basename(unwrapped_cmd)
-            remaining_tokens = first_cmd_tokens[i:]
-            
-            cmd_is_interactive = target_name in InteractiveCommandTool.INTERACTIVE_COMMANDS
-            
-            if cmd_is_interactive:
-                # Safe flags that allow non-interactive usage
-                SAFE_GLOBAL_FLAGS = {'--version', '-V', '--help', '-h'}
-                INTERPRETERS = {'python', 'python3', 'node', 'ruby', 'bash', 'sh', 'zsh'}
+            if is_interactive:
+                # Extract command name for error message
+                try:
+                    cmd_name = shlex.split(command)[0] if command else "command"
+                except:
+                    cmd_name = "command"
                 
-                # Check for universal safe flags (version/help)
-                safe_global = any(flag in SAFE_GLOBAL_FLAGS for flag in remaining_tokens)
-                
-                # Check for interpreter safe modes (script execution)
-                interpreter_safe = False
-                if target_name in INTERPRETERS:
-                    # Flags that execute code without REPL: -c, -m, -e
-                    script_flags = {'-c', '-m', '-e'}
-                    if any(flag in script_flags for flag in remaining_tokens):
-                        interpreter_safe = True
-                    # Heuristic: if there are additional args, likely executing a script
-                    elif len(remaining_tokens) > 1:
-                        interpreter_safe = True
-                
-                # Bypass interactive guard if safe pattern detected
-                if safe_global or interpreter_safe:
-                    wrapped = f"cd {shlex.quote(self.working_dir)}; {command}"
-                    return self.shell.run_command(wrapped, reset_dir=self.working_dir)
-                
-                # Block interactive usage
                 return (
-                    f"Error: '{target_name}' is an interactive command. "
+                    f"Error: Interactive command detected - {reason}. "
                     f"Use run_interactive tool to avoid timeout."
                 )
             
