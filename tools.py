@@ -42,6 +42,143 @@ _RECENT_WRITES: deque = deque(maxlen=100)
 
 
 # ============================================================================
+# Session State Tracking
+# ============================================================================
+
+from datetime import datetime, timezone
+
+class SessionState:
+    """
+    Module-level session state for tracking agent activity.
+    Owned and reset by MiniAgent at session start.
+    
+    Provides bounded, in-memory tracking of:
+    - Session metadata (id, start time, interaction counts)
+    - Tool execution history (last 20 calls)
+    - Recent errors (last 3)
+    - Last command exit code
+    """
+    
+    def __init__(self):
+        self.session_id: Optional[str] = None
+        self.start_time: Optional[datetime] = None
+        self.total_interactions: int = 0
+        self.total_tool_calls: int = 0
+        self.tool_history: deque = deque(maxlen=20)  # Bounded to last 20 tool calls
+        self.recent_errors: deque = deque(maxlen=3)  # Bounded to last 3 errors
+        self.last_exit_code: Optional[int] = None
+    
+    def reset(self, session_id: str):
+        """Reset state for new session. Called by MiniAgent.__init__"""
+        self.session_id = session_id
+        self.start_time = datetime.now(timezone.utc)
+        self.total_interactions = 0
+        self.total_tool_calls = 0
+        self.tool_history.clear()
+        self.recent_errors.clear()
+        self.last_exit_code = None
+    
+    def increment_interactions(self):
+        """Increment user interaction count. Called per user turn."""
+        self.total_interactions += 1
+    
+    def record_tool_call(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        success: bool,
+        exit_code: Optional[int] = None,
+        error: Optional[str] = None
+    ):
+        """
+        Record a tool execution.
+        
+        Args:
+            tool_name: Name of the tool executed
+            args: Tool arguments (will be truncated if >200 chars)
+            success: Whether execution succeeded
+            exit_code: Exit code for commands (run_command, run_python_sandbox)
+            error: Error message if failed
+        """
+        self.total_tool_calls += 1
+        
+        # Truncate args to prevent bloat
+        args_str = json.dumps(args, ensure_ascii=False)
+        if len(args_str) > 200:
+            args_str = args_str[:197] + "..."
+        
+        entry = {
+            "tool": tool_name,
+            "args": args_str,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "success": success,
+        }
+        
+        if exit_code is not None:
+            entry["exit_code"] = exit_code
+        
+        if error:
+            entry["error"] = error
+        
+        self.tool_history.append(entry)
+    
+    def record_error(self, tool_name: str, error: str, context: Optional[Dict[str, Any]] = None):
+        """
+        Record an error for debugging.
+        
+        Args:
+            tool_name: Name of the tool that failed
+            error: Error message
+            context: Optional context (e.g., command, file path)
+        """
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "tool": tool_name,
+            "error": error
+        }
+        
+        if context:
+            # Truncate context to prevent bloat
+            context_str = json.dumps(context, ensure_ascii=False)
+            if len(context_str) > 200:
+                context_str = context_str[:197] + "..."
+            entry["context"] = context_str
+        
+        self.recent_errors.append(entry)
+    
+    def set_last_exit_code(self, code: Optional[int]):
+        """Set the last command exit code. Called by run_command."""
+        self.last_exit_code = code
+    
+    def get_session_info(self) -> Dict[str, Any]:
+        """Get session metadata for get_context"""
+        if not self.session_id:
+            return {}
+        
+        duration = (datetime.now(timezone.utc) - self.start_time).total_seconds()
+        
+        return {
+            "id": self.session_id,
+            "start_time": self.start_time.isoformat(),
+            "duration_seconds": int(duration),
+            "total_interactions": self.total_interactions,
+            "total_tool_calls": self.total_tool_calls
+        }
+    
+    def get_tool_history(self) -> List[Dict[str, Any]]:
+        """Get recent tool execution history for get_context"""
+        return list(self.tool_history)
+    
+    def get_recent_errors(self) -> List[Dict[str, Any]]:
+        """Get recent errors for get_context"""
+        return list(self.recent_errors)
+
+
+# Global session state instance (owned by MiniAgent)
+_SESSION_STATE = SessionState()
+
+
+# ============================================================================
 # Base Tool Interface
 # ============================================================================
 
@@ -868,14 +1005,17 @@ except Exception as _e:
 
 class GetContextTool(BaseTool):
     """
-    Get agent execution context information.
+    Get comprehensive agent execution context.
     
     Returns JSON with:
-    - working_dir: Absolute path to working directory
-    - shell_cwd: Current shell working directory
-    - recent_writes: List of recently written files
+    - Execution state: working_dir, shell_cwd, recent_writes (backward compatible)
+    - Session info: id, start_time, duration, interaction counts
+    - Tool history: Recent tool calls with timestamps, exit codes, success status
+    - Recent errors: Last 3 errors with context
+    - Available tools: List of all available tool names
+    - Activity: Last command exit code
     
-    Use to: Check state without running pwd/ls commands
+    Use to: Check state, debug failures, understand session context without redundant commands
     """
     
     @property
@@ -884,7 +1024,7 @@ class GetContextTool(BaseTool):
     
     @property
     def description(self) -> str:
-        return "Get execution context: working directory, shell cwd, and recently written files"
+        return "Get comprehensive execution context: session info, tool history, errors, available tools, and execution state"
     
     @property
     def schema(self) -> Dict[str, Any]:
@@ -892,7 +1032,7 @@ class GetContextTool(BaseTool):
             "type": "function",
             "function": {
                 "name": "get_context",
-                "description": "Get agent execution context (working_dir, shell_cwd, recent_writes). Use instead of pwd/ls to check state.",
+                "description": "Get agent execution context including session history, tool calls, errors, available tools, and execution state. Use for debugging, understanding session state, or checking recent results. Prefer this over redundant pwd/ls/git status commands.",
                 "parameters": {
                     "type": "object",
                     "properties": {},
@@ -902,11 +1042,10 @@ class GetContextTool(BaseTool):
         }
     
     def execute(self) -> str:
-        """Return execution context as JSON"""
+        """Return comprehensive execution context as JSON"""
         working_dir = _get_working_dir_path()
         
         # Get shell cwd from the run_command tool instance if available
-        # Note: Access via module globals to avoid circular import during module load
         shell_cwd = None
         try:
             tools_dict = globals().get("TOOLS", {})
@@ -917,10 +1056,80 @@ class GetContextTool(BaseTool):
         except Exception:
             pass
         
+        # Get git repository context
+        git_context = {}
+        try:
+            from utils.system_info import get_git_info
+            git_info = get_git_info()
+            if git_info:
+                git_context = {
+                    "in_repo": True,
+                    "branch": git_info.get("branch"),
+                    "repo_name": git_info.get("repo_name"),
+                    "uncommitted_changes": int(git_info.get("uncommitted_changes", 0)) if git_info.get("uncommitted_changes") else 0
+                }
+            else:
+                git_context = {"in_repo": False}
+        except Exception:
+            git_context = {"in_repo": False}
+        
+        # Get available interpreters
+        interpreters = {}
+        for interpreter in ["python", "python3", "node", "ruby", "bash", "perl"]:
+            path = shutil.which(interpreter)
+            interpreters[interpreter] = path
+        
+        # Build comprehensive context
         context = {
+            # Backward compatible fields (existing)
             "working_dir": working_dir,
             "shell_cwd": shell_cwd,
-            "recent_writes": list(_RECENT_WRITES)
+            "recent_writes": list(_RECENT_WRITES),
+            
+            # Session information (new)
+            "session": _SESSION_STATE.get_session_info(),
+            
+            # Tool execution history (new)
+            "tool_history": _SESSION_STATE.get_tool_history(),
+            
+            # Available tools (new)
+            "available_tools": {
+                "all": sorted(list(TOOLS.keys())),
+                "interactive": ["run_interactive"],
+                "sandboxed": ["run_python_sandbox"]
+            },
+            
+            # Recent errors (new)
+            "recent_errors": _SESSION_STATE.get_recent_errors(),
+            
+            # Configuration state (new)
+            "configuration": {
+                "sandbox": {
+                    "enabled": bool(os.getenv("SANDBOX_PYTHON")),
+                    "timeout_seconds": int(os.getenv("SANDBOX_TIMEOUT", "30")),
+                    "max_memory_mb": int(os.getenv("SANDBOX_MAX_MEM_MB", "1024")),
+                    "max_cpu_seconds": int(os.getenv("SANDBOX_MAX_CPU_SEC", "20")),
+                    "network_disabled": os.getenv("SANDBOX_DISABLE_NETWORK", "1") in ("1", "true", "yes"),
+                    "write_protected": os.getenv("SANDBOX_ALLOW_PROJECT_WRITES", "0") not in ("1", "true", "yes")
+                },
+                "isolation": {
+                    "enabled": os.getenv("SANDBOX_ENABLE_ISOLATION") == "1",
+                    "rootfs_sha256": os.getenv("SANDBOX_ROOTFS_SHA256")
+                }
+            },
+            
+            # Repository context (new)
+            "repository": git_context,
+            
+            # Capabilities (new)
+            "capabilities": {
+                "interpreters_available": interpreters
+            },
+            
+            # Activity tracking (new)
+            "activity": {
+                "last_command_exit_code": _SESSION_STATE.last_exit_code
+            }
         }
         
         return json.dumps(context, indent=2)

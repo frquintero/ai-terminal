@@ -1,5 +1,5 @@
 from config import Config, load_config
-from tools import get_tool_schemas, TOOLS, WORKING_DIR_PREFIX
+from tools import get_tool_schemas, TOOLS, WORKING_DIR_PREFIX, _SESSION_STATE
 from ui_formatter import ui, console
 from utils.system_info import get_system_info, format_system_info
 from db_logger import DBLogger
@@ -31,6 +31,9 @@ class MiniAgent:
         self.db_logger = DBLogger()
         self.session_id = self.db_logger.start_session(system_info)
         atexit.register(self.db_logger.close)
+        
+        # Initialize session state for context tracking
+        _SESSION_STATE.reset(self.session_id)
         
         # Tool output collector for deterministic rendering
         self._current_step_tool_outputs = []
@@ -126,23 +129,32 @@ class MiniAgent:
 
 {sandbox_info}
 
-File access model:
+Working directory and path rules:
 - run_command: Always executes from {WORKING_DIR_PREFIX}/ (auto cd each call). Use relative paths like ./file.py. To read project files, use ../path (e.g., cat ../agent.py). Never write outside working dir—no ../ in redirects.
 - write_file: Paths are relative to {WORKING_DIR_PREFIX}/. Do NOT include the '{WORKING_DIR_PREFIX}/' prefix in file_path.
 - read_file: Relative path; searches {WORKING_DIR_PREFIX}/ first, then project root.
-- get_context: Use to query working_dir, shell_cwd, and files written this turn. Avoid redundant pwd/ls unless you truly need listing output.
-- run_python_sandbox: Prefer writing a single consolidated script and running once. Before running a Python file, validate with: python -m py_compile ./file.py
+
+Tool usage notes:
+- Philosophy: Prefer shell commands (run_command) over Python/scripts. Shell is faster, more elegant, less compute. Use grep/sed/awk/cut/sort/uniq/tr/head/tail/find/xargs/jq/bc pipelines for text/data/math processing. 
+- Only use run_python_sandbox for: visualization, ML/data science, or when task explicitly requires Python libraries.Prefer writing a single consolidated script and running once. Before running a Python file, validate with: python -m py_compile ./file.py
+- get_context: Retrieve comprehensive session context: execution state (working_dir, shell_cwd, recent_writes), session history (tool calls, exit codes, errors), configuration (sandbox limits, isolation), repository state (branch, uncommitted changes), and available interpreters. Use for debugging or checking state. Prefer this over pwd/ls/git status/env when you just need state.
 - run_interactive: Only for full-screen/interactive programs.
 
-Execution Rules:
+Execution strategy:
 - Respond directly without tools unless task requires file access, commands, or computation
 - Plan your tools: write scripts once, then run them. Avoid multiple run_python_sandbox calls for separate demos—combine in one script with functions and run once
 - Prefer shell pipelines (grep, sed, awk, cut, sort) over multiple tool calls—combine operations efficiently
-- Use get_context to check state. Don't run pwd/ls unless you need listing output
 - Provide final answers after tool execution without redundant tool calls
-- Do not duplicate tool output in responses - outputs are logged internally
 
-Rendering rules:
+Context inspection (get_context) triggers:
+- When to call get_context (fast, read-only):
+  • At the start of a task if session/repo/sandbox state is unclear
+  • After any failure or non-zero exit (to inspect recent_errors, tool_history, exit codes)
+  • When checking environment/project state (instead of pwd/ls/git status/env)
+  • Before run_python_sandbox to confirm sandbox limits and available interpreters
+
+Output and rendering:
+- Output policy: summarize by default; paste command/file output only when it answers the user's request or is necessary to show results
 - Interactive tools (run_interactive): Output is streamed to terminal automatically. Do not summarize or reprint.
 - Non-interactive tools (run_command, read_file, etc.): Include relevant output directly in your response when the user asks to see something.
   * For info display commands (cal, date, ls, cat, etc.), paste the actual output in a code block.
@@ -220,6 +232,9 @@ Rendering rules:
     def process_input(self, user_input: str) -> dict:
         """Process user input and return response with metadata"""
         ui.start_timer()
+        
+        # Track user interaction
+        _SESSION_STATE.increment_interactions()
         
         # Clear tool output collector for new turn
         self._current_step_tool_outputs = []
@@ -313,18 +328,46 @@ Rendering rules:
                         details = args["file_path"]
                     
                     # Special handling for interactive commands - don't wrap in Live spinner
+                    success = True
+                    error_msg = None
+                    exit_code = None
+                    
                     if tool_name == "run_interactive":
                         ui.info(f"Launching interactive: {details}")
                         try:
                             result = tool.execute(**args)
                         except Exception as e:
                             result = f"Tool '{tool_name}' raised error: {e}"
+                            success = False
+                            error_msg = str(e)
+                            _SESSION_STATE.record_error(tool_name, str(e), args)
                     else:
                         try:
                             with Live(ui.show_tool_execution(tool_name, details), console=console, refresh_per_second=10):
                                 result = tool.execute(**args)
                         except Exception as e:
                             result = f"Tool '{tool_name}' raised error: {e}"
+                            success = False
+                            error_msg = str(e)
+                            _SESSION_STATE.record_error(tool_name, str(e), args)
+                    
+                    # Extract exit code from result if available
+                    if tool_name == "run_command" and success:
+                        # Exit code is already set in _SESSION_STATE by ShellIntegration
+                        exit_code = _SESSION_STATE.last_exit_code
+                    elif tool_name == "run_python_sandbox" and success:
+                        # Parse exit code from result (if present in manifest)
+                        # Will be enhanced when we parse sandbox manifest
+                        pass
+                    
+                    # Record tool call in session state
+                    _SESSION_STATE.record_tool_call(
+                        tool_name=tool_name,
+                        args=args,
+                        success=success,
+                        exit_code=exit_code,
+                        error=error_msg
+                    )
                     
                     # Log tool result (with truncation for large outputs)
                     result_str = result if isinstance(result, str) else str(result)
