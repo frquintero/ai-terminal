@@ -299,7 +299,7 @@ class ShellIntegration:
                 
                 # Update tracked directory
                 if reset_dir:
-                self.current_dir = reset_dir
+                    self.current_dir = reset_dir
                 elif new_pwd and new_pwd.startswith('/'):
                     self.current_dir = new_pwd
                 
