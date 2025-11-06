@@ -1,6 +1,6 @@
 # AI-Powered Linux Shell Terminal
 
-**Version:** 1.1
+**Version:** 1.2
 
 This project implements an AI-powered Linux shell terminal using MiniMax M2 AI. It combines natural language processing, shell command execution, and tool-based operations to create an intelligent CLI interface.
 
@@ -13,6 +13,7 @@ This project implements an AI-powered Linux shell terminal using MiniMax M2 AI. 
 - **Tool-Based Execution**: AI translates natural language to shell commands and executes via shell integration
 - **Content Processing**: Combine file operations, shell commands, and AI generation for complex workflows
 - **Shell Integration**: Wrap around bash/zsh for efficient command execution and output capture
+- **Namespace Isolation (Optional)**: Run commands inside isolated Linux namespace with deterministic rootfs for reproducible execution
 
 ## Available Agent Tools
 
@@ -23,6 +24,7 @@ The system automatically discovers and registers tools:
 - `run_sudo_command` - Execute commands with sudo privileges
 - `run_interactive` - Run interactive commands (vim, nano, top, etc.)
 - `run_python_sandbox` - Execute Python code in isolated, resource-limited sandbox with data science libraries (pandas, numpy, matplotlib). Auto-saves plots.
+- `get_context` - Query agent's state (working directory, recent writes)
 - `wikipedia_search` - Search Wikipedia for information
 - `process_content` - Analyze and process text content
 
@@ -59,6 +61,17 @@ Key settings in `.env`:
 - `SANDBOX_MAX_MEM_MB` (default: `1024`) - Maximum memory in MB
 - `SANDBOX_MAX_FSIZE_MB` (default: `50`) - Maximum file size in MB
 - `SANDBOX_DISABLE_NETWORK` (default: `1`) - Disable network access in sandbox
+
+### Namespace Isolation (Optional)
+Deterministic rootfs-based isolation for reproducible command execution:
+- `SANDBOX_ENABLE_ISOLATION` (default: `0`) - Enable namespace isolation (requires Linux + bubblewrap)
+- `SANDBOX_ROOTFS_SHA256` (optional) - Specific rootfs image SHA256 to use
+
+**To enable:**
+1. Build rootfs (one-time): `sudo ./build_rootfs.sh`
+2. Run agent with isolation: `SANDBOX_ENABLE_ISOLATION=1 python main.py`
+
+See [history/NAMESPACE_ISOLATION.md](history/NAMESPACE_ISOLATION.md) for full documentation.
 
 ## Usage
 

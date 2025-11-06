@@ -29,7 +29,7 @@ def ensure_venv():
         sys.exit(1)
 
 # Metadata / CLI
-VERSION = "1.01"
+VERSION = "1.2"
 
 def _print_help():
     help_text = f"""
