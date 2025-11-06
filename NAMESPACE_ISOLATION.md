@@ -40,10 +40,32 @@ The agent can run commands in two modes:
 
 ## Quick Start
 
-### 1. Install debootstrap
+### 1. Build Rootfs (One-time)
 
-The build script will detect your OS and suggest the correct command:
+The script will **auto-install debootstrap** if missing (detects your package manager):
 
+```bash
+# Requires: root privileges, ~500MB disk space
+sudo ./build_rootfs.sh
+
+# If debootstrap is missing, the script will:
+# [INFO] debootstrap not found, attempting auto-install...
+# [INFO] Detected Manjaro Linux
+# [INFO] Installing debootstrap with pacman...
+# [INFO] ✓ debootstrap installed successfully
+
+# Then builds the rootfs:
+# ========================================
+# Image: py-data-3.11
+# SHA256: abc123...
+# Path: ~/.cache/agent_sandbox/images/abc123....tar.gz
+# Size: 487M
+# ========================================
+```
+
+**Supported distros for auto-install:** Arch, Manjaro, Debian, Ubuntu, Fedora, RHEL, openSUSE
+
+**Manual install (if needed):**
 ```bash
 # Arch/Manjaro
 sudo pacman -S debootstrap
@@ -55,28 +77,13 @@ sudo apt-get install debootstrap
 sudo dnf install debootstrap
 ```
 
-### 2. Build Rootfs (One-time)
-
-```bash
-# Requires: debootstrap, root privileges, ~500MB space
-sudo ./build_rootfs.sh
-
-# Output:
-# ========================================
-# Image: py-data-3.11
-# SHA256: abc123...
-# Path: ~/.cache/agent_sandbox/images/abc123....tar.gz
-# Size: 487M
-# ========================================
-```
-
 This creates a minimal Debian rootfs with:
 - Python 3.11.9 + venv at /opt/venv
 - Data packages: numpy, pandas, scipy, scikit-learn, pyarrow, matplotlib, polars
 - Shell tools: grep, sed, awk, jq, csvkit, sqlite3, bc, curl, wget, git
 - Manifest: /etc/sandbox_manifest.json
 
-### 3. Enable Isolation
+### 2. Enable Isolation
 
 ```bash
 # Use isolated mode
@@ -86,7 +93,7 @@ export SANDBOX_ENABLE_ISOLATION=1
 python main.py
 ```
 
-### 4. Verify Isolation
+### 3. Verify Isolation
 
 Inside the agent, run:
 ```

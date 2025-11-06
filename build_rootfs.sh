@@ -35,29 +35,58 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $*"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 
-# Detect OS and suggest appropriate package install command
-detect_os_install_cmd() {
+# Auto-install missing packages
+auto_install_debootstrap() {
     if [[ -f /etc/os-release ]]; then
         . /etc/os-release
+        
+        log_info "debootstrap not found, attempting auto-install..."
+        
+        local install_success=false
         case "$ID" in
             arch|manjaro)
-                echo "sudo pacman -S debootstrap"
+                log_info "Detected $PRETTY_NAME"
+                log_info "Installing debootstrap with pacman..."
+                if pacman -S --noconfirm debootstrap; then
+                    install_success=true
+                fi
                 ;;
             ubuntu|debian|linuxmint|pop)
-                echo "sudo apt-get install debootstrap"
+                log_info "Detected $PRETTY_NAME"
+                log_info "Installing debootstrap with apt..."
+                if apt-get update && apt-get install -y debootstrap; then
+                    install_success=true
+                fi
                 ;;
             fedora|rhel|centos)
-                echo "sudo dnf install debootstrap"
+                log_info "Detected $PRETTY_NAME"
+                log_info "Installing debootstrap with dnf..."
+                if dnf install -y debootstrap; then
+                    install_success=true
+                fi
                 ;;
             opensuse*)
-                echo "sudo zypper install debootstrap"
+                log_info "Detected $PRETTY_NAME"
+                log_info "Installing debootstrap with zypper..."
+                if zypper install -y debootstrap; then
+                    install_success=true
+                fi
                 ;;
             *)
-                echo "Install debootstrap using your package manager"
+                log_warn "Unknown distribution: $PRETTY_NAME"
                 ;;
         esac
+        
+        if [[ "$install_success" == "true" ]]; then
+            log_info "✓ debootstrap installed successfully"
+            return 0
+        else
+            log_error "Failed to install debootstrap. Please install manually."
+            return 1
+        fi
     else
-        echo "Install debootstrap using your package manager"
+        log_error "Cannot detect OS. Please install debootstrap manually."
+        return 1
     fi
 }
 
@@ -69,9 +98,14 @@ check_prereqs() {
         log_error "This script must be run as root (for debootstrap/chroot)"
     fi
     
+    # Check for debootstrap, auto-install if missing
     if ! command -v debootstrap &>/dev/null; then
-        local install_cmd=$(detect_os_install_cmd)
-        log_error "debootstrap not found. Install with: $install_cmd"
+        auto_install_debootstrap || exit 1
+    fi
+    
+    # Verify installation
+    if ! command -v debootstrap &>/dev/null; then
+        log_error "debootstrap still not found after installation attempt"
     fi
     
     log_info "✓ Prerequisites satisfied"
