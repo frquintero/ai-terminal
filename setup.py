@@ -480,31 +480,19 @@ def main():
                 print_info("Setup cancelled")
                 return
     
-    # Step 5: Choose profile name
+    # Step 5: Write configuration
     print_header("Save Configuration")
     
-    use_profile = prompt_bool("Save as named profile? (e.g., .env.minimax, .env.kimi)", default=False)
-    
-    if use_profile:
-        agent_type = config['AGENT_TYPE']
-        default_name = f".env.{agent_type}"
-        profile_name = prompt_string(f"Profile filename", default=default_name)
-        if not profile_name.startswith('.env'):
-            profile_name = f".env.{profile_name}"
-    else:
-        profile_name = ".env"
-    
-    # Step 6: Write configuration
-    if write_env_file(config, profile_name):
+    if write_env_file(config, ".env"):
         print_header("Setup Complete!")
-        print_success(f"Configuration saved to {profile_name}")
+        print_success("Configuration saved to .env")
         
-        if use_profile:
-            print_info(f"\nTo use this profile, create a symlink:")
-            print(f"  {Colors.CYAN}ln -sf {profile_name} .env{Colors.END}")
-        else:
-            print_info("\nYou can now run the agent:")
-            print(f"  {Colors.CYAN}python main.py{Colors.END}")
+        print_info("\nYou can now run the agent:")
+        print(f"  {Colors.CYAN}python main.py{Colors.END}")
+        
+        print_info("\nTo temporarily use a different backend:")
+        print(f"  {Colors.CYAN}python main.py --agent kimi2{Colors.END}")
+        print(f"  {Colors.CYAN}python main.py --agent minimax --temperature 0.9{Colors.END}")
         
         print("\n" + Colors.BOLD + "Enjoy using AI Terminal!" + Colors.END + "\n")
 

@@ -8,6 +8,7 @@ A CLI interface that uses AI to interpret natural language commands and execute 
 import sys
 import os
 import subprocess
+import argparse
 
 # Check if running in virtual environment, if not, restart with venv
 def ensure_venv():
@@ -36,12 +37,28 @@ def _print_help():
 ai-terminal {VERSION}
 
 Usage:
-  python main.py [--help] [--about] [--version]
+  python main.py [OPTIONS]
 
-Flags:
-  -h, --help     Show this help message and exit
-  --about        Show a short about message and exit
-  --version      Print version and exit
+Options:
+  -h, --help              Show this help message and exit
+  --about                 Show a short about message and exit
+  --version               Print version and exit
+
+Runtime Configuration Overrides:
+  --agent {{minimax,kimi2,custom}}
+                          Override agent backend (default from .env)
+  --max-tokens N          Override max tokens per response
+  --temperature T         Override temperature (0.0-2.0)
+  --max-steps N           Override max tool calling steps
+
+Configuration Priority:
+  CLI flags > Environment variables > .env file > Defaults
+
+Examples:
+  python main.py                                # Use .env config
+  python main.py --agent kimi2                  # Switch to Kimi K2 temporarily
+  python main.py --temperature 0.9 --max-tokens 2048
+  AGENT_TYPE=kimi2 python main.py               # Environment variable override
 
 When run without flags the program starts the interactive AI-powered shell.
 """
@@ -55,21 +72,48 @@ def _print_about():
     )
     print(about)
 
-def handle_cli_flags():
-    # Inspect only top-level flags; if any known flag is present print and exit
-    args = sys.argv[1:]
-    if not args:
-        return
-    for a in args:
-        if a in ("-h", "--help"):
-            _print_help(); sys.exit(0)
-        if a == "--about":
-            _print_about(); sys.exit(0)
-        if a == "--version":
-            print(VERSION); sys.exit(0)
+def parse_cli_args():
+    """Parse command-line arguments for runtime configuration overrides"""
+    parser = argparse.ArgumentParser(
+        prog='ai-terminal',
+        description='AI-Powered Linux Shell Terminal',
+        add_help=False  # We handle --help manually
+    )
+    
+    # Meta flags (handled separately for early exit)
+    parser.add_argument('-h', '--help', action='store_true', help='Show this help message and exit')
+    parser.add_argument('--about', action='store_true', help='Show about message and exit')
+    parser.add_argument('--version', action='store_true', help='Print version and exit')
+    
+    # Runtime configuration overrides
+    parser.add_argument('--agent', type=str, choices=['minimax', 'kimi2', 'custom'], 
+                        help='Override agent backend (minimax, kimi2, custom)')
+    parser.add_argument('--max-tokens', type=int, metavar='N',
+                        help='Override max tokens per response')
+    parser.add_argument('--temperature', type=float, metavar='T',
+                        help='Override temperature (0.0-2.0)')
+    parser.add_argument('--max-steps', type=int, metavar='N',
+                        help='Override max tool calling steps')
+    
+    return parser.parse_args()
+
+def handle_cli_flags(args):
+    """Handle meta flags that exit immediately"""
+    if args.help:
+        _print_help()
+        sys.exit(0)
+    if args.about:
+        _print_about()
+        sys.exit(0)
+    if args.version:
+        print(VERSION)
+        sys.exit(0)
+
+# Parse CLI args early (before venv check to allow --help without venv)
+cli_args = parse_cli_args()
 
 # Allow quick inspection of help/about/version without activating venv
-handle_cli_flags()
+handle_cli_flags(cli_args)
 
 # Ensure we're running in venv before importing dependencies
 ensure_venv()
@@ -79,7 +123,21 @@ from ui_formatter import ui, console
 from rich.prompt import Prompt
 from tools import WORKING_DIR_PREFIX
 
+def apply_cli_overrides(args):
+    """Apply CLI argument overrides to environment variables (takes precedence)"""
+    if args.agent:
+        os.environ['AGENT_TYPE'] = args.agent
+    if args.max_tokens is not None:
+        os.environ['MAX_TOKENS'] = str(args.max_tokens)
+    if args.temperature is not None:
+        os.environ['TEMPERATURE'] = str(args.temperature)
+    if args.max_steps is not None:
+        os.environ['MAX_STEPS'] = str(args.max_steps)
+
 def main():
+    # Apply CLI overrides before config loading
+    apply_cli_overrides(cli_args)
+    
     # Print banner
     ui.print_banner()
     
