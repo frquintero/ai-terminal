@@ -2,6 +2,9 @@ import pexpect
 import os
 import re
 import atexit
+import shutil
+from pathlib import Path
+from typing import Optional
 
 class ShellIntegration:
     """
@@ -23,11 +26,19 @@ class ShellIntegration:
         self._sudo_prompt = f"__AI_SUDO_{self._token}__"
         
         self.shell = None
+        self.isolation_enabled = False
+        self.rootfs_path: Optional[Path] = None
+        
         # Set initial directory to working_dir if provided, otherwise home
         if working_dir and os.path.isdir(working_dir):
             self.current_dir = working_dir
         else:
             self.current_dir = os.path.expanduser('~')
+        
+        # Check if namespace isolation is enabled
+        if os.getenv("SANDBOX_ENABLE_ISOLATION") == "1":
+            self._setup_isolation()
+        
         self._init_shell()
         
         # Ensure shell is closed on process exit
@@ -37,8 +48,84 @@ class ShellIntegration:
         """Shell-quote a string safely for single quotes"""
         return "'" + s.replace("'", "'\"'\"'") + "'"
     
+    def _setup_isolation(self):
+        """Setup namespace isolation using rootfs"""
+        try:
+            from sandbox_rootfs import get_rootfs_sha256, extract_rootfs, verify_rootfs_exists
+            
+            # Get configured rootfs
+            sha256 = get_rootfs_sha256()
+            if not sha256:
+                print("Warning: SANDBOX_ENABLE_ISOLATION=1 but no rootfs configured")
+                print("Set SANDBOX_ROOTFS_SHA256 or run build_rootfs.sh")
+                return
+            
+            # Verify rootfs exists
+            if not verify_rootfs_exists(sha256):
+                print(f"Warning: Rootfs not found in cache: {sha256}")
+                print("Run build_rootfs.sh to create rootfs")
+                return
+            
+            # Extract rootfs
+            self.rootfs_path = extract_rootfs(sha256)
+            self.isolation_enabled = True
+            print(f"✓ Namespace isolation enabled (rootfs: {sha256[:12]}...)")
+            
+        except Exception as e:
+            print(f"Warning: Failed to setup isolation: {e}")
+            print("Falling back to direct shell")
+    
+    def _init_isolated_shell(self):
+        """Initialize bash inside rootfs using bubblewrap"""
+        # Check bwrap availability
+        if not shutil.which("bwrap"):
+            print("Warning: bwrap not found, disabling isolation")
+            self.isolation_enabled = False
+            self._init_shell()  # Fall back to direct shell
+            return
+        
+        # Build bwrap command
+        # In isolated mode, working_dir maps to /workspace inside container
+        bwrap_args = [
+            "--unshare-all",         # Isolate all namespaces
+            "--die-with-parent",     # Kill if parent dies
+            "--ro-bind", str(self.rootfs_path), "/",  # Mount rootfs as /
+            "--proc", "/proc",       # Process info
+            "--dev", "/dev",         # Devices
+            "--tmpfs", "/tmp",       # Fresh /tmp
+            "--bind", self.current_dir, "/workspace",  # Working directory (RW)
+            "--chdir", "/workspace", # Start in /workspace
+            "--setenv", "PATH", "/opt/venv/bin:/usr/bin:/bin",
+            "--setenv", "HOME", "/workspace",
+            "--setenv", "LANG", "C.UTF-8",
+            "--setenv", "OMP_NUM_THREADS", "1",
+            "--setenv", "OPENBLAS_NUM_THREADS", "1",
+            "--unsetenv", "PROMPT_COMMAND",
+            "--",
+            "/bin/bash", "--noprofile", "--norc", "-i"
+        ]
+        
+        # Spawn bwrap
+        self.shell = pexpect.spawn(
+            "bwrap",
+            bwrap_args,
+            encoding='utf-8',
+            codec_errors='replace',
+            env={"TERM": "dumb"}  # Minimal env
+        )
+        
+        # Note: In isolated mode, current_dir tracks /workspace inside container
+        # This is transparent to the rest of the code since we always cd to /workspace
+    
     def _init_shell(self):
         """Initialize a controlled shell with predictable behavior"""
+        
+        # If isolation enabled, use bwrap
+        if self.isolation_enabled and self.rootfs_path:
+            self._init_isolated_shell()
+            return
+        
+        # Otherwise, spawn direct bash
         # Prefer bash for consistency; fallback to user's shell
         shell_path = "/bin/bash"
         args = ["--noprofile", "--norc", "-i"]
@@ -147,13 +234,23 @@ class ShellIntegration:
         
         Returns the command output as a clean string.
         Captures exit code and updates current directory automatically.
+        
+        In isolated mode, commands run inside /workspace container path.
         """
         try:
+            # In isolated mode, always cd to /workspace to maintain stateless behavior
+            # In direct mode, cd to current_dir
+            if self.isolation_enabled:
+                cwd_reset = "cd /workspace"
+            else:
+                cwd_reset = f"cd {self._shq(self.current_dir)}"
+            
             # Wrap command with markers and capture exit code + PWD
             # Format: START_MARKER\nCOMMAND_OUTPUT\nEND_MARKER<exitcode>:<pwd>
             # Use echo instead of printf for simplicity and compatibility
             wrapped = (
                 f'PS1={self._shq(self.PROMPT)}; '
+                f'{cwd_reset}; '  # Reset to working directory (stateless)
                 f'echo {self._shq(self._start_marker)}; '
                 f'{command}; '
                 f'__S=$?; '

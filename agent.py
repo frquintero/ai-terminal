@@ -7,6 +7,8 @@ import openai
 import json
 import re
 import atexit
+import os
+from pathlib import Path
 from rich.live import Live
 
 class MiniAgent:
@@ -47,14 +49,77 @@ class MiniAgent:
             lines.append(f"- {name}: {desc}")
         return "\n".join(lines)
     
+    def _load_sandbox_manifest(self):
+        """Load sandbox manifest if isolation is enabled"""
+        if os.getenv("SANDBOX_ENABLE_ISOLATION") != "1":
+            return None
+        
+        # Try to load manifest from rootfs
+        manifest_path = Path("/etc/sandbox_manifest.json")
+        if manifest_path.exists():
+            try:
+                with open(manifest_path) as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        
+        return None
+    
+    def _format_sandbox_info(self, manifest: dict) -> str:
+        """Format sandbox information for system prompt"""
+        if not manifest:
+            return ""
+        
+        lines = ["\nSandbox Environment (Isolated):"]
+        
+        # Python info
+        py_info = manifest.get("python", {})
+        py_ver = py_info.get("version", "unknown")
+        lines.append(f"- Python {py_ver} at {py_info.get('path', '/opt/venv/bin/python3')}")
+        
+        # Top packages
+        packages = manifest.get("python_packages", {})
+        if packages:
+            pkg_list = ", ".join(f"{k} {v}" for k, v in list(packages.items())[:6])
+            if len(packages) > 6:
+                pkg_list += f", ... ({len(packages)} total)"
+            lines.append(f"- Packages: {pkg_list}")
+        
+        # Shell commands
+        shell_cmds = manifest.get("shell_commands", {})
+        if "data_tools" in shell_cmds:
+            tools = ", ".join(shell_cmds["data_tools"])
+            lines.append(f"- Data tools: {tools}")
+        
+        # Command examples
+        examples = manifest.get("command_examples", {})
+        if examples:
+            lines.append("\nKey command examples:")
+            for cmd, info in list(examples.items())[:5]:
+                if isinstance(info, dict) and "examples" in info:
+                    example = info["examples"][0] if info["examples"] else ""
+                    if example:
+                        lines.append(f"  • {example}")
+        
+        lines.append("\nAll tools listed in /etc/sandbox_manifest.json")
+        
+        return "\n".join(lines)
+    
     def _build_system_prompt(self, system_context: str) -> str:
         """Build the complete system prompt with tools, context, and guidelines"""
         tools_block = self._format_tools_for_prompt()
+        
+        # Load and format sandbox info if isolation enabled
+        manifest = self._load_sandbox_manifest()
+        sandbox_info = self._format_sandbox_info(manifest)
+        
         return f"""Shell automation expert and conversational assistant. Execute commands, write scripts, manage files, and engage in helpful dialogue.
 
 {tools_block}
 
 {system_context}
+
+{sandbox_info}
 
 File access model:
 - run_command: Always executes from {WORKING_DIR_PREFIX}/ (auto cd each call). Use relative paths like ./file.py. To read project files, use ../path (e.g., cat ../agent.py). Never write outside working dir—no ../ in redirects.
