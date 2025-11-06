@@ -359,12 +359,15 @@ class RunCommandTool(BaseTool):
             # Skip wrapper commands and environment assignments to find the actual executable
             WRAPPER_COMMANDS = {'sudo', 'su', 'env', 'time', 'nice', 'nohup', 'strace', 'gdb', 'valgrind', 'timeout'}
 
-            # Scan through tokens, skipping wrappers and env assignments
+            # Scan through tokens, interleaving wrapper and assignment skipping
+            # Continue until we find a token that's neither wrapper nor assignment
             i = 0
-            while i < len(first_cmd_tokens) and os.path.basename(first_cmd_tokens[i]) in WRAPPER_COMMANDS:
-                i += 1
-            while i < len(first_cmd_tokens) and _is_env_assignment(first_cmd_tokens[i]):
-                i += 1
+            while i < len(first_cmd_tokens):
+                token = first_cmd_tokens[i]
+                if os.path.basename(token) in WRAPPER_COMMANDS or _is_env_assignment(token):
+                    i += 1
+                else:
+                    break
             
             # If only wrappers/assignments, allow the command (not interactive)
             if i >= len(first_cmd_tokens):
