@@ -418,7 +418,7 @@ main() {
     
     echo ""
     log_info "🎉 Rootfs build complete!"
-    log_info "To use: SANDBOX_ROOTFS_SHA256=$sha256 python main.py"
+    log_info "To use: SANDBOX_ENABLE_ISOLATION=1 python main.py"
 }
 
 main "$@"
