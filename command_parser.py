@@ -300,10 +300,16 @@ def is_interactive_command(cmd: str, args: List[str]) -> Tuple[bool, str]:
         if '-e' in args or '--eval' in args or '-p' in args or '--print' in args:
             return False, f"Node with -e/-p (non-interactive)"
         
-        # Check for script argument
+        # Check for script argument (common extensions + extensionless)
         for arg in args:
-            if not arg.startswith('-') and arg.endswith('.js'):
-                return False, f"Node with script ({arg})"
+            if not arg.startswith('-'):
+                # Accept .js, .mjs, .cjs, .jsx, .ts, .tsx, or extensionless
+                # For extensionless: check basename without leading dot
+                arg_base = basename(arg)
+                arg_name = arg_base.lstrip('.')  # Remove leading dots for hidden files
+                if (arg.endswith(('.js', '.mjs', '.cjs', '.jsx', '.ts', '.tsx')) or 
+                    '.' not in arg_name):
+                    return False, f"Node with script ({arg})"
         
         # Bare node → likely REPL
         return True, f"Bare Node (likely REPL)"
@@ -318,10 +324,15 @@ def is_interactive_command(cmd: str, args: List[str]) -> Tuple[bool, str]:
         if '-e' in args:
             return False, f"Ruby with -e (non-interactive)"
         
-        # Check for script argument
+        # Check for script argument (common extensions + extensionless)
         for arg in args:
-            if not arg.startswith('-') and arg.endswith('.rb'):
-                return False, f"Ruby with script ({arg})"
+            if not arg.startswith('-'):
+                # Accept .rb or extensionless scripts
+                # For extensionless: check basename without leading dot
+                arg_base = basename(arg)
+                arg_name = arg_base.lstrip('.')  # Remove leading dots for hidden files
+                if arg.endswith('.rb') or '.' not in arg_name:
+                    return False, f"Ruby with script ({arg})"
         
         # Bare ruby → likely REPL
         return True, f"Bare Ruby (likely REPL)"
