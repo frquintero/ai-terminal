@@ -19,9 +19,9 @@ Kimi K2 is a trillion-parameter MoE (Mixture of Experts) model from Moonshot AI 
 Add to `.env`:
 ```bash
 # Kimi K2 Configuration
-KIMI_2_API_KEY=sk-or-v1-xxxxx  # From platform.moonshot.ai or openrouter.ai
-KIMI_2_MODEL=kimi-k2-instruct
-KIMI_2_BASE_URL=https://api.moonshot.ai/v1  # Or OpenRouter: https://openrouter.ai/api/v1
+KIMI_2_API_KEY=sk-xxxxx  # From platform.moonshot.cn
+KIMI_2_MODEL=kimi-k2-0905-preview
+KIMI_2_BASE_URL=https://api.moonshot.cn/v1
 ```
 
 ### 2. Config Loader Pattern
@@ -34,8 +34,8 @@ agent_type = os.getenv('AGENT_TYPE', 'minimax')  # minimax | kimi2
 
 if agent_type == 'kimi2':
     api_key = os.getenv('KIMI_2_API_KEY')
-    model = os.getenv('KIMI_2_MODEL', 'kimi-k2-instruct')
-    base_url = os.getenv('KIMI_2_BASE_URL', 'https://api.moonshot.ai/v1')
+    model = os.getenv('KIMI_2_MODEL', 'kimi-k2-0905-preview')
+    base_url = os.getenv('KIMI_2_BASE_URL', 'https://api.moonshot.cn/v1')
 elif agent_type == 'minimax':
     api_key = os.getenv('MINIMAX_M2_API_KEY')
     model = os.getenv('MINIMAX_MODEL', 'MiniMax-M2')
@@ -120,16 +120,20 @@ Run with: `python main.py --env .env.kimi`
 
 ## API Key Sources
 
-1. **Moonshot Platform** (direct):
-   - https://platform.moonshot.ai
-   - Create account → Generate API key (starts with `sk-or-v1-`)
-   - Potentially faster and cheaper
+**⚠️ IMPORTANT:** Based on testing, use the **official Moonshot platform** (.cn domain):
 
-2. **OpenRouter** (aggregator):
+1. **Moonshot Platform** (direct, RECOMMENDED):
+   - Sign up: https://platform.moonshot.cn/console/api-keys
+   - Base URL: `https://api.moonshot.cn/v1` (note: .cn not .ai)
+   - Model name: `kimi-k2-0905-preview`
+   - API key format: starts with `sk-`
+   - Free tier available, potentially faster
+
+2. **OpenRouter** (aggregator alternative):
    - https://openrouter.ai
-   - Single API for multiple models
-   - Model name: `moonshotai/kimi-k2-instruct`
+   - Model name: `moonshotai/kimi-k2-0905`
    - Base URL: `https://openrouter.ai/api/v1`
+   - Requires separate OpenRouter API key (not Moonshot key)
 
 ---
 
