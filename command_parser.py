@@ -238,7 +238,7 @@ ALWAYS_INTERACTIVE = {
     'tmux', 'screen',
     'ssh', 'telnet',
     'mysql', 'psql', 'mongo', 'redis-cli',
-    'irb', 'node',  # REPLs without script mode detection
+    'irb',  # Ruby REPL (no script mode)
 }
 
 # Shells (check for -c flag)
@@ -246,6 +246,12 @@ SHELLS = {'bash', 'sh', 'zsh', 'fish', 'dash', 'ksh'}
 
 # Python interpreters (check for -c, -m, or script)
 PYTHONS = {'python', 'python2', 'python3', 'ipython', 'pypy', 'pypy3'}
+
+# Node.js interpreters (check for -e, -p, or script)
+NODES = {'node', 'nodejs'}
+
+# Ruby interpreters (check for -e or script)
+RUBIES = {'ruby', 'irb'}
 
 
 def is_interactive_command(cmd: str, args: List[str]) -> Tuple[bool, str]:
@@ -283,6 +289,42 @@ def is_interactive_command(cmd: str, args: List[str]) -> Tuple[bool, str]:
         
         # Bare python → likely REPL
         return True, f"Bare Python (likely REPL)"
+    
+    # Node.js - interactive unless -e/-p or script present
+    if cmd_base in NODES:
+        # Check for interactive flag
+        if '-i' in args or '--interactive' in args:
+            return True, f"Node with -i/--interactive flag"
+        
+        # Check for non-interactive modes
+        if '-e' in args or '--eval' in args or '-p' in args or '--print' in args:
+            return False, f"Node with -e/-p (non-interactive)"
+        
+        # Check for script argument
+        for arg in args:
+            if not arg.startswith('-') and arg.endswith('.js'):
+                return False, f"Node with script ({arg})"
+        
+        # Bare node → likely REPL
+        return True, f"Bare Node (likely REPL)"
+    
+    # Ruby - interactive unless -e or script present
+    if cmd_base in RUBIES:
+        # irb is always interactive
+        if cmd_base == 'irb':
+            return True, f"irb is always interactive"
+        
+        # Check for non-interactive modes
+        if '-e' in args:
+            return False, f"Ruby with -e (non-interactive)"
+        
+        # Check for script argument
+        for arg in args:
+            if not arg.startswith('-') and arg.endswith('.rb'):
+                return False, f"Ruby with script ({arg})"
+        
+        # Bare ruby → likely REPL
+        return True, f"Bare Ruby (likely REPL)"
     
     # Default: not in interactive set
     return False, f"'{cmd_base}' not in interactive set"
