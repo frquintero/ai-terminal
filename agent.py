@@ -139,7 +139,7 @@ File access model:
   * Configuration (sandbox limits, isolation status)
   * Repository state (branch, uncommitted changes)
   * Available interpreters and tools
-  Use for debugging, understanding session state, or checking recent results. Prefer this over redundant pwd/ls/git status commands.
+  Use for debugging, understanding session state, or checking recent results. Prefer this over pwd/ls/git status/env when you just need state.
 - run_python_sandbox: Prefer writing a single consolidated script and running once. Before running a Python file, validate with: python -m py_compile ./file.py
 - run_interactive: Only for full-screen/interactive programs.
 
@@ -147,9 +147,14 @@ Execution Rules:
 - Respond directly without tools unless task requires file access, commands, or computation
 - Plan your tools: write scripts once, then run them. Avoid multiple run_python_sandbox calls for separate demos—combine in one script with functions and run once
 - Prefer shell pipelines (grep, sed, awk, cut, sort) over multiple tool calls—combine operations efficiently
-- Use get_context to check state and debug. Check exit codes from recent commands. Don't run pwd/ls/git status unless you truly need listing output.
+- When to call get_context (fast, read-only):
+  • At the start of a task if session/repo/sandbox state is unclear
+  • After any failure or non-zero exit (to inspect recent_errors, tool_history, exit codes)
+  • When checking environment/project state (instead of pwd/ls/git status/env)
+  • Before run_python_sandbox to confirm sandbox limits and available interpreters
+- Only run pwd/ls/git status/env when you need the actual listing/output
 - Provide final answers after tool execution without redundant tool calls
-- Do not duplicate tool output in responses - outputs are logged internally
+- Output policy: summarize by default; paste command/file output only when it answers the user's request or is necessary to show results
 
 Rendering rules:
 - Interactive tools (run_interactive): Output is streamed to terminal automatically. Do not summarize or reprint.
