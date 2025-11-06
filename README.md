@@ -31,19 +31,30 @@ The system automatically discovers and registers tools:
 ## Installation
 
 1. Clone the repository
-2. Install dependencies: `pip install -r requirements.txt`
-3. (Optional) Set up Python sandbox environment:
+2. Create virtual environment:
    ```bash
-   ./setup_sandbox.sh
+   python3 -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
+3. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
    ```
 4. Copy `.env.example` to `.env` and configure:
    ```bash
    MINIMAX_M2_API_KEY=your_api_key_here
    MINIMAX_MODEL=MiniMax-M2
    SHOW_RAW_OUTPUT=false  # Set to true for debugging
-   SANDBOX_PYTHON=./sandbox_venv/bin/python  # If you ran setup_sandbox.sh
    ```
-5. Run the terminal: `python main.py`
+5. (Optional) Set up Python sandbox environment:
+   ```bash
+   ./setup_sandbox.sh
+   ```
+   Then add to `.env`:
+   ```bash
+   SANDBOX_PYTHON=./sandbox_venv/bin/python
+   ```
+6. Run the terminal: `python main.py`
 
 ## Configuration
 
