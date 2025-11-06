@@ -19,7 +19,7 @@ class MiniAgent:
     def __init__(self):
         self.config = load_config()
         self.client = openai.OpenAI(
-            base_url="https://api.minimax.io/v1",
+            base_url=self.config.base_url,
             api_key=self.config.api_key
         )
         
