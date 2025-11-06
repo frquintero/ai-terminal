@@ -16,7 +16,11 @@ import sys
 import json
 import tempfile
 from pathlib import Path
+from dotenv import load_dotenv
 from openai import OpenAI
+
+# Load environment variables
+load_dotenv()
 
 # Test configuration
 KIMI_API_KEY = os.getenv("KIMI_2_API_KEY")
