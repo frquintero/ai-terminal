@@ -15,6 +15,7 @@ import shutil
 import json
 import inspect
 from typing import Dict, Any, List, Optional
+from collections import deque
 from shell_integration import ShellIntegration
 
 
@@ -28,6 +29,14 @@ def _get_working_dir_path() -> str:
     """Get absolute path to working directory (relative to this script's location)"""
     tools_dir = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(tools_dir, WORKING_DIR_PREFIX)
+
+
+# ============================================================================
+# Context Tracking
+# ============================================================================
+
+# Track recently written files for context awareness
+_RECENT_WRITES: deque = deque(maxlen=100)
 
 
 # ============================================================================
@@ -241,6 +250,9 @@ class WriteFileTool(BaseTool):
             with open(isolated_path, 'w', encoding='utf-8') as f:
                 f.write(content)
             
+            # Track this write for context awareness
+            _RECENT_WRITES.append(file_path)
+            
             return f"File written successfully: {isolated_path}"
         except Exception as e:
             return f"Error writing file: {str(e)}"
@@ -255,16 +267,17 @@ class RunCommandTool(BaseTool):
     Execute non-interactive shell commands.
     
     Use for: File operations, text processing, system queries, shell pipelines
-    Don't use for: Interactive programs (vim, top), sudo commands, Python REPL
+    Don't use for: Interactive programs (vim, top), Python REPL
     
     Guards:
     - Blocks interactive commands → redirect to run_interactive
-    - Blocks sudo/doas → redirect to run_sudo_command  
-    - Blocks package managers without --noconfirm → requires explicit confirmation bypass
     """
     
     def __init__(self, shell: 'ShellIntegration' = None):
-        self.shell = shell or ShellIntegration()
+        # Initialize shell in the working directory so commands can access files
+        self.working_dir = _get_working_dir_path()
+        os.makedirs(self.working_dir, exist_ok=True)
+        self.shell = shell or ShellIntegration(working_dir=self.working_dir)
 
     @property
     def name(self) -> str:
@@ -272,7 +285,7 @@ class RunCommandTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Execute a non-interactive shell command. Do not use for: interactive programs (vim, nano, top), sudo commands (use run_sudo_command), or package managers without --noconfirm flag."
+        return "Execute a non-interactive shell command. Do not use for: interactive programs (vim, nano, top), or package managers without --noconfirm flag."
 
     @property
     def schema(self) -> Dict[str, Any]:
@@ -280,7 +293,7 @@ class RunCommandTool(BaseTool):
             "type": "function",
             "function": {
                 "name": "run_command",
-                "description": "Execute a non-interactive shell command. Package managers (yay/pacman) must include --noconfirm flag. Use run_sudo_command for sudo. Will timeout if used with interactive programs.",
+                "description": "Execute a non-interactive shell command. Package managers (yay/pacman) must include --noconfirm flag. Will timeout if used with interactive programs.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -309,10 +322,8 @@ class RunCommandTool(BaseTool):
         Execute shell command with safety guards.
         
         Protection layers:
-        1. Sudo detection → redirect to run_sudo_command
-        2. Package manager confirmation → enforce --noconfirm
-        3. Interactive command detection → redirect to run_interactive
-        4. Smart bypass for safe flags (--version, --help, -c for interpreters)
+        1. Interactive command detection → redirect to run_interactive
+        2. Smart bypass for safe flags (--version, --help, -c for interpreters)
         """
         try:
             # Parse command tokens
@@ -336,53 +347,10 @@ class RunCommandTool(BaseTool):
             # Identify the actual command being executed
             base = first_cmd_tokens[0]
             base_name = os.path.basename(base)
-            
-            # Handle sudo/doas prefix
-            if base_name in ('sudo', 'doas'):
-                if len(first_cmd_tokens) < 2:
-                    return "Error: sudo/doas used without a target command."
-                target_name = os.path.basename(first_cmd_tokens[1])
-            else:
-                target_name = base_name
+            target_name = base_name
             
             # ----------------------------------------------------------------
-            # GUARD 1: Redirect sudo/doas to run_sudo_command
-            # ----------------------------------------------------------------
-            if base_name in ('sudo', 'doas'):
-                return (
-                    "Error: This command uses sudo. "
-                    "Use run_sudo_command tool to handle password prompts safely."
-                )
-            
-            # ----------------------------------------------------------------
-            # GUARD 2: Package manager operations require confirmation bypass
-            # ----------------------------------------------------------------
-            if target_name in {'yay', 'pacman', 'apt', 'apt-get', 'dnf', 'yum', 'zypper', 'apk'}:
-                flags = [t for t in first_cmd_tokens[1:] if t.startswith('-')]
-                
-                # Arch-based package managers
-                if target_name in {'pacman', 'yay'}:
-                    # Check for system-modifying operations: -S (sync/install), -R (remove), -U (upgrade)
-                    has_privileged_operation = any(
-                        any(c in flag for c in ['S', 'R', 'U']) 
-                        for flag in flags
-                    )
-                    if has_privileged_operation and '--noconfirm' not in tokens:
-                        return (
-                            f"Error: Package manager '{target_name}' requires root privileges and confirmation. "
-                            f"Use run_sudo_command with --noconfirm flag. "
-                            f"Example: run_sudo_command('{command} --noconfirm', password='...')"
-                        )
-                
-                # Other package managers (apt, dnf, yum, zypper, apk)
-                else:
-                    return (
-                        f"Error: Package manager '{target_name}' likely requires root privileges. "
-                        f"Use run_sudo_command with appropriate non-interactive flags (e.g., -y for apt/dnf)."
-                    )
-            
-            # ----------------------------------------------------------------
-            # GUARD 3: Interactive command detection with smart bypass
+            # GUARD: Interactive command detection with smart bypass
             # ----------------------------------------------------------------
             cmd_is_interactive = target_name in InteractiveCommandTool.INTERACTIVE_COMMANDS
             
@@ -407,7 +375,8 @@ class RunCommandTool(BaseTool):
                 
                 # Bypass interactive guard if safe pattern detected
                 if safe_global or interpreter_safe:
-                    return self.shell.run_command(command)
+                    wrapped = f"cd {shlex.quote(self.working_dir)}; {command}"
+                    return self.shell.run_command(wrapped)
                 
                 # Block interactive usage
                 return (
@@ -416,98 +385,13 @@ class RunCommandTool(BaseTool):
                 )
             
             # Execute command via shell integration
-            return self.shell.run_command(command)
+            # Force reset to working directory before each command (stateless cwd)
+            wrapped = f"cd {shlex.quote(self.working_dir)}; {command}"
+            return self.shell.run_command(wrapped)
             
         except Exception as e:
             return f"Error executing command: {str(e)}"
 
-
-class SudoRunCommandTool(BaseTool):
-    """
-    Execute commands with sudo privileges.
-    
-    Use for: System administration tasks requiring root
-    Handles: Password prompts, passwordless sudo
-    Guard: Package managers must include --noconfirm to avoid interactive prompts
-    """
-    
-    def __init__(self, shell: 'ShellIntegration' = None):
-        self.shell = shell or ShellIntegration()
-    
-    @property
-    def name(self) -> str:
-        return "run_sudo_command"
-    
-    @property
-    def description(self) -> str:
-        return "Execute a command with sudo privileges, handling password prompts"
-    
-    @property
-    def schema(self) -> Dict[str, Any]:
-        return {
-            "type": "function",
-            "function": {
-                "name": "run_sudo_command",
-                "description": "Execute a command with sudo privileges, handling password prompts",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": {
-                            "type": "string",
-                            "description": "The command to execute with sudo (do not include 'sudo' prefix)"
-                        },
-                        "password": {
-                            "type": "string",
-                            "description": "Sudo password (optional if passwordless sudo is configured)"
-                        },
-                        "timeout": {
-                            "type": "integer",
-                            "description": "Command timeout in seconds (default: 60)",
-                            "default": 60
-                        }
-                    },
-                    "required": ["command"]
-                }
-            }
-        }
-    
-    def execute(self, command: str, password: str = None, timeout: int = 60) -> str:
-        """
-        Execute command with sudo, enforcing non-interactive package manager usage.
-        
-        Security: Password is never logged or persisted
-        """
-        try:
-            # Parse command to detect package managers
-            tokens = shlex.split(command) if command.strip() else []
-            if not tokens:
-                return "Error: Empty command"
-            
-            cmd_names = [os.path.basename(t) for t in tokens if not t.startswith('-')]
-            
-            # Enforce --noconfirm for package managers to avoid hanging on prompts
-            if cmd_names:
-                base_cmd = cmd_names[0]
-                if base_cmd in {'yay', 'pacman'}:
-                    flags = [t for t in tokens if t.startswith('-')]
-                    # Check for operations that modify system state
-                    has_prompt_operation = any(
-                        any(c in flag for c in ['S', 'R', 'U']) 
-                        for flag in flags
-                    )
-                    
-                    if has_prompt_operation and '--noconfirm' not in tokens:
-                        return (
-                            f"Error: Package manager '{base_cmd}' may prompt for confirmation. "
-                            f"Add --noconfirm to run non-interactively. "
-                            f"Example: '{command} --noconfirm'"
-                        )
-            
-            # Execute via shell integration
-            return self.shell.run_sudo_command(command, password, timeout)
-            
-        except Exception as e:
-            return f"Error executing sudo command: {str(e)}"
 
 
 class InteractiveCommandTool(BaseTool):
@@ -984,6 +868,70 @@ except Exception as _e:
         parts.append(f"Manifest: {run_dir / 'manifest.json'}")
         
         return "\n".join(parts)
+
+
+# ============================================================================
+# Context Tool
+# ============================================================================
+
+class GetContextTool(BaseTool):
+    """
+    Get agent execution context information.
+    
+    Returns JSON with:
+    - working_dir: Absolute path to working directory
+    - shell_cwd: Current shell working directory
+    - recent_writes: List of recently written files
+    
+    Use to: Check state without running pwd/ls commands
+    """
+    
+    @property
+    def name(self) -> str:
+        return "get_context"
+    
+    @property
+    def description(self) -> str:
+        return "Get execution context: working directory, shell cwd, and recently written files"
+    
+    @property
+    def schema(self) -> Dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": "get_context",
+                "description": "Get agent execution context (working_dir, shell_cwd, recent_writes). Use instead of pwd/ls to check state.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False
+                }
+            }
+        }
+    
+    def execute(self) -> str:
+        """Return execution context as JSON"""
+        working_dir = _get_working_dir_path()
+        
+        # Get shell cwd from the run_command tool instance if available
+        # Note: Access via module globals to avoid circular import during module load
+        shell_cwd = None
+        try:
+            tools_dict = globals().get("TOOLS", {})
+            if "run_command" in tools_dict:
+                rc_tool = tools_dict["run_command"]
+                if hasattr(rc_tool, "shell") and rc_tool.shell:
+                    shell_cwd = rc_tool.shell.get_current_dir()
+        except Exception:
+            pass
+        
+        context = {
+            "working_dir": working_dir,
+            "shell_cwd": shell_cwd,
+            "recent_writes": list(_RECENT_WRITES)
+        }
+        
+        return json.dumps(context, indent=2)
 
 
 # ============================================================================

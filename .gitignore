@@ -56,5 +56,8 @@ sandbox_runs/
 test_sandbox/
 sandbox_venv/
 
+# Namespace isolation build artifacts
+rootfs_build/
+
 # Working directory for file operations
 ai-terminal-wd/
