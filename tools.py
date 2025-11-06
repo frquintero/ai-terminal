@@ -1005,14 +1005,17 @@ except Exception as _e:
 
 class GetContextTool(BaseTool):
     """
-    Get agent execution context information.
+    Get comprehensive agent execution context.
     
     Returns JSON with:
-    - working_dir: Absolute path to working directory
-    - shell_cwd: Current shell working directory
-    - recent_writes: List of recently written files
+    - Execution state: working_dir, shell_cwd, recent_writes (backward compatible)
+    - Session info: id, start_time, duration, interaction counts
+    - Tool history: Recent tool calls with timestamps, exit codes, success status
+    - Recent errors: Last 3 errors with context
+    - Available tools: List of all available tool names
+    - Activity: Last command exit code
     
-    Use to: Check state without running pwd/ls commands
+    Use to: Check state, debug failures, understand session context without redundant commands
     """
     
     @property
@@ -1021,7 +1024,7 @@ class GetContextTool(BaseTool):
     
     @property
     def description(self) -> str:
-        return "Get execution context: working directory, shell cwd, and recently written files"
+        return "Get comprehensive execution context: session info, tool history, errors, available tools, and execution state"
     
     @property
     def schema(self) -> Dict[str, Any]:
@@ -1029,7 +1032,7 @@ class GetContextTool(BaseTool):
             "type": "function",
             "function": {
                 "name": "get_context",
-                "description": "Get agent execution context (working_dir, shell_cwd, recent_writes). Use instead of pwd/ls to check state.",
+                "description": "Get agent execution context including session history, tool calls, errors, available tools, and execution state. Use for debugging, understanding session state, or checking recent results. Prefer this over redundant pwd/ls/git status commands.",
                 "parameters": {
                     "type": "object",
                     "properties": {},
@@ -1039,11 +1042,10 @@ class GetContextTool(BaseTool):
         }
     
     def execute(self) -> str:
-        """Return execution context as JSON"""
+        """Return comprehensive execution context as JSON"""
         working_dir = _get_working_dir_path()
         
         # Get shell cwd from the run_command tool instance if available
-        # Note: Access via module globals to avoid circular import during module load
         shell_cwd = None
         try:
             tools_dict = globals().get("TOOLS", {})
@@ -1054,10 +1056,33 @@ class GetContextTool(BaseTool):
         except Exception:
             pass
         
+        # Build comprehensive context
         context = {
+            # Backward compatible fields (existing)
             "working_dir": working_dir,
             "shell_cwd": shell_cwd,
-            "recent_writes": list(_RECENT_WRITES)
+            "recent_writes": list(_RECENT_WRITES),
+            
+            # Session information (new)
+            "session": _SESSION_STATE.get_session_info(),
+            
+            # Tool execution history (new)
+            "tool_history": _SESSION_STATE.get_tool_history(),
+            
+            # Available tools (new)
+            "available_tools": {
+                "all": sorted(list(TOOLS.keys())),
+                "interactive": ["run_interactive"],
+                "sandboxed": ["run_python_sandbox"]
+            },
+            
+            # Recent errors (new)
+            "recent_errors": _SESSION_STATE.get_recent_errors(),
+            
+            # Activity tracking (new)
+            "activity": {
+                "last_command_exit_code": _SESSION_STATE.last_exit_code
+            }
         }
         
         return json.dumps(context, indent=2)
