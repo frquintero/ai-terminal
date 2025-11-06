@@ -135,7 +135,7 @@ Working directory and path rules:
 - read_file: Relative path; searches {WORKING_DIR_PREFIX}/ first, then project root.
 
 Tool usage notes:
-- Philosophy: Prefer shell commands (run_command) over Python/scripts. Shell is faster, more elegant, less compute. Use grep/sed/awk/cut/sort pipelines for text processing. Only use run_python_sandbox for: visualization, ML/data science, or when task explicitly requires Python libraries.
+- Philosophy: Prefer shell commands (run_command) over Python/scripts. Shell is faster, more elegant, less compute. Use grep/sed/awk/cut/sort/uniq/tr/head/tail/find/xargs/jq pipelines for text/data processing. Only use run_python_sandbox for: visualization, ML/data science, or when task explicitly requires Python libraries.
 - get_context: Retrieve comprehensive session context: execution state (working_dir, shell_cwd, recent_writes), session history (tool calls, exit codes, errors), configuration (sandbox limits, isolation), repository state (branch, uncommitted changes), and available interpreters. Use for debugging or checking state. Prefer this over pwd/ls/git status/env when you just need state.
 - run_python_sandbox: Prefer writing a single consolidated script and running once. Before running a Python file, validate with: python -m py_compile ./file.py
 - run_interactive: Only for full-screen/interactive programs.
