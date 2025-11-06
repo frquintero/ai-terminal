@@ -1,5 +1,5 @@
 from config import Config, load_config
-from tools import get_tool_schemas, TOOLS, WORKING_DIR_PREFIX
+from tools import get_tool_schemas, TOOLS, WORKING_DIR_PREFIX, _SESSION_STATE
 from ui_formatter import ui, console
 from utils.system_info import get_system_info, format_system_info
 from db_logger import DBLogger
@@ -31,6 +31,9 @@ class MiniAgent:
         self.db_logger = DBLogger()
         self.session_id = self.db_logger.start_session(system_info)
         atexit.register(self.db_logger.close)
+        
+        # Initialize session state for context tracking
+        _SESSION_STATE.reset(self.session_id)
         
         # Tool output collector for deterministic rendering
         self._current_step_tool_outputs = []
@@ -221,6 +224,9 @@ Rendering rules:
         """Process user input and return response with metadata"""
         ui.start_timer()
         
+        # Track user interaction
+        _SESSION_STATE.increment_interactions()
+        
         # Clear tool output collector for new turn
         self._current_step_tool_outputs = []
         
@@ -313,18 +319,43 @@ Rendering rules:
                         details = args["file_path"]
                     
                     # Special handling for interactive commands - don't wrap in Live spinner
+                    success = True
+                    error_msg = None
+                    exit_code = None
+                    
                     if tool_name == "run_interactive":
                         ui.info(f"Launching interactive: {details}")
                         try:
                             result = tool.execute(**args)
                         except Exception as e:
                             result = f"Tool '{tool_name}' raised error: {e}"
+                            success = False
+                            error_msg = str(e)
+                            _SESSION_STATE.record_error(tool_name, str(e), args)
                     else:
                         try:
                             with Live(ui.show_tool_execution(tool_name, details), console=console, refresh_per_second=10):
                                 result = tool.execute(**args)
                         except Exception as e:
                             result = f"Tool '{tool_name}' raised error: {e}"
+                            success = False
+                            error_msg = str(e)
+                            _SESSION_STATE.record_error(tool_name, str(e), args)
+                    
+                    # Extract exit code from result if available (for run_command)
+                    # Note: Will be enhanced when we track exit codes in ShellIntegration
+                    if tool_name == "run_command" and success:
+                        # Exit code tracking will be added in next task
+                        pass
+                    
+                    # Record tool call in session state
+                    _SESSION_STATE.record_tool_call(
+                        tool_name=tool_name,
+                        args=args,
+                        success=success,
+                        exit_code=exit_code,
+                        error=error_msg
+                    )
                     
                     # Log tool result (with truncation for large outputs)
                     result_str = result if isinstance(result, str) else str(result)

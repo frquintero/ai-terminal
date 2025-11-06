@@ -42,6 +42,143 @@ _RECENT_WRITES: deque = deque(maxlen=100)
 
 
 # ============================================================================
+# Session State Tracking
+# ============================================================================
+
+from datetime import datetime, timezone
+
+class SessionState:
+    """
+    Module-level session state for tracking agent activity.
+    Owned and reset by MiniAgent at session start.
+    
+    Provides bounded, in-memory tracking of:
+    - Session metadata (id, start time, interaction counts)
+    - Tool execution history (last 20 calls)
+    - Recent errors (last 3)
+    - Last command exit code
+    """
+    
+    def __init__(self):
+        self.session_id: Optional[str] = None
+        self.start_time: Optional[datetime] = None
+        self.total_interactions: int = 0
+        self.total_tool_calls: int = 0
+        self.tool_history: deque = deque(maxlen=20)  # Bounded to last 20 tool calls
+        self.recent_errors: deque = deque(maxlen=3)  # Bounded to last 3 errors
+        self.last_exit_code: Optional[int] = None
+    
+    def reset(self, session_id: str):
+        """Reset state for new session. Called by MiniAgent.__init__"""
+        self.session_id = session_id
+        self.start_time = datetime.now(timezone.utc)
+        self.total_interactions = 0
+        self.total_tool_calls = 0
+        self.tool_history.clear()
+        self.recent_errors.clear()
+        self.last_exit_code = None
+    
+    def increment_interactions(self):
+        """Increment user interaction count. Called per user turn."""
+        self.total_interactions += 1
+    
+    def record_tool_call(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        success: bool,
+        exit_code: Optional[int] = None,
+        error: Optional[str] = None
+    ):
+        """
+        Record a tool execution.
+        
+        Args:
+            tool_name: Name of the tool executed
+            args: Tool arguments (will be truncated if >200 chars)
+            success: Whether execution succeeded
+            exit_code: Exit code for commands (run_command, run_python_sandbox)
+            error: Error message if failed
+        """
+        self.total_tool_calls += 1
+        
+        # Truncate args to prevent bloat
+        args_str = json.dumps(args, ensure_ascii=False)
+        if len(args_str) > 200:
+            args_str = args_str[:197] + "..."
+        
+        entry = {
+            "tool": tool_name,
+            "args": args_str,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "success": success,
+        }
+        
+        if exit_code is not None:
+            entry["exit_code"] = exit_code
+        
+        if error:
+            entry["error"] = error
+        
+        self.tool_history.append(entry)
+    
+    def record_error(self, tool_name: str, error: str, context: Optional[Dict[str, Any]] = None):
+        """
+        Record an error for debugging.
+        
+        Args:
+            tool_name: Name of the tool that failed
+            error: Error message
+            context: Optional context (e.g., command, file path)
+        """
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "tool": tool_name,
+            "error": error
+        }
+        
+        if context:
+            # Truncate context to prevent bloat
+            context_str = json.dumps(context, ensure_ascii=False)
+            if len(context_str) > 200:
+                context_str = context_str[:197] + "..."
+            entry["context"] = context_str
+        
+        self.recent_errors.append(entry)
+    
+    def set_last_exit_code(self, code: Optional[int]):
+        """Set the last command exit code. Called by run_command."""
+        self.last_exit_code = code
+    
+    def get_session_info(self) -> Dict[str, Any]:
+        """Get session metadata for get_context"""
+        if not self.session_id:
+            return {}
+        
+        duration = (datetime.now(timezone.utc) - self.start_time).total_seconds()
+        
+        return {
+            "id": self.session_id,
+            "start_time": self.start_time.isoformat(),
+            "duration_seconds": int(duration),
+            "total_interactions": self.total_interactions,
+            "total_tool_calls": self.total_tool_calls
+        }
+    
+    def get_tool_history(self) -> List[Dict[str, Any]]:
+        """Get recent tool execution history for get_context"""
+        return list(self.tool_history)
+    
+    def get_recent_errors(self) -> List[Dict[str, Any]]:
+        """Get recent errors for get_context"""
+        return list(self.recent_errors)
+
+
+# Global session state instance (owned by MiniAgent)
+_SESSION_STATE = SessionState()
+
+
+# ============================================================================
 # Base Tool Interface
 # ============================================================================
 
