@@ -342,10 +342,13 @@ Rendering rules:
                             error_msg = str(e)
                             _SESSION_STATE.record_error(tool_name, str(e), args)
                     
-                    # Extract exit code from result if available (for run_command)
-                    # Note: Will be enhanced when we track exit codes in ShellIntegration
+                    # Extract exit code from result if available
                     if tool_name == "run_command" and success:
-                        # Exit code tracking will be added in next task
+                        # Exit code is already set in _SESSION_STATE by ShellIntegration
+                        exit_code = _SESSION_STATE.last_exit_code
+                    elif tool_name == "run_python_sandbox" and success:
+                        # Parse exit code from result (if present in manifest)
+                        # Will be enhanced when we parse sandbox manifest
                         pass
                     
                     # Record tool call in session state

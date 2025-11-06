@@ -28,6 +28,7 @@ class ShellIntegration:
         self.shell = None
         self.isolation_enabled = False
         self.rootfs_path: Optional[Path] = None
+        self.last_exit_code: Optional[int] = None  # Track last command exit code
         
         # Set initial directory to working_dir if provided, otherwise home
         if working_dir and os.path.isdir(working_dir):
@@ -296,6 +297,14 @@ class ShellIntegration:
                 # Extract exit code and PWD from marker
                 exit_code = int(self.shell.match.group(1))
                 new_pwd = self.shell.match.group(2).strip()
+                
+                # Store exit code and update session state
+                self.last_exit_code = exit_code
+                try:
+                    from tools import _SESSION_STATE
+                    _SESSION_STATE.set_last_exit_code(exit_code)
+                except ImportError:
+                    pass  # Session state not available (e.g., during testing)
                 
                 # Update tracked directory
                 if reset_dir:
