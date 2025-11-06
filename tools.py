@@ -1056,6 +1056,29 @@ class GetContextTool(BaseTool):
         except Exception:
             pass
         
+        # Get git repository context
+        git_context = {}
+        try:
+            from utils.system_info import get_git_info
+            git_info = get_git_info()
+            if git_info:
+                git_context = {
+                    "in_repo": True,
+                    "branch": git_info.get("branch"),
+                    "repo_name": git_info.get("repo_name"),
+                    "uncommitted_changes": int(git_info.get("uncommitted_changes", 0)) if git_info.get("uncommitted_changes") else 0
+                }
+            else:
+                git_context = {"in_repo": False}
+        except Exception:
+            git_context = {"in_repo": False}
+        
+        # Get available interpreters
+        interpreters = {}
+        for interpreter in ["python", "python3", "node", "ruby", "bash", "perl"]:
+            path = shutil.which(interpreter)
+            interpreters[interpreter] = path
+        
         # Build comprehensive context
         context = {
             # Backward compatible fields (existing)
@@ -1078,6 +1101,30 @@ class GetContextTool(BaseTool):
             
             # Recent errors (new)
             "recent_errors": _SESSION_STATE.get_recent_errors(),
+            
+            # Configuration state (new)
+            "configuration": {
+                "sandbox": {
+                    "enabled": bool(os.getenv("SANDBOX_PYTHON")),
+                    "timeout_seconds": int(os.getenv("SANDBOX_TIMEOUT", "30")),
+                    "max_memory_mb": int(os.getenv("SANDBOX_MAX_MEM_MB", "1024")),
+                    "max_cpu_seconds": int(os.getenv("SANDBOX_MAX_CPU_SEC", "20")),
+                    "network_disabled": os.getenv("SANDBOX_DISABLE_NETWORK", "1") in ("1", "true", "yes"),
+                    "write_protected": os.getenv("SANDBOX_ALLOW_PROJECT_WRITES", "0") not in ("1", "true", "yes")
+                },
+                "isolation": {
+                    "enabled": os.getenv("SANDBOX_ENABLE_ISOLATION") == "1",
+                    "rootfs_sha256": os.getenv("SANDBOX_ROOTFS_SHA256")
+                }
+            },
+            
+            # Repository context (new)
+            "repository": git_context,
+            
+            # Capabilities (new)
+            "capabilities": {
+                "interpreters_available": interpreters
+            },
             
             # Activity tracking (new)
             "activity": {
