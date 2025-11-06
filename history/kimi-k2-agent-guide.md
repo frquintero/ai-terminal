@@ -19,9 +19,9 @@ Kimi K2 is a trillion-parameter MoE (Mixture of Experts) model from Moonshot AI 
 Add to `.env`:
 ```bash
 # Kimi K2 Configuration
-KIMI_2_API_KEY=sk-xxxxx  # From platform.moonshot.cn
-KIMI_2_MODEL=kimi-k2-0905-preview
-KIMI_2_BASE_URL=https://api.moonshot.cn/v1
+KIMI_2_API_KEY=sk-xxxxx  # From platform.moonshot.ai
+KIMI_2_MODEL=kimi-k2-turbo-preview
+KIMI_2_BASE_URL=https://api.moonshot.ai/v1
 ```
 
 ### 2. Config Loader Pattern
@@ -34,8 +34,8 @@ agent_type = os.getenv('AGENT_TYPE', 'minimax')  # minimax | kimi2
 
 if agent_type == 'kimi2':
     api_key = os.getenv('KIMI_2_API_KEY')
-    model = os.getenv('KIMI_2_MODEL', 'kimi-k2-0905-preview')
-    base_url = os.getenv('KIMI_2_BASE_URL', 'https://api.moonshot.cn/v1')
+    model = os.getenv('KIMI_2_MODEL', 'kimi-k2-turbo-preview')
+    base_url = os.getenv('KIMI_2_BASE_URL', 'https://api.moonshot.ai/v1')
 elif agent_type == 'minimax':
     api_key = os.getenv('MINIMAX_M2_API_KEY')
     model = os.getenv('MINIMAX_MODEL', 'MiniMax-M2')
@@ -120,14 +120,14 @@ Run with: `python main.py --env .env.kimi`
 
 ## API Key Sources
 
-**⚠️ IMPORTANT:** Based on testing, use the **official Moonshot platform** (.cn domain):
+**✅ TESTED & VERIFIED:**
 
 1. **Moonshot Platform** (direct, RECOMMENDED):
-   - Sign up: https://platform.moonshot.cn/console/api-keys
-   - Base URL: `https://api.moonshot.cn/v1` (note: .cn not .ai)
-   - Model name: `kimi-k2-0905-preview`
+   - Sign up: https://platform.moonshot.ai
+   - Base URL: `https://api.moonshot.ai/v1`
+   - Model name: `kimi-k2-turbo-preview` (or `kimi-k2-0905-preview`)
    - API key format: starts with `sk-`
-   - Free tier available, potentially faster
+   - Free tier available, faster response times
 
 2. **OpenRouter** (aggregator alternative):
    - https://openrouter.ai
