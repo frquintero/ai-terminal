@@ -156,10 +156,57 @@ Based on benchmarks:
 
 ---
 
+## Standalone Testing (REQUIRED Before Integration)
+
+**Critical**: Build and run `test_kimi2_agent.py` to verify full functionality BEFORE integrating into main codebase.
+
+### Test Structure
+
+```python
+# tests/test_kimi2_agent.py
+import os
+from openai import OpenAI
+
+# Test 1: API Connection
+# - Initialize OpenAI client with Kimi K2 credentials
+# - Verify authentication succeeds
+
+# Test 2: Basic Chat Completion
+# - Send simple message: "What is 2+2?"
+# - Verify response is received and reasonable
+
+# Test 3: Function Calling with Tools
+# - Provide tool schemas for: run_command, read_file, write_file
+# - Test prompt: "Create a file test.txt with content 'hello', read it back, and show the date"
+# - Verify:
+#   * Model generates tool calls (write_file, read_file, run_command)
+#   * Tool call JSON is properly formatted
+#   * Multi-step reasoning works (2-3 tool calls in sequence)
+#   * Final response synthesizes tool results
+
+# Test 4: Error Handling
+# - Invalid API key
+# - Malformed tool call
+# - Network timeout
+```
+
+### Success Criteria
+
+✅ All 4 tests pass  
+✅ Function calling returns valid tool_calls array  
+✅ Multi-step workflow completes (write → read → command)  
+✅ Response quality matches or exceeds MiniMax M2  
+✅ No unexpected API errors or rate limits  
+
+**Only proceed with config.py/agent.py integration after tests pass.**
+
+---
+
 ## Next Steps
 
-1. **Minimal changes**: Just update config.py to accept base_url parameter
-2. **Add agent selector**: Create setup.py with interactive menu
-3. **Test thoroughly**: Verify tool calling with Kimi K2 API
-4. **Document pricing**: Add cost comparison to README
-5. **Profile switcher**: Support .env.minimax, .env.kimi, etc.
+1. **✅ BLOCKER**: Run standalone test suite (test_kimi2_agent.py)
+2. **Minimal changes**: Update config.py to accept base_url parameter
+3. **Add agent selector**: Create setup.py with interactive menu
+4. **Test thoroughly**: Verify tool calling with Kimi K2 API in full agent
+5. **Document pricing**: Add cost comparison to README
+6. **Profile switcher**: Support .env.minimax, .env.kimi, etc.
