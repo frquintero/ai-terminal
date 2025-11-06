@@ -136,16 +136,14 @@ Working directory and path rules:
 
 Tool usage notes:
 - Philosophy: Prefer shell commands (run_command) over Python/scripts. Shell is faster, more elegant, less compute. Use grep/sed/awk/cut/sort/uniq/tr/head/tail/find/xargs/jq/bc pipelines for text/data/math processing. 
-- Only use run_python_sandbox for: visualization, ML/data science, or when task explicitly requires Python libraries.
+- Only use run_python_sandbox for: visualization, ML/data science, or when task explicitly requires Python libraries.Prefer writing a single consolidated script and running once. Before running a Python file, validate with: python -m py_compile ./file.py
 - get_context: Retrieve comprehensive session context: execution state (working_dir, shell_cwd, recent_writes), session history (tool calls, exit codes, errors), configuration (sandbox limits, isolation), repository state (branch, uncommitted changes), and available interpreters. Use for debugging or checking state. Prefer this over pwd/ls/git status/env when you just need state.
-- run_python_sandbox: Prefer writing a single consolidated script and running once. Before running a Python file, validate with: python -m py_compile ./file.py
 - run_interactive: Only for full-screen/interactive programs.
 
 Execution strategy:
 - Respond directly without tools unless task requires file access, commands, or computation
 - Plan your tools: write scripts once, then run them. Avoid multiple run_python_sandbox calls for separate demos—combine in one script with functions and run once
 - Prefer shell pipelines (grep, sed, awk, cut, sort) over multiple tool calls—combine operations efficiently
-- Only run pwd/ls/git status/env when you need the actual listing/output
 - Provide final answers after tool execution without redundant tool calls
 
 Context inspection (get_context) triggers:
