@@ -8,6 +8,7 @@ import json
 import re
 import atexit
 import os
+import uuid
 from pathlib import Path
 from rich.live import Live
 
@@ -15,6 +16,7 @@ class MiniAgent:
     # Configuration for message history management
     MAX_HISTORY_MESSAGES = 40
     MAX_TOOL_OUTPUT_CHARS = 8000
+    MAX_REACT_LOOPS = 4
     
     def __init__(self):
         self.config = load_config()
@@ -133,6 +135,11 @@ Workflow priorities:
 2. Shell-first: Use run_command with awk/sed/cut/sort/uniq/head/tail/find/xargs/jq/bc for text, math, and file tasks.
 3. Sandbox sparingly: run_python_sandbox only when pandas/plots/ML or specific Python libs are required - bundle work into one script/run.
 
+ReAct loop rules:
+- Every reply must start with `Thought:` (brief plan). Follow with either `Action: {{\"tool\": \"name\", \"arguments\": {{...}}}}` or `Final Answer: ...`.
+- Action JSON must match an available tool schema exactly; omit speculative actions.
+- Wait for `Observation` messages (tool outputs) before issuing another Action. Keep loops under 4 iterations unless user insists.
+
 Working directory rules:
 - run_command auto-CDs into {WORKING_DIR_PREFIX}/; use relative paths (./file.py). Never write outside that directory (no ../ redirects).
 - write_file paths are relative to {WORKING_DIR_PREFIX}/ (do not prefix it).
@@ -158,6 +165,195 @@ Execution style:
 {system_context}
 
 {sandbox_info}"""
+
+    @staticmethod
+    def _extract_json_object(text: str) -> str | None:
+        """Extract the first balanced JSON object from text (supports fences)."""
+        if not text:
+            return None
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            fence_end = stripped.find("```", 3)
+            if fence_end != -1:
+                stripped = stripped[3:fence_end].strip()
+        start = stripped.find("{")
+        if start == -1:
+            return None
+        depth = 0
+        for idx in range(start, len(stripped)):
+            char = stripped[idx]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return stripped[start:idx + 1]
+        return None
+
+    @staticmethod
+    def _parse_react_directives(content: str | None) -> dict:
+        """Parse Thought/Action/Final Answer directives from assistant content."""
+        parsed = {"thought": None, "action": None, "final_answer": None}
+        if not content:
+            return parsed
+
+        text = content.strip()
+
+        thought_match = re.search(
+            r"Thought:\s*(.*?)(?:\n(?:Action|Final Answer):|$)",
+            text,
+            re.DOTALL
+        )
+        if thought_match:
+            parsed["thought"] = thought_match.group(1).strip()
+
+        action_idx = text.find("Action:")
+        if action_idx != -1:
+            action_block = text[action_idx + len("Action:") :]
+            json_blob = MiniAgent._extract_json_object(action_block)
+            if json_blob:
+                try:
+                    action_payload = json.loads(json_blob)
+                    if isinstance(action_payload, dict) and "tool" in action_payload:
+                        parsed["action"] = action_payload
+                except json.JSONDecodeError:
+                    pass
+
+        final_idx = text.find("Final Answer:")
+        if final_idx != -1:
+            parsed["final_answer"] = text[final_idx + len("Final Answer:") :].strip()
+
+        return parsed
+
+    @classmethod
+    def _format_observation_content(
+        cls,
+        tool_name: str,
+        result: str,
+        success: bool,
+        exit_code: int | None,
+        error_msg: str | None
+    ) -> str:
+        """Format observation payload for ReAct loop history."""
+        preview = result
+        if len(preview) > cls.MAX_TOOL_OUTPUT_CHARS:
+            truncated = len(preview) - cls.MAX_TOOL_OUTPUT_CHARS
+            preview = preview[: cls.MAX_TOOL_OUTPUT_CHARS] + f"\n...[truncated {truncated} chars]"
+
+        observation = {
+            "tool": tool_name,
+            "success": success,
+            "exit_code": exit_code,
+            "error": error_msg,
+            "output_preview": preview
+        }
+        return f"Observation:\n{json.dumps(observation, indent=2)}"
+
+    @staticmethod
+    def _summarize_action(tool_name: str, args: dict) -> str:
+        """Generate a compact human-readable summary for a tool action."""
+        if tool_name == "run_command":
+            cmd = args.get("command")
+            if cmd:
+                return f"run_command: {cmd}"
+        elif tool_name in ("read_file", "write_file"):
+            path = args.get("file_path")
+            if path:
+                return f"{tool_name}: {path}"
+        elif tool_name == "run_python_sandbox":
+            entrypoint = args.get("entrypoint") or "script"
+            return f"{tool_name}: {entrypoint}"
+        return tool_name
+
+    @staticmethod
+    def _build_plan_reminder_text(
+        thought: str | None,
+        executed_actions: list[str]
+    ) -> str | None:
+        """Create reminder text tying next actions to the previous Thought."""
+        if not thought:
+            return None
+        actions_label = "; ".join(executed_actions) if executed_actions else "none"
+        reminder = (
+            f"Plan reminder: Thought -> {thought}. "
+            f"Actions executed -> {actions_label}. "
+            "Only run another Action if it advances this plan; otherwise emit a new Thought first."
+        )
+        return reminder
+
+    def _append_plan_reminder(
+        self,
+        thought: str | None,
+        executed_actions: list[str]
+    ):
+        reminder = self._build_plan_reminder_text(thought, executed_actions)
+        if reminder:
+            self.message_history.append({"role": "system", "content": reminder})
+    
+    def _sanitize_history_tool_calls(self):
+        """Ensure tool outputs reference valid assistant tool_call IDs before API call."""
+        sanitized_history = []
+        valid_ids = set()
+        
+        normalized_messages = []
+        for msg in self.message_history:
+            if not isinstance(msg, dict):
+                msg = self._to_dict_message(msg)
+            normalized_messages.append(msg)
+        
+        self.message_history = normalized_messages
+        
+        for msg in self.message_history:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                normalized_calls = self._normalize_tool_calls(msg["tool_calls"])
+                msg["tool_calls"] = normalized_calls
+                for tc in normalized_calls:
+                    valid_ids.add(tc.get("id"))
+        
+        for msg in self.message_history:
+            if msg.get("role") == "tool":
+                tc_id = msg.get("tool_call_id")
+                if not tc_id or tc_id not in valid_ids:
+                    self._log("SANITIZE_WARNING", f"Dropping orphan tool output with id={tc_id}")
+                    continue
+            sanitized_history.append(msg)
+        
+        self.message_history = sanitized_history
+
+    @staticmethod
+    def _normalize_tool_calls(tool_calls: list) -> list[dict]:
+        """Normalize tool call payloads into plain dicts with stable IDs."""
+        normalized: list[dict] = []
+        for tc in tool_calls:
+            fn = getattr(tc, "function", None)
+            name = None
+            arguments = "{}"
+            if fn is not None:
+                name = getattr(fn, "name", None)
+                arguments = getattr(fn, "arguments", "{}")
+            elif isinstance(tc, dict):
+                fn = tc.get("function", {})
+                name = fn.get("name")
+                arguments = fn.get("arguments", "{}")
+            if isinstance(arguments, bytes):
+                arguments = arguments.decode("utf-8", errors="ignore")
+            if not isinstance(arguments, str):
+                try:
+                    arguments = json.dumps(arguments)
+                except Exception:
+                    arguments = str(arguments)
+            tc_id = getattr(tc, "id", None) if not isinstance(tc, dict) else tc.get("id")
+            if not tc_id:
+                tc_id = f"call-{uuid.uuid4().hex}"
+            normalized.append({
+                "id": tc_id,
+                "type": getattr(tc, "type", "function") if not isinstance(tc, dict) else tc.get("type", "function"),
+                "function": {
+                    "name": name or "",
+                    "arguments": arguments
+                }
+            })
+        return normalized
     
     def _log(self, log_type: str, content: str):
         """Safe logging wrapper that prevents DB failures from crashing flows"""
@@ -189,21 +385,7 @@ Execution style:
         # Handle tool_calls (convert to dict and ensure arguments is JSON string)
         tool_calls = getattr(msg, "tool_calls", None)
         if tool_calls:
-            tc_list = []
-            for tc in tool_calls:
-                fn = getattr(tc, "function", None)
-                args = getattr(fn, "arguments", "{}") if fn else "{}"
-                if not isinstance(args, str):
-                    try:
-                        args = json.dumps(args)
-                    except Exception:
-                        args = str(args)
-                tc_list.append({
-                    "id": getattr(tc, "id", None),
-                    "type": getattr(tc, "type", "function") or "function",
-                    "function": {"name": getattr(fn, "name", ""), "arguments": args}
-                })
-            out["tool_calls"] = tc_list
+            out["tool_calls"] = MiniAgent._normalize_tool_calls(tool_calls)
         
         return out
     
@@ -249,8 +431,12 @@ Execution style:
         max_steps = self.config.max_steps  # Configurable via .env (default: 15)
         step_count = 0
         
+        react_loop_count = 0
+        react_limit_warning_sent = False
         while step_count < max_steps:
             try:
+                self._sanitize_history_tool_calls()
+                
                 # Show thinking indicator
                 with Live(ui.show_thinking(), console=console, refresh_per_second=10):
                     response = self.client.chat.completions.create(
@@ -273,22 +459,56 @@ Execution style:
                     else:
                         ui.error("API Error: No base_resp found.")
                         return {"content": None, "error": "No base_resp found", "elapsed_time": ui.get_elapsed_time()}
-                
+
                 assistant_message = response.choices[0].message
                 
             except Exception as e:
                 ui.error(f"API Error: {str(e)}")
                 return {"content": None, "error": str(e), "elapsed_time": ui.get_elapsed_time()}
             
-            if assistant_message.tool_calls:
-                self.message_history.append(self._to_dict_message(assistant_message))
+            react_parse = self._parse_react_directives(assistant_message.content)
+            if react_parse.get("thought"):
+                self._log("REACT_THOUGHT", react_parse["thought"])
+            final_answer_override = react_parse.get("final_answer")
+            
+            raw_tool_calls = list(assistant_message.tool_calls or [])
+            action_payload = react_parse.get("action")
+            if not raw_tool_calls and action_payload:
+                tool_name = action_payload.get("tool")
+                args_field = action_payload.get("arguments", {})
+                if isinstance(args_field, dict) and tool_name:
+                    raw_tool_calls = [{
+                        "id": f"react-{uuid.uuid4().hex}",
+                        "type": "function",
+                        "function": {
+                            "name": tool_name,
+                            "arguments": json.dumps(args_field)
+                        }
+                    }]
+            
+            normalized_tool_calls = self._normalize_tool_calls(raw_tool_calls)
+            
+            if normalized_tool_calls:
+                if not assistant_message.content:
+                    if react_parse.get("thought"):
+                        assistant_message.content = f"Thought: {react_parse['thought']}"
+                    else:
+                        assistant_message.content = "Action: issuing tool call."
+                assistant_entry = self._to_dict_message(assistant_message)
+                assistant_entry["tool_calls"] = normalized_tool_calls
+                self.message_history.append(assistant_entry)
                 
                 # Show step indicator for multi-step operations
-                if len(assistant_message.tool_calls) > 1 or step_count > 0:
+                if len(normalized_tool_calls) > 1 or step_count > 0:
                     ui.step_indicator(step_count + 1, max_steps, "Processing tools")
                 
-                for tc_idx, tool_call in enumerate(assistant_message.tool_calls):
-                    tool_name = tool_call.function.name
+                executed_actions: list[str] = []
+                for tool_call in normalized_tool_calls:
+                    tool_name = (tool_call.get("function") or {}).get("name")
+                    tool_call_id = tool_call.get("id")
+                    if not tool_call_id:
+                        self._log("TOOL_CALL_ERROR", f"Skipping tool call without id: {tool_call}")
+                        continue
                     
                     # Guard against unknown tools
                     tool = TOOLS.get(tool_name)
@@ -296,19 +516,19 @@ Execution style:
                         tool_message = {
                             "role": "tool",
                             "content": f"Error: Unknown tool '{tool_name}'",
-                            "tool_call_id": tool_call.id
+                            "tool_call_id": tool_call_id
                         }
                         self.message_history.append(tool_message)
                         continue
                     
                     # Guard against malformed JSON arguments
                     try:
-                        args = json.loads(tool_call.function.arguments or "{}")
+                        args = json.loads((tool_call.get("function") or {}).get("arguments") or "{}")
                     except Exception as e:
                         tool_message = {
                             "role": "tool",
                             "content": f"Error: Invalid tool arguments JSON: {e}",
-                            "tool_call_id": tool_call.id
+                            "tool_call_id": tool_call_id
                         }
                         self.message_history.append(tool_message)
                         continue
@@ -374,10 +594,18 @@ Execution style:
                         result_str = result_str[:32768] + f"\n...[truncated {extra} chars]"
                     self._log("TOOL_RESULT", result_str)
                     
+                    observation_content = self._format_observation_content(
+                        tool_name=tool_name,
+                        result=result_str,
+                        success=success,
+                        exit_code=exit_code,
+                        error_msg=error_msg
+                    )
+                    
                     tool_message = {
                         "role": "tool",
-                        "content": result if isinstance(result, str) else str(result),
-                        "tool_call_id": tool_call.id
+                        "content": observation_content,
+                        "tool_call_id": tool_call_id
                     }
                     self.message_history.append(tool_message)
                     
@@ -390,9 +618,33 @@ Execution style:
                     
                     # Trim history after tool execution to manage large outputs
                     self._trim_history()
+
+                    executed_actions.append(self._summarize_action(tool_name, args))
+
+                self._append_plan_reminder(
+                    react_parse.get("thought"),
+                    executed_actions
+                )
             else:
+                if final_answer_override:
+                    assistant_message.content = final_answer_override
                 self.message_history.append(self._to_dict_message(assistant_message))
                 break
+            
+            react_loop_count += 1
+            if (
+                not react_limit_warning_sent
+                and react_loop_count >= self.MAX_REACT_LOOPS
+            ):
+                limiter_message = {
+                    "role": "system",
+                    "content": (
+                        "ReAct loop limit reached. Provide a Final Answer summarizing results "
+                        "without requesting further tool calls."
+                    )
+                }
+                self.message_history.append(limiter_message)
+                react_limit_warning_sent = True
             
             step_count += 1
             if step_count >= max_steps:
