@@ -17,6 +17,7 @@ import inspect
 import re
 from typing import Dict, Any, List, Optional
 from collections import deque
+from pathlib import Path
 from shell_integration import ShellIntegration
 from command_parser import parse_command
 
@@ -695,6 +696,25 @@ with open(os.path.join(project_dir, 'output.txt'), 'w') as f:
     f.write('Mean: 42.5\\n')"""
         ]
     
+    def _select_python_interpreter(self) -> str:
+        """Pick sandbox interpreter with preference for dedicated venv."""
+        override = os.getenv("SANDBOX_PYTHON")
+        if override:
+            expanded = Path(override).expanduser()
+            if expanded.exists():
+                return str(expanded)
+            return str(expanded)
+        
+        root_dir = Path(__file__).resolve().parent
+        if os.name == "nt":
+            candidate = root_dir / "sandbox_venv" / "Scripts" / "python.exe"
+        else:
+            candidate = root_dir / "sandbox_venv" / "bin" / "python"
+        if candidate.exists():
+            return str(candidate)
+        
+        return sys.executable
+    
     def execute(self, code: str = None, file_path: str = None, timeout: int = None, return_artifacts: bool = True) -> str:
         """
         Execute Python code in sandboxed environment.
@@ -715,7 +735,6 @@ with open(os.path.join(project_dir, 'output.txt'), 'w') as f:
         import shutil as _shutil
         import textwrap
         import signal
-        from pathlib import Path
         
         # Validate inputs
         if not code and not file_path:
@@ -731,9 +750,9 @@ with open(os.path.join(project_dir, 'output.txt'), 'w') as f:
         original_cwd = Path(os.getcwd()).resolve()
         
         # Setup isolated run directory
-        base = os.getenv("SANDBOX_PATH", "./sandbox_runs")
+        base_path = Path(os.getenv("SANDBOX_PATH", "./sandbox_runs")).resolve()
         run_id = str(uuid.uuid4())
-        run_dir = (Path(base) / "runs" / run_id).resolve()
+        run_dir = (base_path / "runs" / run_id).resolve()
         artifacts_dir = run_dir / "artifacts"
         
         try:
@@ -778,22 +797,159 @@ if not _allow_writes:
     _original_open = open
     _project_dir = os.environ.get("SANDBOX_PROJECT", "")
     _real_project = os.path.realpath(_project_dir) if _project_dir else ""
-    
-    def _protected_open(file, mode='r', *args, **kwargs):
-        # Check if this is a write operation to project directory
-        if _real_project and ('w' in mode or 'a' in mode or 'x' in mode or '+' in mode):
-            try:
-                real_path = os.path.realpath(os.path.abspath(str(file)))
-                if real_path.startswith(_real_project + os.sep) or real_path == _real_project:
-                    raise PermissionError(f"Write access to project directory is disabled (SANDBOX_ALLOW_PROJECT_WRITES=0): {file}")
-            except PermissionError:
-                raise  # Re-raise PermissionError
-            except (OSError, ValueError):
-                pass  # Only catch path resolution errors
-        return _original_open(file, mode, *args, **kwargs)
+    _work_dir = os.environ.get("SANDBOX_WORKDIR", "")
+    _real_workdir = os.path.realpath(_work_dir) if _work_dir else ""
+    _run_dir = os.environ.get("SANDBOX_RUN_DIR", "")
+    _real_run_dir = os.path.realpath(_run_dir) if _run_dir else ""
+    _tmp_dir = os.environ.get("SANDBOX_TMPDIR", "")
+    _real_tmp_dir = os.path.realpath(_tmp_dir) if _tmp_dir else ""
+    import tempfile
+    _system_tmp = os.path.realpath(tempfile.gettempdir()) if tempfile.gettempdir() else ""
+    _read_roots = []
+    for _candidate in (_real_project, _real_workdir):
+        if _candidate and _candidate not in _read_roots:
+            _read_roots.append(_candidate)
+    _write_allowed = []
+    for _candidate in (_real_run_dir, _real_tmp_dir, _system_tmp):
+        if _candidate and _candidate not in _write_allowed:
+            _write_allowed.append(_candidate)
     
     import builtins
+    import pathlib
+    import shutil
+    
+    def _normalize_path(target):
+        try:
+            return os.path.realpath(os.fspath(target))
+        except (TypeError, ValueError, OSError):
+            return None
+    
+    def _is_under(path, root):
+        return path == root or path.startswith(root + os.sep)
+    
+    def _guard_project(target):
+        real_path = _normalize_path(target)
+        if not real_path:
+            return
+        for _allowed in _write_allowed:
+            if _is_under(real_path, _allowed):
+                return
+        for _root in _read_roots:
+            if _is_under(real_path, _root):
+                raise PermissionError(f"Write access to project directory is disabled (SANDBOX_ALLOW_PROJECT_WRITES=0): {target}")
+    
+    def _resolve_project_path(target):
+        if not _read_roots:
+            return None
+        try:
+            path_str = os.fspath(target)
+        except TypeError:
+            return None
+        if os.path.isabs(path_str):
+            return None
+        for _root in _read_roots:
+            candidate = os.path.realpath(os.path.join(_root, path_str))
+            if candidate.startswith(_root + os.sep) or candidate == _root:
+                if os.path.exists(candidate):
+                    return candidate
+        return None
+    
+    def _protected_open(file, mode='r', *args, **kwargs):
+        if any(flag in mode for flag in ('w', 'a', 'x', '+')):
+            _guard_project(file)
+            return _original_open(file, mode, *args, **kwargs)
+        try:
+            return _original_open(file, mode, *args, **kwargs)
+        except FileNotFoundError:
+            fallback = _resolve_project_path(file)
+            if fallback:
+                return _original_open(fallback, mode, *args, **kwargs)
+            raise
+    
     builtins.open = _protected_open
+    
+    def _wrap_os_single(name):
+        original = getattr(os, name, None)
+        if original is None:
+            return
+        def wrapped(path, *args, **kwargs):
+            _guard_project(path)
+            return original(path, *args, **kwargs)
+        setattr(os, name, wrapped)
+    
+    def _wrap_os_dual(name):
+        original = getattr(os, name, None)
+        if original is None:
+            return
+        def wrapped(src, dst, *args, **kwargs):
+            _guard_project(src)
+            _guard_project(dst)
+            return original(src, dst, *args, **kwargs)
+        setattr(os, name, wrapped)
+    
+    for _func in ("remove", "unlink", "rmdir", "mkdir", "makedirs"):
+        _wrap_os_single(_func)
+    for _func in ("rename", "replace"):
+        _wrap_os_dual(_func)
+    
+    def _wrap_shutil_single(name):
+        original = getattr(shutil, name, None)
+        if original is None:
+            return
+        def wrapped(path, *args, **kwargs):
+            _guard_project(path)
+            return original(path, *args, **kwargs)
+        setattr(shutil, name, wrapped)
+    
+    def _wrap_shutil_copylike(name):
+        original = getattr(shutil, name, None)
+        if original is None:
+            return
+        def wrapped(src, dst, *args, **kwargs):
+            _guard_project(dst)
+            return original(src, dst, *args, **kwargs)
+        setattr(shutil, name, wrapped)
+    
+    def _wrap_shutil_move(name):
+        original = getattr(shutil, name, None)
+        if original is None:
+            return
+        def wrapped(src, dst, *args, **kwargs):
+            _guard_project(src)
+            _guard_project(dst)
+            return original(src, dst, *args, **kwargs)
+        setattr(shutil, name, wrapped)
+    
+    for _func in ("copy", "copy2", "copytree"):
+        _wrap_shutil_copylike(_func)
+    _wrap_shutil_single("rmtree")
+    _wrap_shutil_move("move")
+    
+    _Path = pathlib.Path
+    
+    def _wrap_path_single(method_name):
+        original = getattr(_Path, method_name, None)
+        if original is None:
+            return
+        def wrapped(self, *args, **kwargs):
+            _guard_project(self)
+            return original(self, *args, **kwargs)
+        setattr(_Path, method_name, wrapped)
+    
+    def _wrap_path_target(method_name):
+        original = getattr(_Path, method_name, None)
+        if original is None:
+            return
+        def wrapped(self, target, *args, **kwargs):
+            _guard_project(self)
+            _guard_project(target)
+            return original(self, target, *args, **kwargs)
+        setattr(_Path, method_name, wrapped)
+    
+    for _method in ("unlink", "rmdir", "mkdir"):
+        _wrap_path_single(_method)
+    for _method in ("rename", "replace"):
+        _wrap_path_target(_method)
 """
         
         prologue = """
@@ -853,7 +1009,7 @@ except Exception as _e:
         # ----------------------------------------------------------------
         
         # Python binary
-        py = os.getenv("SANDBOX_PYTHON") or sys.executable
+        py = self._select_python_interpreter()
         args = [py, "-I", "-B", script_path.name]
         
         # Create isolated tmp directory
@@ -862,6 +1018,9 @@ except Exception as _e:
             os.makedirs(tmp_dir, mode=0o700, exist_ok=True)
         except Exception:
             pass
+        
+        workdir_path = Path(_get_working_dir_path()).resolve()
+        workdir_env = str(workdir_path) if workdir_path.exists() else ""
         
         # Minimal environment
         env = {
@@ -878,7 +1037,10 @@ except Exception as _e:
             "SANDBOX_PROJECT": str(project_mount),  # Access project files via this path
             "SANDBOX_RUN_DIR": str(run_dir),
             "SANDBOX_ALLOW_PROJECT_WRITES": os.getenv("SANDBOX_ALLOW_PROJECT_WRITES", "0"),  # Default: write-protected
+            "SANDBOX_WORKDIR": workdir_env,
+            "SANDBOX_TMPDIR": str(tmp_dir),
             "TMPDIR": str(tmp_dir),
+            "MPLCONFIGDIR": str(run_dir / ".mplconfig"),
         }
         # Preserve locale settings
         env.update({k: v for k, v in os.environ.items() if k in ("LC_ALL", "LANG")})
@@ -996,7 +1158,30 @@ except Exception as _e:
         
         parts.append(f"Manifest: {run_dir / 'manifest.json'}")
         
+        # Cleanup old runs to prevent unbounded disk usage
+        try:
+            max_runs = int(os.getenv("SANDBOX_MAX_RUNS", "10"))
+        except ValueError:
+            max_runs = 10
+        self._cleanup_old_runs(base_path / "runs", max_runs)
+        
         return "\n".join(parts)
+    
+    def _cleanup_old_runs(self, runs_root: Path, keep: int):
+        """Remove old sandbox run directories, keeping most recent N."""
+        if keep <= 0 or not runs_root.exists():
+            return
+        try:
+            run_dirs = sorted(
+                [p for p in runs_root.iterdir() if p.is_dir()],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True
+            )
+            for stale_dir in run_dirs[keep:]:
+                shutil.rmtree(stale_dir, ignore_errors=True)
+        except Exception:
+            # Cleanup best-effort; ignore failures to avoid breaking sandbox output
+            pass
 
 
 # ============================================================================
@@ -1047,12 +1232,14 @@ class GetContextTool(BaseTool):
         
         # Get shell cwd from the run_command tool instance if available
         shell_cwd = None
+        shell_instance = None
         try:
             tools_dict = globals().get("TOOLS", {})
             if "run_command" in tools_dict:
                 rc_tool = tools_dict["run_command"]
                 if hasattr(rc_tool, "shell") and rc_tool.shell:
-                    shell_cwd = rc_tool.shell.get_current_dir()
+                    shell_instance = rc_tool.shell
+                    shell_cwd = shell_instance.get_current_dir()
         except Exception:
             pass
         
@@ -1078,6 +1265,31 @@ class GetContextTool(BaseTool):
         for interpreter in ["python", "python3", "node", "ruby", "bash", "perl"]:
             path = shutil.which(interpreter)
             interpreters[interpreter] = path
+        
+        requested_isolation = os.getenv("SANDBOX_ENABLE_ISOLATION") == "1"
+        isolation_active = False
+        isolation_warning = None
+        isolation_rootfs = os.getenv("SANDBOX_ROOTFS_SHA256")
+        if shell_instance:
+            isolation_active = bool(getattr(shell_instance, "isolation_enabled", False))
+            isolation_rootfs = getattr(shell_instance, "rootfs_sha256", isolation_rootfs)
+            if requested_isolation and not isolation_active:
+                isolation_warning = getattr(shell_instance, "isolation_warning", None) or \
+                    "Namespace isolation requested but not active."
+        elif requested_isolation:
+            isolation_warning = "Namespace isolation requested but shell not initialized."
+        
+        isolation_config = {
+            "requested": requested_isolation,
+            "enabled": isolation_active,
+            "active": isolation_active,
+            "rootfs_sha256": isolation_rootfs
+        }
+        if isolation_warning:
+            isolation_config["warning"] = isolation_warning
+            isolation_config["status"] = "degraded"
+        else:
+            isolation_config["status"] = "active" if isolation_active else "disabled"
         
         # Build comprehensive context
         context = {
@@ -1112,10 +1324,7 @@ class GetContextTool(BaseTool):
                     "network_disabled": os.getenv("SANDBOX_DISABLE_NETWORK", "1") in ("1", "true", "yes"),
                     "write_protected": os.getenv("SANDBOX_ALLOW_PROJECT_WRITES", "0") not in ("1", "true", "yes")
                 },
-                "isolation": {
-                    "enabled": os.getenv("SANDBOX_ENABLE_ISOLATION") == "1",
-                    "rootfs_sha256": os.getenv("SANDBOX_ROOTFS_SHA256")
-                }
+                "isolation": isolation_config
             },
             
             # Repository context (new)

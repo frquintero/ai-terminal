@@ -2,12 +2,13 @@ import unittest
 import tempfile
 import os
 import shutil
+import uuid
 from unittest.mock import patch
 from pathlib import Path
 
 # Mock ShellIntegration to avoid shell initialization during import
 with patch('shell_integration.ShellIntegration'):
-    from tools import RunPythonSandboxTool
+    from tools import RunPythonSandboxTool, _get_working_dir_path
 
 class TestPythonSandbox(unittest.TestCase):
     def setUp(self):
@@ -17,6 +18,7 @@ class TestPythonSandbox(unittest.TestCase):
         os.environ['SANDBOX_PATH'] = self.test_dir
         os.environ['SANDBOX_TIMEOUT'] = '5'
         os.environ['SANDBOX_DISABLE_NETWORK'] = '0'  # Allow network for tests
+        os.environ['SANDBOX_ALLOW_PROJECT_WRITES'] = '1'
         
     def tearDown(self):
         """Clean up test environment"""
@@ -206,6 +208,78 @@ else:
         finally:
             os.chdir(original_cwd)
     
+    def test_relative_read_fallback(self):
+        """Ensure sandbox can read project files via relative paths"""
+        data_file = os.path.join(self.test_dir, "number_roots.csv")
+        with open(data_file, 'w') as f:
+            f.write("42\n")
+        
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(self.test_dir)
+            os.environ['SANDBOX_ALLOW_PROJECT_WRITES'] = '0'
+            
+            code = """
+with open('number_roots.csv', 'r') as f:
+    print('Loaded:', f.read().strip())
+"""
+            result = self.sandbox_tool.execute(code=code)
+            self.assertIn("Loaded: 42", result)
+        finally:
+            os.chdir(original_cwd)
+    
+    def test_workdir_relative_read_support(self):
+        """Ensure files in the agent working directory are readable via relative paths"""
+        workdir = Path(_get_working_dir_path())
+        if not workdir.exists():
+            self.skipTest("working directory missing")
+        
+        file_name = f"sandbox_workdir_{uuid.uuid4().hex}.txt"
+        target = workdir / file_name
+        target.write_text("workdir content", encoding="utf-8")
+        
+        # Default behavior blocks writes; ensure reads can still locate files
+        previous = os.environ.get('SANDBOX_ALLOW_PROJECT_WRITES')
+        os.environ['SANDBOX_ALLOW_PROJECT_WRITES'] = '0'
+        
+        code = f"""
+with open('{file_name}', 'r') as f:
+    print('Workdir content:', f.read().strip())
+"""
+        try:
+            result = self.sandbox_tool.execute(code=code)
+            self.assertIn("Workdir content: workdir content", result)
+        finally:
+            if target.exists():
+                target.unlink()
+            if previous is None:
+                os.environ.pop('SANDBOX_ALLOW_PROJECT_WRITES', None)
+            else:
+                os.environ['SANDBOX_ALLOW_PROJECT_WRITES'] = previous
+    
+    def test_run_dir_writes_are_allowed(self):
+        """Sandbox should still write inside its ephemeral run directory"""
+        previous = os.environ.get('SANDBOX_ALLOW_PROJECT_WRITES')
+        os.environ['SANDBOX_ALLOW_PROJECT_WRITES'] = '0'
+        code = """
+import os
+from pathlib import Path
+
+run_dir = Path(os.environ['SANDBOX_RUN_DIR'])
+target = run_dir / "artifacts" / "allowed.txt"
+target.parent.mkdir(parents=True, exist_ok=True)
+target.write_text("sandbox ok")
+print("Allowed file exists:", target.exists())
+"""
+        try:
+            result = self.sandbox_tool.execute(code=code)
+            self.assertIn("Allowed file exists: True", result)
+        finally:
+            if previous is None:
+                os.environ.pop('SANDBOX_ALLOW_PROJECT_WRITES', None)
+            else:
+                os.environ['SANDBOX_ALLOW_PROJECT_WRITES'] = previous
+
     def test_project_write_guard(self):
         """Test that writing to project directory is blocked by default"""
         # Create a test file in the project directory
@@ -243,6 +317,36 @@ if project_dir:
             with open(test_file, 'r') as f:
                 content = f.read()
             self.assertEqual(content, "Original content")
+        finally:
+            os.chdir(original_cwd)
+    
+    def test_project_os_remove_guard(self):
+        """Ensure os.remove can't delete project files when writes disabled"""
+        test_file = os.path.join(self.test_dir, "remove_guard.txt")
+        with open(test_file, 'w') as f:
+            f.write("Protected data")
+        
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(self.test_dir)
+            os.environ['SANDBOX_ALLOW_PROJECT_WRITES'] = '0'
+            
+            code = """
+import os
+
+project_dir = os.environ.get('SANDBOX_PROJECT')
+target = os.path.join(project_dir, 'remove_guard.txt')
+try:
+    os.remove(target)
+    print("remove succeeded unexpectedly")
+except PermissionError as exc:
+    print(f"Remove blocked: {exc}")
+"""
+            result = self.sandbox_tool.execute(code=code)
+            self.assertIn("Remove blocked", result)
+            
+            with open(test_file, 'r') as f:
+                self.assertEqual(f.read(), "Protected data")
         finally:
             os.chdir(original_cwd)
 

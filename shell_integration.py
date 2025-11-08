@@ -26,7 +26,10 @@ class ShellIntegration:
         self._sudo_prompt = f"__AI_SUDO_{self._token}__"
         
         self.shell = None
+        self.isolation_requested = os.getenv("SANDBOX_ENABLE_ISOLATION") == "1"
         self.isolation_enabled = False
+        self.isolation_warning: Optional[str] = None
+        self.rootfs_sha256: Optional[str] = None
         self.rootfs_path: Optional[Path] = None
         self.last_exit_code: Optional[int] = None  # Track last command exit code
         
@@ -37,7 +40,7 @@ class ShellIntegration:
             self.current_dir = os.path.expanduser('~')
         
         # Check if namespace isolation is enabled
-        if os.getenv("SANDBOX_ENABLE_ISOLATION") == "1":
+        if self.isolation_requested:
             self._setup_isolation()
         
         self._init_shell()
@@ -57,30 +60,36 @@ class ShellIntegration:
             # Get configured rootfs
             sha256 = get_rootfs_sha256()
             if not sha256:
-                print("Warning: SANDBOX_ENABLE_ISOLATION=1 but no rootfs configured")
+                self.isolation_warning = "SANDBOX_ENABLE_ISOLATION=1 but no rootfs configured"
+                print(f"Warning: {self.isolation_warning}")
                 print("Set SANDBOX_ROOTFS_SHA256 or run build_rootfs.sh")
                 return
             
             # Verify rootfs exists
             if not verify_rootfs_exists(sha256):
-                print(f"Warning: Rootfs not found in cache: {sha256}")
+                self.isolation_warning = f"Rootfs not found in cache: {sha256}"
+                print(f"Warning: {self.isolation_warning}")
                 print("Run build_rootfs.sh to create rootfs")
                 return
             
             # Extract rootfs
             self.rootfs_path = extract_rootfs(sha256)
+            self.rootfs_sha256 = sha256
             self.isolation_enabled = True
+            self.isolation_warning = None
             print(f"✓ Namespace isolation enabled (rootfs: {sha256[:12]}...)")
             
         except Exception as e:
-            print(f"Warning: Failed to setup isolation: {e}")
+            self.isolation_warning = f"Failed to setup isolation: {e}"
+            print(f"Warning: {self.isolation_warning}")
             print("Falling back to direct shell")
     
     def _init_isolated_shell(self):
         """Initialize bash inside rootfs using bubblewrap"""
         # Check bwrap availability
         if not shutil.which("bwrap"):
-            print("Warning: bwrap not found, disabling isolation")
+            self.isolation_warning = "bwrap not found, disabling isolation"
+            print(f"Warning: {self.isolation_warning}")
             self.isolation_enabled = False
             self._init_shell()  # Fall back to direct shell
             return
@@ -125,7 +134,8 @@ class ShellIntegration:
             # Note: In isolated mode, current_dir tracks /workspace inside container
             # This is transparent to the rest of the code since we always cd to /workspace
         except Exception as e:
-            print(f"Warning: failed to start bubblewrap: {e}")
+            self.isolation_warning = f"Failed to start bubblewrap: {e}"
+            print(f"Warning: {self.isolation_warning}")
             print("Falling back to direct shell")
             self.isolation_enabled = False
             self._init_shell()
