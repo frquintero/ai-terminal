@@ -50,7 +50,7 @@ try:
                 "role": "system",
                 "content": "You are Kimi, an AI assistant provided by Moonshot AI. You excel at conversing in Chinese and English. You provide users with safe, helpful, and accurate responses. You refuse to answer any questions related to terrorism, racism, or explicit content. Moonshot AI is a proper noun and should not be translated into other languages.",
             },
-            {"role": "user", "content": "Hello, my name is Li Lei. What is 1+1?"},
+            {"role": "user", "content": "Write a simple Python function that adds two numbers"},
         ],
         temperature=0.6,
         stream=True,
