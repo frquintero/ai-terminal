@@ -23,6 +23,8 @@ This is an **AI-powered Linux terminal** built with MiniMax M2 (or Kimi-2/custom
 - Smart HTTP tooling: templated requests, jq selectors, TLS certificate telemetry, session-aware curl profiles
 - Raw output mode toggle for debugging
 
+**Extended Memory:** The new `history_search` tool backs every session with a persistent SQLite store. When the live 10-call window no longer holds relevant work, the agent can query older sessions by keyword, time range, or tool name, then cite those results. See `docs/HISTORY_TOOL.md` for workflow details.
+
 **State**: v1.3, 88 closed beads (all issues completed), production-ready with comprehensive docs and test coverage.
 
 ---
