@@ -390,14 +390,38 @@ Execution style:
         return out
     
     def _trim_history(self):
-        """Simple history trimming: keep last N messages, truncate long tool outputs"""
+        """
+        Simple history trimming: keep last N messages (plus system), truncate long tool outputs.
+        Ensures the most recent assistant message containing tool_calls is always retained so
+        subsequent tool observations have a valid tool_call_id anchor.
+        """
         if len(self.message_history) <= self.MAX_HISTORY_MESSAGES:
             return
         
-        # Keep system message + last MAX_HISTORY_MESSAGES
         system_msg = self.message_history[0]
         messages = [self._to_dict_message(m) for m in self.message_history[1:]]
-        recent = messages[-(self.MAX_HISTORY_MESSAGES):]
+        max_other = max(self.MAX_HISTORY_MESSAGES - 1, 0)
+        
+        if not messages:
+            self.message_history = [system_msg]
+            return
+        
+        if len(messages) <= max_other:
+            recent = messages
+        else:
+            start_idx = len(messages) - max_other if max_other > 0 else len(messages)
+            
+            # Protect the latest assistant tool_call message from being trimmed
+            protected_idx = None
+            for idx in range(len(messages) - 1, -1, -1):
+                msg = messages[idx]
+                if isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("tool_calls"):
+                    protected_idx = idx
+                    break
+            if protected_idx is not None and protected_idx < start_idx:
+                start_idx = protected_idx
+            
+            recent = messages[start_idx:]
         
         # Truncate only extremely long tool outputs
         for msg in recent:

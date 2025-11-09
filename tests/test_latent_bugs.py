@@ -104,6 +104,50 @@ def test_message_history_trimming():
     
     print("✓ Message history trimming works correctly")
 
+def test_trim_history_preserves_tool_calls():
+    """Ensure trimming keeps latest assistant tool_call anchor"""
+    from agent import MiniAgent
+    
+    agent = MiniAgent()
+    agent.MAX_HISTORY_MESSAGES = 6  # Force aggressive trimming
+    
+    # Reset to only the system message for deterministic ordering
+    agent.message_history = [agent.message_history[0]]
+    
+    # Add some older chatter
+    for i in range(5):
+        agent.message_history.append({"role": "user", "content": f"before {i}"})
+    
+    tool_call_id = "call-123"
+    agent.message_history.append({
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": tool_call_id,
+            "type": "function",
+            "function": {"name": "run_command", "arguments": "{}"}
+        }]
+    })
+    agent.message_history.append({
+        "role": "tool",
+        "content": "result",
+        "tool_call_id": tool_call_id
+    })
+    
+    # Add more chatter to push the tool_call out of the normal window
+    for i in range(10):
+        agent.message_history.append({"role": "user", "content": f"after {i}"})
+    
+    agent._trim_history()
+    
+    # The assistant message with tool_calls must still be present
+    assert any(
+        msg.get("role") == "assistant" and msg.get("tool_calls")
+        for msg in agent.message_history
+    ), "Latest assistant tool_call message should be preserved"
+    
+    print("✓ Trim history preserves pending tool calls")
+
 def test_tool_output_truncation():
     """Test that large tool outputs are truncated"""
     from agent import MiniAgent
@@ -145,6 +189,7 @@ if __name__ == "__main__":
         test_non_interactive_allowed()
         test_shell_integration_prompt()
         test_message_history_trimming()
+        test_trim_history_preserves_tool_calls()
         test_tool_output_truncation()
         
         print("\n✓ All latent bug fixes verified!")
