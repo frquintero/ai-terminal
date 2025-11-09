@@ -2,6 +2,30 @@
 
 **Version:** 1.3
 
+## Overview
+
+This is an **AI-powered Linux terminal** built with MiniMax M2 (or Kimi-2/custom LLM). Here's the structure:
+
+**Purpose**: Intelligent CLI combining natural language processing with shell execution—users type requests in plain English, the AI interprets and executes via tools.
+
+**Architecture**:
+- **agent.py**: ReAct loop engine (max 15 steps) with tool calling, history trimming, session state tracking, and multi-step planning
+- **tools.py**: 9 auto-registered tools (read/write files, run commands, Python sandbox with pandas/numpy/matplotlib, context queries, Wikipedia search)
+- **config.py**: Multi-backend support (MiniMax/Kimi-2/custom OpenAI-compatible APIs) with env-based configuration
+- **shell_integration.py**: Persistent bash/zsh wrapper, working directory isolation (`ai-terminal-wd/`)
+- **db_logger.py**: SQLite session logging with telemetry
+
+**Key Features**:
+- Shell-first philosophy (prefer `awk/sed/jq` over Python for text/math)
+- Resource-limited Python sandbox with write protection, network isolation
+- Optional namespace isolation via bubblewrap (reproducible rootfs)
+- Comprehensive context tracking (20 tool history, 3 recent errors, session stats)
+- Raw output mode toggle for debugging
+
+**State**: v1.3, 88 closed beads (all issues completed), production-ready with comprehensive docs and test coverage.
+
+---
+
 This project implements an AI-powered Linux shell terminal using MiniMax M2 AI. It combines natural language processing, shell command execution, and tool-based operations to create an intelligent CLI interface.
 
 ## 🎯 Vibe Coded with Amp
@@ -31,16 +55,13 @@ Learn more about Amp at [ampcode.com](https://ampcode.com).
 
 ## Available Agent Tools
 
-The system automatically discovers and registers tools:
-- `read_file` - Read file contents
-- `write_file` - Create or overwrite files
-- `run_command` - Execute non-interactive shell commands
-- `run_sudo_command` - Execute commands with sudo privileges
-- `run_interactive` - Run interactive commands (vim, nano, top, etc.)
-- `run_python_sandbox` - Execute Python code in isolated, resource-limited sandbox with data science libraries (pandas, numpy, matplotlib). Auto-saves plots.
-- `get_context` - Query agent's state (working directory, recent writes)
-- `wikipedia_search` - Search Wikipedia for information
-- `process_content` - Analyze and process text content
+The system currently auto-registers these tools (direct mirror of `tools.py` and `get_context.available_tools`):
+- `run_command` – Execute non-interactive shell commands (ls, grep, pipelines, etc.)
+- `run_interactive` – Launch TTY programs such as vim, nano, top
+- `run_python_sandbox` – Run Python snippets inside the resource-limited sandbox for data/plotting tasks
+- `read_file` – Output a file’s contents
+- `write_file` – Create or overwrite files in the working directory
+- `get_context` – Return session metadata, tool history, and recent errors for debugging
 
 ## Installation
 
