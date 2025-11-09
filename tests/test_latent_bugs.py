@@ -217,13 +217,29 @@ def test_tool_output_truncation():
     from agent import MiniAgent
     
     agent = MiniAgent()
+    agent.MAX_HISTORY_MESSAGES = 6
+    agent.message_history = [agent.message_history[0]]
+    
+    # Fill history so trimming definitely runs
+    for i in range(6):
+        agent.message_history.append({"role": "user", "content": f"prep {i}"})
     
     # Add a message with large tool output
     large_output = "x" * 20000  # Larger than MAX_TOOL_OUTPUT_CHARS
+    tool_call_id = "test123"
+    agent.message_history.append({
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": tool_call_id,
+            "type": "function",
+            "function": {"name": "run_command", "arguments": "{\"command\": \"echo hi\"}"}
+        }]
+    })
     agent.message_history.append({
         "role": "tool",
         "content": large_output,
-        "tool_call_id": "test123"
+        "tool_call_id": tool_call_id
     })
     
     # Trim
