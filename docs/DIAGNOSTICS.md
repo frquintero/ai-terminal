@@ -8,6 +8,17 @@ This guide explains how to inspect agent runs, debug OpenAI failures, and keep w
 - The JSON file contains the exact `messages` payload that went to OpenAI, plus system reminders injected by the agent.
 - Use the trace file to reproduce 400-level responses (e.g., “tool_call_id not found”) without re-running a long session.
 
+## Event-Driven Memory
+
+- Every session streams events (user messages, tool calls/results, errors, summaries) to `logs/events/<session>.jsonl`.
+- `MiniAgent` builds an “Agent Memory” system message each turn by retrieving high-signal events via `EventRetriever`.
+- Artifacts: tool outputs > `EVENT_MEMORY_ARTIFACT_THRESHOLD` bytes are written to `ai-terminal-wd/artifacts/<session>_<id>.txt` and referenced via `artifact_path` in the event log.
+- `GetContext` now reports `event_memory` with counts and the on-disk log path so you can open it directly.
+
+**When debugging:**
+- Scan the JSONL to understand what the model saw (errors, command outputs, artifact references).
+- If the memory block mentions `artifact_path`, call `read_file` on that path only when you need the raw output; otherwise use the logged `artifact_summary`/`output_preview`.
+
 ## Session Logs
 
 - `session_logs.db` stores structured entries such as:

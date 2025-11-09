@@ -52,6 +52,7 @@ Learn more about Amp at [ampcode.com](https://ampcode.com).
 - **Shell Integration**: Wrap around bash/zsh for efficient command execution and output capture
 - **Namespace Isolation (Optional)**: Run commands inside isolated Linux namespace with deterministic rootfs for reproducible execution
 - **Traceable AI Calls**: Every OpenAI request is tagged with a short trace ID and stored under `logs/openai_traces/<trace>.json` for debugging
+- **Event-Driven Memory**: High-signal events (tool calls/results/errors) stream into `logs/events/<session>.jsonl`, letting the agent recall past work without resending the entire conversation
 
 ## Available Agent Tools
 
@@ -98,6 +99,10 @@ Key settings in `.env`:
 - `RAW_OUTPUT_MAX_CHARS` (default: `4000`) - Maximum characters to display when raw output is enabled.
 - `HIDE_THINKING` (default: `true`) - Hide AI reasoning in responses.
 - `MAX_STEPS` (default: `15`) - Maximum tool execution steps per request.
+- `USE_EVENT_MEMORY` (default: `true`) - Enable the event-driven memory builder (JSONL logs + selective prompt injection).
+- `EVENT_LOG_RETENTION_DAYS` (default: `7`) - Auto-delete event logs older than N days.
+- `EVENT_MEMORY_MAX_EVENTS` / `EVENT_MEMORY_MAX_CHARS` - Upper bounds for the Agent Memory block sent to the LLM.
+- `EVENT_MEMORY_ARTIFACT_THRESHOLD` (default: `8192`) - Tool outputs larger than this many bytes are persisted as artifacts under `ai-terminal-wd/artifacts/`.
 
 ### Python Sandbox Configuration
 - `SANDBOX_PATH` (default: `./sandbox_runs`) - Directory for sandbox execution environments

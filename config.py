@@ -2,7 +2,24 @@ import os
 from dotenv import load_dotenv
 
 class Config:
-    def __init__(self, api_key: str, model: str, base_url: str, agent_type: str, max_tokens: int, temperature: float, hide_thinking: bool, max_steps: int, show_raw_output: bool, raw_output_max_chars: int):
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        base_url: str,
+        agent_type: str,
+        max_tokens: int,
+        temperature: float,
+        hide_thinking: bool,
+        max_steps: int,
+        show_raw_output: bool,
+        raw_output_max_chars: int,
+        use_event_memory: bool,
+        event_log_retention_days: int,
+        event_memory_max_events: int,
+        event_memory_max_chars: int,
+        artifact_threshold_bytes: int,
+    ):
         self.api_key = api_key
         self.model = model
         self.base_url = base_url
@@ -13,6 +30,11 @@ class Config:
         self.max_steps = max_steps
         self.show_raw_output = show_raw_output
         self.raw_output_max_chars = raw_output_max_chars
+        self.use_event_memory = use_event_memory
+        self.event_log_retention_days = event_log_retention_days
+        self.event_memory_max_events = event_memory_max_events
+        self.event_memory_max_chars = event_memory_max_chars
+        self.artifact_threshold_bytes = artifact_threshold_bytes
 
 def load_config() -> Config:
     load_dotenv()
@@ -90,4 +112,34 @@ def load_config() -> Config:
     except ValueError:
         raise ValueError("RAW_OUTPUT_MAX_CHARS must be an integer")
 
-    return Config(api_key, model, base_url, agent_type, max_tokens, temperature, hide_thinking, max_steps, show_raw_output, raw_output_max_chars)
+    use_event_memory = os.getenv('USE_EVENT_MEMORY', '1').lower() in ('1', 'true', 'yes')
+
+    def _parse_int_env(name: str, default: str) -> int:
+        value = os.getenv(name, default)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{name} must be an integer")
+
+    event_log_retention_days = _parse_int_env('EVENT_LOG_RETENTION_DAYS', '7')
+    event_memory_max_events = _parse_int_env('EVENT_MEMORY_MAX_EVENTS', '40')
+    event_memory_max_chars = _parse_int_env('EVENT_MEMORY_MAX_CHARS', '6000')
+    artifact_threshold_bytes = _parse_int_env('EVENT_MEMORY_ARTIFACT_THRESHOLD', '8192')
+
+    return Config(
+        api_key,
+        model,
+        base_url,
+        agent_type,
+        max_tokens,
+        temperature,
+        hide_thinking,
+        max_steps,
+        show_raw_output,
+        raw_output_max_chars,
+        use_event_memory,
+        event_log_retention_days,
+        event_memory_max_events,
+        event_memory_max_chars,
+        artifact_threshold_bytes,
+    )

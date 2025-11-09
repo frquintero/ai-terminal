@@ -20,6 +20,7 @@ from collections import deque
 from pathlib import Path
 from shell_integration import ShellIntegration
 from command_parser import parse_command
+from event_memory import summarize_event_log
 
 
 # ============================================================================
@@ -1340,6 +1341,10 @@ class GetContextTool(BaseTool):
                 "last_command_exit_code": _SESSION_STATE.last_exit_code
             }
         }
+        
+        event_summary = summarize_event_log(_SESSION_STATE.session_id)
+        if event_summary:
+            context["event_memory"] = event_summary
         
         return json.dumps(context, indent=2)
 

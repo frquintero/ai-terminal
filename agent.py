@@ -3,6 +3,7 @@ from tools import get_tool_schemas, TOOLS, WORKING_DIR_PREFIX, _SESSION_STATE
 from ui_formatter import ui, console
 from utils.system_info import get_system_info, format_system_info
 from db_logger import DBLogger
+from event_memory import EventLog, EventRetriever, EventRetrieverConfig
 import openai
 import json
 import re
@@ -10,11 +11,12 @@ import atexit
 import os
 import uuid
 from pathlib import Path
+from typing import List, Optional
 from rich.live import Live
 
 class MiniAgent:
     # Configuration for message history management
-    MAX_HISTORY_MESSAGES = 40
+    MAX_HISTORY_MESSAGES = 12
     MAX_TOOL_OUTPUT_CHARS = 8000
     MAX_REACT_LOOPS = 4
     
@@ -36,6 +38,25 @@ class MiniAgent:
         
         # Initialize session state for context tracking
         _SESSION_STATE.reset(self.session_id)
+        self.use_event_memory = self.config.use_event_memory
+        self.artifact_threshold = self.config.artifact_threshold_bytes
+        self.artifacts_dir = Path(WORKING_DIR_PREFIX) / "artifacts"
+        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        self.event_log = EventLog(
+            self.session_id,
+            retention_days=self.config.event_log_retention_days
+        )
+        self.event_log.cleanup_old_logs()
+        retriever_config = EventRetrieverConfig(
+            max_events=self.config.event_memory_max_events,
+            max_chars=self.config.event_memory_max_chars
+        )
+        self.event_retriever = EventRetriever(retriever_config)
+        self.event_log.append("session_start", {
+            "system_info": system_info,
+            "model": self.config.model,
+            "agent_type": self.config.agent_type
+        })
         
         # Tool output collector for deterministic rendering
         self._current_step_tool_outputs = []
@@ -145,6 +166,11 @@ Working directory rules:
 - write_file paths are relative to {WORKING_DIR_PREFIX}/ (do not prefix it).
 - read_file searches {WORKING_DIR_PREFIX}/ first, then the project root.
 
+Memory & artifacts:
+- Each turn includes an \"Agent Memory\" system message listing high-signal events (errors, tool results, summaries). Scan it before planning so you do not repeat commands.
+- Entries may contain artifact_path pointing to {WORKING_DIR_PREFIX}/artifacts/.... Only call read_file on that path when the user explicitly needs the raw output.
+- If artifact_summary is present, trust and cite it directly; fetch the artifact only for detailed follow-ups.
+
 Key tools:
 - run_command - primary executor; compose pipelines for efficient processing.
 - get_context - cheap JSON snapshot (cwd, git branch, tool history, errors, sandbox limits). Use instead of manual environment probes.
@@ -165,6 +191,116 @@ Execution style:
 {system_context}
 
 {sandbox_info}"""
+
+    # ------------------------------------------------------------------
+    # Event memory helpers
+    # ------------------------------------------------------------------
+
+    def _append_event(self, event_type: str, payload: dict):
+        try:
+            self.event_log.append(event_type, payload)
+        except Exception as exc:
+            self._log("TRACE_WARNING", f"Failed to append event: {exc}")
+
+    @staticmethod
+    def _truncate_preview(text: str, limit: int = 400) -> str:
+        if not text:
+            return ""
+        if len(text) <= limit:
+            return text
+        return text[:limit - 3] + "..."
+
+    def _maybe_persist_artifact(self, stem: str, content: str, extension: str = "txt") -> Optional[str]:
+        if not content:
+            return None
+        try:
+            encoded = content.encode("utf-8")
+            if len(encoded) < self.artifact_threshold:
+                return None
+        except Exception:
+            # Fallback if encoding fails
+            if len(content) < self.artifact_threshold:
+                return None
+            encoded = content.encode("utf-8", errors="ignore")
+
+        safe_stem = re.sub(r"[^a-zA-Z0-9_-]", "_", stem)[:40] or "artifact"
+        file_name = f"{self.session_id}_{safe_stem}_{uuid.uuid4().hex[:6]}.{extension}"
+        artifact_path = self.artifacts_dir / file_name
+        try:
+            artifact_path.write_bytes(encoded)
+        except Exception as exc:
+            self._log("TRACE_WARNING", f"Failed to write artifact {file_name}: {exc}")
+            return None
+        return f"{WORKING_DIR_PREFIX}/artifacts/{file_name}"
+
+    def _record_user_event(self, user_input: str):
+        self._append_event(
+            "user_message",
+            {
+                "content_preview": self._truncate_preview(user_input, 800),
+                "length": len(user_input),
+            },
+        )
+
+    def _record_tool_call_event(self, tool_name: str, args: dict, tool_call_id: str | None):
+        args_preview = self._truncate_preview(json.dumps(args, ensure_ascii=False), 400)
+        payload = {
+            "tool": tool_name,
+            "args_preview": args_preview,
+            "tool_call_id": tool_call_id,
+        }
+        self._append_event("tool_call", payload)
+
+    def _record_tool_result_event(
+        self,
+        tool_name: str,
+        tool_call_id: str | None,
+        success: bool,
+        result_str: str,
+        exit_code: Optional[int] = None,
+        artifact_summary: Optional[str] = None,
+    ):
+        artifact_path = self._maybe_persist_artifact(tool_name, result_str)
+        payload = {
+            "tool": tool_name,
+            "tool_call_id": tool_call_id,
+            "success": success,
+            "exit_code": exit_code,
+            "output_preview": self._truncate_preview(result_str, 600),
+        }
+        if artifact_path:
+            payload["artifact_path"] = artifact_path
+        if artifact_summary:
+            payload["artifact_summary"] = artifact_summary
+        self._append_event("tool_result", payload)
+
+    def _record_error_event(self, source: str, error: str, context: Optional[dict] = None):
+        payload = {"source": source, "error": error}
+        if context:
+            payload["context"] = context
+        self._append_event("error", payload)
+
+    def _build_request_messages(self) -> List[dict]:
+        if not self.message_history:
+            return []
+        base_system = self.message_history[0]
+        conversation = self.message_history[1:]
+        messages = [base_system]
+        if self.use_event_memory:
+            memory_block = self._build_memory_block()
+            if memory_block:
+                messages.append({"role": "system", "content": memory_block})
+        messages.extend(conversation)
+        return messages
+
+    def _build_memory_block(self) -> Optional[str]:
+        try:
+            events = self.event_log.read_recent(self.config.event_memory_max_events * 3)
+            prioritized = self.event_retriever.retrieve(events)
+            return self.event_retriever.format_memory_block(prioritized)
+        except Exception as exc:
+            self._log("TRACE_WARNING", f"Failed to build memory block: {exc}")
+            return None
 
     @staticmethod
     def _extract_json_object(text: str) -> str | None:
@@ -329,27 +465,27 @@ Execution style:
             "tool_messages": tool_messages
         }
 
-    def _persist_openai_payload(self, trace_id: str):
+    def _persist_openai_payload(self, trace_id: str, messages: Optional[List[dict]] = None):
         """Write the exact OpenAI payload to disk for later debugging."""
         try:
             trace_dir = Path("logs/openai_traces")
             trace_dir.mkdir(parents=True, exist_ok=True)
             payload = {
                 "trace_id": trace_id,
-                "messages": self.message_history
+                "messages": messages or self.message_history
             }
             trace_path = trace_dir / f"{trace_id}.json"
             trace_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as e:
             self._log("TRACE_WARNING", f"Failed to persist OpenAI payload {trace_id}: {e}")
 
-    def _log_openai_trace(self, trace_id: str, tool_state: dict):
+    def _log_openai_trace(self, trace_id: str, tool_state: dict, messages: Optional[List[dict]] = None):
         """Log summary of outgoing OpenAI payload with tool-call details."""
         try:
             summary = {
                 "trace_id": trace_id,
-                "message_count": len(self.message_history),
-                "last_roles": [msg.get("role") for msg in self.message_history[-5:]],
+                "message_count": len(messages or self.message_history),
+                "last_roles": [msg.get("role") for msg in (messages or self.message_history)[-5:]],
                 "assistant_tool_calls": tool_state.get("assistant_tool_calls", []),
                 "tool_messages": tool_state.get("tool_messages", [])[-5:]
             }
@@ -514,6 +650,7 @@ Execution style:
         self._log("USER_QUERY", user_input)
         
         self.message_history.append({"role": "user", "content": user_input})
+        self._record_user_event(user_input)
         
         # Trim history before API call to prevent token exhaustion
         self._trim_history()
@@ -526,13 +663,14 @@ Execution style:
         react_limit_warning_sent = False
         while step_count < max_steps:
             tool_state = self._sanitize_history_tool_calls()
+            request_messages = self._build_request_messages()
             trace_id = uuid.uuid4().hex[:8]
             try:
                 # Show thinking indicator
                 with Live(ui.show_thinking(), console=console, refresh_per_second=10):
                     response = self.client.chat.completions.create(
                         model=self.config.model,
-                        messages=self.message_history,
+                        messages=request_messages,
                         max_tokens=self.config.max_tokens,
                         temperature=self.config.temperature,
                         tools=tools
@@ -552,16 +690,19 @@ Execution style:
                         return {"content": None, "error": "No base_resp found", "elapsed_time": ui.get_elapsed_time()}
 
                 assistant_message = response.choices[0].message
+                self._persist_openai_payload(trace_id, request_messages)
+                self._log_openai_trace(trace_id, tool_state, request_messages)
                 
             except Exception as e:
-                self._persist_openai_payload(trace_id)
-                self._log_openai_trace(trace_id, tool_state)
+                self._persist_openai_payload(trace_id, request_messages)
+                self._log_openai_trace(trace_id, tool_state, request_messages)
                 error_info = {
                     "trace_id": trace_id,
                     "error": str(e)
                 }
                 self._log("OPENAI_ERROR", json.dumps(error_info, ensure_ascii=False))
                 _SESSION_STATE.record_error("openai_api", str(e), error_info)
+                self._record_error_event("openai_api", str(e), error_info)
                 ui.error(f"API Error: {str(e)} (trace {trace_id})")
                 return {"content": None, "error": str(e), "elapsed_time": ui.get_elapsed_time()}
             
@@ -636,6 +777,7 @@ Execution style:
                     args_str = json.dumps(args, indent=2)
                     tool_call_content = f"Tool: {tool_name}\nArguments:\n{args_str}"
                     self._log("TOOL_CALL", tool_call_content)
+                    self._record_tool_call_event(tool_name, args, tool_call_id)
                     
                     # Show tool execution indicator
                     details = ""
@@ -658,6 +800,7 @@ Execution style:
                             success = False
                             error_msg = str(e)
                             _SESSION_STATE.record_error(tool_name, str(e), args)
+                            self._record_error_event(tool_name, str(e), args)
                     else:
                         try:
                             with Live(ui.show_tool_execution(tool_name, details), console=console, refresh_per_second=10):
@@ -667,6 +810,7 @@ Execution style:
                             success = False
                             error_msg = str(e)
                             _SESSION_STATE.record_error(tool_name, str(e), args)
+                            self._record_error_event(tool_name, str(e), args)
                     
                     # Extract exit code from result if available
                     if tool_name == "run_command" and success:
@@ -678,6 +822,7 @@ Execution style:
                         pass
                     
                     # Record tool call in session state
+                    result_output = result if isinstance(result, str) else str(result)
                     _SESSION_STATE.record_tool_call(
                         tool_name=tool_name,
                         args=args,
@@ -685,17 +830,24 @@ Execution style:
                         exit_code=exit_code,
                         error=error_msg
                     )
+                    self._record_tool_result_event(
+                        tool_name=tool_name,
+                        tool_call_id=tool_call_id,
+                        success=success,
+                        result_str=result_output,
+                        exit_code=exit_code
+                    )
                     
                     # Log tool result (with truncation for large outputs)
-                    result_str = result if isinstance(result, str) else str(result)
-                    if len(result_str) > 32768:
-                        extra = len(result_str) - 32768
-                        result_str = result_str[:32768] + f"\n...[truncated {extra} chars]"
-                    self._log("TOOL_RESULT", result_str)
+                    log_result_str = result_output
+                    if len(log_result_str) > 32768:
+                        extra = len(log_result_str) - 32768
+                        log_result_str = log_result_str[:32768] + f"\n...[truncated {extra} chars]"
+                    self._log("TOOL_RESULT", log_result_str)
                     
                     observation_content = self._format_observation_content(
                         tool_name=tool_name,
-                        result=result_str,
+                        result=log_result_str,
                         success=success,
                         exit_code=exit_code,
                         error_msg=error_msg
@@ -712,7 +864,7 @@ Execution style:
                     self._current_step_tool_outputs.append({
                         "tool": tool_name,
                         "args": args,
-                        "result": result if isinstance(result, str) else str(result)
+                        "result": result_output
                     })
                     
                     # Trim history after tool execution to manage large outputs
@@ -801,6 +953,13 @@ Execution style:
         
         # Log final response
         self._log("ASSISTANT_RESPONSE", content)
+        self._append_event(
+            "assistant_response",
+            {
+                "content_preview": self._truncate_preview(content, 800),
+                "tool_calls_this_turn": len(self._current_step_tool_outputs),
+            },
+        )
         
         return {
             "content": content,
