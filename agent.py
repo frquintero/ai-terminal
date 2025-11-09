@@ -291,11 +291,14 @@ Execution style:
             self.message_history.append({"role": "system", "content": reminder})
     
     def _sanitize_history_tool_calls(self):
-        """Ensure tool outputs reference valid assistant tool_call IDs before API call."""
-        sanitized_history = []
-        valid_ids = set()
-        
+        """
+        Normalize message history and gather tool-call state for diagnostics.
+        Returns metadata describing assistant/tool relationships without mutating content.
+        """
         normalized_messages = []
+        assistant_tool_calls: list[dict[str, Any]] = []
+        tool_messages: list[dict[str, Any]] = []
+        
         for msg in self.message_history:
             if not isinstance(msg, dict):
                 msg = self._to_dict_message(msg)
@@ -303,22 +306,56 @@ Execution style:
         
         self.message_history = normalized_messages
         
-        for msg in self.message_history:
-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+        for idx, msg in enumerate(self.message_history):
+            role = msg.get("role")
+            if role == "assistant" and msg.get("tool_calls"):
                 normalized_calls = self._normalize_tool_calls(msg["tool_calls"])
                 msg["tool_calls"] = normalized_calls
                 for tc in normalized_calls:
-                    valid_ids.add(tc.get("id"))
+                    assistant_tool_calls.append({
+                        "index": idx,
+                        "id": tc.get("id"),
+                        "name": (tc.get("function") or {}).get("name")
+                    })
+            elif role == "tool":
+                tool_messages.append({
+                    "index": idx,
+                    "tool_call_id": msg.get("tool_call_id"),
+                    "preview": (msg.get("content") or "")[:160]
+                })
         
-        for msg in self.message_history:
-            if msg.get("role") == "tool":
-                tc_id = msg.get("tool_call_id")
-                if not tc_id or tc_id not in valid_ids:
-                    self._log("SANITIZE_WARNING", f"Dropping orphan tool output with id={tc_id}")
-                    continue
-            sanitized_history.append(msg)
-        
-        self.message_history = sanitized_history
+        return {
+            "assistant_tool_calls": assistant_tool_calls,
+            "tool_messages": tool_messages
+        }
+
+    def _persist_openai_payload(self, trace_id: str):
+        """Write the exact OpenAI payload to disk for later debugging."""
+        try:
+            trace_dir = Path("logs/openai_traces")
+            trace_dir.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "trace_id": trace_id,
+                "messages": self.message_history
+            }
+            trace_path = trace_dir / f"{trace_id}.json"
+            trace_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            self._log("TRACE_WARNING", f"Failed to persist OpenAI payload {trace_id}: {e}")
+
+    def _log_openai_trace(self, trace_id: str, tool_state: dict):
+        """Log summary of outgoing OpenAI payload with tool-call details."""
+        try:
+            summary = {
+                "trace_id": trace_id,
+                "message_count": len(self.message_history),
+                "last_roles": [msg.get("role") for msg in self.message_history[-5:]],
+                "assistant_tool_calls": tool_state.get("assistant_tool_calls", []),
+                "tool_messages": tool_state.get("tool_messages", [])[-5:]
+            }
+            self._log("OPENAI_REQUEST", json.dumps(summary, ensure_ascii=False))
+        except Exception as e:
+            self._log("TRACE_WARNING", f"Failed to log OpenAI trace {trace_id}: {e}")
 
     @staticmethod
     def _normalize_tool_calls(tool_calls: list) -> list[dict]:
@@ -423,6 +460,36 @@ Execution style:
             
             recent = messages[start_idx:]
         
+        # Drop any tool messages that lost their originating assistant call.
+        # OpenAI rejects payloads that contain tool outputs without a preceding assistant/tool_call pair.
+        pruned_recent = []
+        seen_tool_calls: set[str] = set()
+        dropped_orphans = 0
+        for msg in recent:
+            if not isinstance(msg, dict):
+                msg = self._to_dict_message(msg)
+            role = msg.get("role")
+            if role == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    tc_id = tc.get("id")
+                    if tc_id:
+                        seen_tool_calls.add(tc_id)
+                pruned_recent.append(msg)
+            elif role == "tool":
+                tool_call_id = msg.get("tool_call_id")
+                if tool_call_id and tool_call_id in seen_tool_calls:
+                    pruned_recent.append(msg)
+                else:
+                    dropped_orphans += 1
+            else:
+                pruned_recent.append(msg)
+        if dropped_orphans:
+            self._log(
+                "HISTORY_TRIM_DROP",
+                f"Dropped {dropped_orphans} orphan tool messages during trim"
+            )
+        recent = pruned_recent
+        
         # Truncate only extremely long tool outputs
         for msg in recent:
             if isinstance(msg, dict) and msg.get("role") == "tool":
@@ -458,9 +525,9 @@ Execution style:
         react_loop_count = 0
         react_limit_warning_sent = False
         while step_count < max_steps:
+            tool_state = self._sanitize_history_tool_calls()
+            trace_id = uuid.uuid4().hex[:8]
             try:
-                self._sanitize_history_tool_calls()
-                
                 # Show thinking indicator
                 with Live(ui.show_thinking(), console=console, refresh_per_second=10):
                     response = self.client.chat.completions.create(
@@ -487,7 +554,15 @@ Execution style:
                 assistant_message = response.choices[0].message
                 
             except Exception as e:
-                ui.error(f"API Error: {str(e)}")
+                self._persist_openai_payload(trace_id)
+                self._log_openai_trace(trace_id, tool_state)
+                error_info = {
+                    "trace_id": trace_id,
+                    "error": str(e)
+                }
+                self._log("OPENAI_ERROR", json.dumps(error_info, ensure_ascii=False))
+                _SESSION_STATE.record_error("openai_api", str(e), error_info)
+                ui.error(f"API Error: {str(e)} (trace {trace_id})")
                 return {"content": None, "error": str(e), "elapsed_time": ui.get_elapsed_time()}
             
             react_parse = self._parse_react_directives(assistant_message.content)

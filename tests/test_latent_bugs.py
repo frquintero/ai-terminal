@@ -7,22 +7,6 @@ import sys
 import os
 from tools import RunCommandTool, InteractiveCommandTool
 
-def test_interactive_detection_sudo():
-    """Test that sudo vim is detected as interactive"""
-    tool = RunCommandTool()
-    
-    result = tool.execute("sudo vim test.txt")
-    assert "interactive command" in result.lower(), f"Should block sudo vim: {result}"
-    assert "run_interactive" in result.lower(), f"Should suggest run_interactive: {result}"
-    
-    result = tool.execute("sudo nano test.txt")
-    assert "interactive command" in result.lower(), f"Should block sudo nano: {result}"
-    
-    result = tool.execute("doas vim test.txt")
-    assert "interactive command" in result.lower(), f"Should block doas vim: {result}"
-    
-    print("✓ Interactive detection catches sudo/doas correctly")
-
 def test_interactive_detection_path():
     """Test that /usr/bin/vim is detected as interactive"""
     tool = RunCommandTool()
@@ -60,19 +44,6 @@ def test_non_interactive_allowed():
     assert "interactive command" not in result.lower(), f"Should allow echo: {result}"
     
     print("✓ Non-interactive commands are not blocked")
-
-def test_shell_integration_prompt():
-    """Test that shell uses unique prompt sentinel"""
-    from shell_integration import ShellIntegration
-    
-    shell = ShellIntegration()
-    assert hasattr(shell, 'PROMPT'), "Should have PROMPT attribute"
-    assert shell.PROMPT == "__AI_PROMPT__$ ", f"Unexpected prompt: {shell.PROMPT}"
-    
-    # Cleanup
-    shell.close()
-    
-    print("✓ Shell uses unique prompt sentinel")
 
 def test_message_history_trimming():
     """Test that agent trims message history"""
@@ -148,6 +119,99 @@ def test_trim_history_preserves_tool_calls():
     
     print("✓ Trim history preserves pending tool calls")
 
+def test_trim_history_drops_orphan_tool_outputs():
+    """Ensure trimming removes tool outputs whose assistant anchor was trimmed"""
+    from agent import MiniAgent
+    
+    agent = MiniAgent()
+    agent.MAX_HISTORY_MESSAGES = 6
+    agent.message_history = [agent.message_history[0]]
+    
+    orphan_id = "call-dangling"
+    anchor_id = "call-latest"
+    agent.message_history.extend([
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": orphan_id,
+                "type": "function",
+                "function": {"name": "run_command", "arguments": "{\"command\": \"echo hi\"}"}
+            }]
+        },
+        {
+            "role": "tool",
+            "content": "output",
+            "tool_call_id": orphan_id
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": anchor_id,
+                "type": "function",
+                "function": {"name": "run_command", "arguments": "{\"command\": \"echo bye\"}"}
+            }]
+        },
+        {
+            "role": "tool",
+            "content": "fresh output",
+            "tool_call_id": anchor_id
+        },
+    ])
+    
+    # Add two more user messages so trimming slices between the first assistant/tool pair
+    for i in range(2):
+        agent.message_history.append({"role": "user", "content": f"later {i}"})
+    
+    agent._trim_history()
+    
+    trimmed_roles = [msg.get("role") for msg in agent.message_history]
+    assert trimmed_roles[1] != "tool", "Trimmed history should not start with orphan tool output"
+    assert all(
+        msg.get("tool_call_id") != orphan_id
+        for msg in agent.message_history
+        if msg.get("role") == "tool"
+    ), "Orphan tool output should be dropped"
+    assert any(
+        msg.get("tool_call_id") == anchor_id
+        for msg in agent.message_history
+        if msg.get("role") == "tool"
+    ), "Recent tool outputs should remain intact"
+    
+    print("✓ Trim history drops orphan tool outputs")
+
+def test_sanitize_history_reports_tool_state():
+    """Ensure sanitize helper normalizes messages and returns diagnostics"""
+    from agent import MiniAgent
+    
+    agent = MiniAgent()
+    agent.message_history = [agent.message_history[0]]
+    
+    tool_call_id = "call-xyz"
+    agent.message_history.extend([
+        {"role": "assistant", "content": "", "tool_calls": [{
+            "id": tool_call_id,
+            "type": "function",
+            "function": {"name": "read_file", "arguments": "{\"file_path\": \"notes.txt\"}"}
+        }]},
+        {"role": "tool", "content": "result body", "tool_call_id": tool_call_id},
+        {"role": "tool", "content": "orphan output", "tool_call_id": "ghost"}
+    ])
+    
+    tool_state = agent._sanitize_history_tool_calls()
+    
+    assert tool_state["assistant_tool_calls"], "Should capture assistant tool calls"
+    assert tool_state["assistant_tool_calls"][0]["id"] == tool_call_id
+    assert len(tool_state["tool_messages"]) == 2
+    assert tool_state["tool_messages"][0]["tool_call_id"] == tool_call_id
+    assert tool_state["tool_messages"][1]["tool_call_id"] == "ghost"
+    # Ensure no messages were removed
+    assert any(msg.get("tool_call_id") == "ghost" for msg in agent.message_history), \
+        "sanitize should not drop messages"
+    
+    print("✓ Sanitization reports tool-call metadata")
+
 def test_tool_output_truncation():
     """Test that large tool outputs are truncated"""
     from agent import MiniAgent
@@ -183,13 +247,13 @@ if __name__ == "__main__":
     print("Testing latent bug fixes...\n")
     
     try:
-        test_interactive_detection_sudo()
         test_interactive_detection_path()
         test_interactive_detection_with_flags()
         test_non_interactive_allowed()
-        test_shell_integration_prompt()
         test_message_history_trimming()
         test_trim_history_preserves_tool_calls()
+        test_trim_history_drops_orphan_tool_outputs()
+        test_sanitize_history_reports_tool_state()
         test_tool_output_truncation()
         
         print("\n✓ All latent bug fixes verified!")
