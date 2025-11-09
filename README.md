@@ -27,6 +27,7 @@ Learn more about Amp at [ampcode.com](https://ampcode.com).
 - **Content Processing**: Combine file operations, shell commands, and AI generation for complex workflows
 - **Shell Integration**: Wrap around bash/zsh for efficient command execution and output capture
 - **Namespace Isolation (Optional)**: Run commands inside isolated Linux namespace with deterministic rootfs for reproducible execution
+- **Traceable AI Calls**: Every OpenAI request is tagged with a short trace ID and stored under `logs/openai_traces/<trace>.json` for debugging
 
 ## Available Agent Tools
 
@@ -110,6 +111,7 @@ See [history/NAMESPACE_ISOLATION.md](history/NAMESPACE_ISOLATION.md) for full do
 - The AI will interpret and execute them appropriately
 - Supports file operations, shell commands, Wikipedia searches, and conversation
 - By default, see clean AI summaries; enable raw output for detailed command results
+- Need deeper debugging guidance? See [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md) for trace logs, session telemetry, and beads workflow tips.
 
 ## Development
 
