@@ -29,6 +29,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from shell_integration import ShellIntegration
 from command_parser import parse_command
 from event_memory import summarize_event_log
+from history_store import get_history_store, HistoryStoreError
 
 
 # ============================================================================
@@ -188,17 +189,19 @@ class SessionState:
     
     Provides bounded, in-memory tracking of:
     - Session metadata (id, start time, interaction counts)
-    - Tool execution history (last 20 calls)
+    - Tool execution history (last N calls; default 10)
     - Recent errors (last 3)
     - Last command exit code
     """
     
+    TOOL_HISTORY_LIMIT = max(1, int(os.getenv("SESSION_TOOL_HISTORY_LIMIT", "10")))
+
     def __init__(self):
         self.session_id: Optional[str] = None
         self.start_time: Optional[datetime] = None
         self.total_interactions: int = 0
         self.total_tool_calls: int = 0
-        self.tool_history: deque = deque(maxlen=20)  # Bounded to last 20 tool calls
+        self.tool_history: deque = deque(maxlen=self.TOOL_HISTORY_LIMIT)
         self.recent_errors: deque = deque(maxlen=3)  # Bounded to last 3 errors
         self.last_exit_code: Optional[int] = None
     
@@ -2399,6 +2402,110 @@ except Exception as _e:
         except Exception:
             # Cleanup best-effort; ignore failures to avoid breaking sandbox output
             pass
+
+
+# ============================================================================
+# History Search Tool
+# ============================================================================
+
+class HistorySearchTool(BaseTool):
+    """
+    Query the persistent history store for past interactions beyond the live window.
+    """
+
+    def __init__(self):
+        self._store = get_history_store()
+
+    @property
+    def name(self) -> str:
+        return "history_search"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Search the long-term history store (keywords, session id, time ranges) "
+            "to recall past tool calls and outputs."
+        )
+
+    @property
+    def usage_examples(self) -> List[str]:
+        return [
+            "history_search(query=\"moon phase\", limit=3)",
+            "history_search(session_id=\"171\", tool=\"http_request\", limit=5)",
+            "history_search(query=\"deploy logs\", since=\"2025-11-01T00:00:00Z\")",
+        ]
+
+    @property
+    def schema(self) -> Dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": "history_search",
+                "description": (
+                    "Look up prior tool events when the user references earlier work or when "
+                    "the needed context is outside the last ~10 tool calls."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Keywords describing the event to find."
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": "Restrict results to a single session id."
+                        },
+                        "since": {
+                            "type": "string",
+                            "description": "ISO-8601 timestamp; include events at or after this time."
+                        },
+                        "until": {
+                            "type": "string",
+                            "description": "ISO-8601 timestamp; include events at or before this time."
+                        },
+                        "tool": {
+                            "type": "string",
+                            "description": "Filter by tool name (run_command, http_request, etc.)."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 25,
+                            "description": "Return at most this many matches (default 5)."
+                        }
+                    }
+                }
+            }
+        }
+
+    def execute(
+        self,
+        query: Optional[str] = None,
+        session_id: Optional[str] = None,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        tool: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> str:
+        try:
+            cap = int(limit) if limit is not None else 5
+        except (TypeError, ValueError):
+            cap = 5
+        try:
+            result = self._store.search(
+                query=query.strip() if query else None,
+                session_id=session_id.strip() if session_id else None,
+                since=since.strip() if since else None,
+                until=until.strip() if until else None,
+                tool=tool.strip() if tool else None,
+                limit=cap,
+            )
+            return json.dumps(result, ensure_ascii=False, indent=2)
+        except HistoryStoreError as exc:
+            return f"History search failed: {exc}"
+        except Exception as exc:
+            return f"Unexpected history search error: {exc}"
 
 
 # ============================================================================

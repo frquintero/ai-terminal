@@ -19,7 +19,7 @@ This is an **AI-powered Linux terminal** built with MiniMax M2 (or Kimi-2/custom
 - Shell-first philosophy (prefer `awk/sed/jq` over Python for text/math)
 - Resource-limited Python sandbox with write protection, network isolation
 - Optional namespace isolation via bubblewrap (reproducible rootfs)
-- Comprehensive context tracking (20 tool history, 3 recent errors, session stats)
+- Lean context tracking (10-call live history + history_search for permanent recall, recent errors, session stats)
 - Raw output mode toggle for debugging
 
 **State**: v1.3, 88 closed beads (all issues completed), production-ready with comprehensive docs and test coverage.
@@ -64,6 +64,7 @@ The system currently auto-registers these tools (direct mirror of `tools.py` and
 - `write_file` – Create or overwrite files in the working directory
 - `get_context` – Return session metadata, tool history, and recent errors for debugging
 - `http_request` – Structured curl wrapper with profiles, sessions, retries, metrics, and diagnostics (preferred for any HTTP/API work)
+- `history_search` – Query the persistent event archive when you need to recall work outside the live tool window
 
 Detailed knobs for `http_request` live in `docs/HTTP_REQUEST.md`.
 
@@ -106,6 +107,7 @@ Key settings in `.env`:
 - `EVENT_LOG_RETENTION_DAYS` (default: `7`) - Auto-delete event logs older than N days.
 - `EVENT_MEMORY_MAX_EVENTS` / `EVENT_MEMORY_MAX_CHARS` - Upper bounds for the Agent Memory block sent to the LLM.
 - `EVENT_MEMORY_ARTIFACT_THRESHOLD` (default: `8192`) - Tool outputs larger than this many bytes are persisted as artifacts under `ai-terminal-wd/artifacts/`.
+- `SESSION_TOOL_HISTORY_LIMIT` (default: `10`) - Live `tool_history` length. Lower values reduce prompt cost; rely on `history_search` for older context.
 
 ### Python Sandbox Configuration
 - `SANDBOX_PATH` (default: `./sandbox_runs`) - Directory for sandbox execution environments

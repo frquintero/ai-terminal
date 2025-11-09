@@ -4,6 +4,7 @@ from ui_formatter import ui, console
 from utils.system_info import get_system_info, format_system_info
 from db_logger import DBLogger
 from event_memory import EventLog, EventRetriever, EventRetrieverConfig
+from history_store import get_history_store
 import openai
 import json
 import re
@@ -57,6 +58,11 @@ class MiniAgent:
             "model": self.config.model,
             "agent_type": self.config.agent_type
         })
+        try:
+            self.history_store = get_history_store()
+        except Exception as exc:
+            self.history_store = None
+            self._log("TRACE_WARNING", f"History store unavailable: {exc}")
         
         # Tool output collector for deterministic rendering
         self._current_step_tool_outputs = []
@@ -170,6 +176,7 @@ Memory & artifacts:
 - Each turn includes an \"Agent Memory\" system message listing high-signal events (errors, tool results, summaries). Scan it before planning so you do not repeat commands.
 - Entries may contain artifact_path pointing to {WORKING_DIR_PREFIX}/artifacts/.... Only call read_file on that path when the user explicitly needs the raw output.
 - If artifact_summary is present, trust and cite it directly; fetch the artifact only for detailed follow-ups.
+- Long-term recall lives in history_search: when the user references earlier work or context beyond the last ~10 tool calls, issue history_search with short keywords (and optional session/time filters) before answering, then cite only the portions you truly need.
 
 Key tools:
 - run_command - primary executor; compose pipelines for efficient processing.
@@ -197,10 +204,18 @@ Execution style:
     # ------------------------------------------------------------------
 
     def _append_event(self, event_type: str, payload: dict):
+        record = None
         try:
-            self.event_log.append(event_type, payload)
+            record = self.event_log.append(event_type, payload)
         except Exception as exc:
             self._log("TRACE_WARNING", f"Failed to append event: {exc}")
+        if not record:
+            return
+        if self.history_store:
+            try:
+                self.history_store.record_event(self.session_id, record)
+            except Exception as exc:
+                self._log("TRACE_WARNING", f"History store append failed: {exc}")
 
     @staticmethod
     def _truncate_preview(text: str, limit: int = 400) -> str:
