@@ -63,6 +63,9 @@ The system currently auto-registers these tools (direct mirror of `tools.py` and
 - `read_file` – Output a file’s contents
 - `write_file` – Create or overwrite files in the working directory
 - `get_context` – Return session metadata, tool history, and recent errors for debugging
+- `http_request` – Structured curl wrapper with profiles, sessions, retries, metrics, and diagnostics (preferred for any HTTP/API work)
+
+Detailed knobs for `http_request` live in `docs/HTTP_REQUEST.md`.
 
 ## Installation
 

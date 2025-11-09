@@ -7,17 +7,25 @@ Use Python sandbox only for visualization, ML, or explicit Python requirements.
 """
 
 from abc import ABC, abstractmethod
+from collections import deque
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Tuple
+import inspect
+import ipaddress
+import json
 import os
-import subprocess
-import sys
+import re
 import shlex
 import shutil
-import json
-import inspect
-import re
-from typing import Dict, Any, List, Optional
-from collections import deque
-from pathlib import Path
+import socket
+import subprocess
+import sys
+import textwrap
+import time
+from uuid import uuid4
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
 from shell_integration import ShellIntegration
 from command_parser import parse_command
 from event_memory import summarize_event_log
@@ -41,6 +49,130 @@ def _get_working_dir_path() -> str:
 
 # Track recently written files for context awareness
 _RECENT_WRITES: deque = deque(maxlen=100)
+
+_WORKING_DIR_PATH = Path(_get_working_dir_path())
+HTTP_SESSION_ROOT = _WORKING_DIR_PATH / ".http_sessions"
+HTTP_BODY_DIR = _WORKING_DIR_PATH / "http_bodies"
+HTTP_TRACE_DIR = _WORKING_DIR_PATH / "http_traces"
+
+for http_dir in (HTTP_SESSION_ROOT, HTTP_BODY_DIR, HTTP_TRACE_DIR):
+    http_dir.mkdir(parents=True, exist_ok=True)
+
+SESSION_CONFIG_FILENAME = "session.json"
+
+TIME_KEYS = {
+    "time_namelookup": "dns_lookup",
+    "time_connect": "tcp_connect",
+    "time_appconnect": "tls_handshake",
+    "time_starttransfer": "ttfb",
+    "time_total": "total",
+    "time_pretransfer": "pretransfer",
+    "time_redirect": "redirect",
+    "time_posttransfer": "posttransfer",
+}
+
+DEFAULT_SESSION_CONFIG = {
+    "default_headers": {},
+    "auth_bearer": None,
+    "api_key": {
+        "header": None,
+        "value": None
+    }
+}
+
+
+# Curl exit code classification derived from Everything Curl
+CURL_EXIT_CODE_MAP: Dict[int, Tuple[str, str]] = {
+    1: ("protocol_error", "Unsupported protocol or invalid URL."),
+    2: ("init_error", "Curl failed to initialize."),
+    3: ("url_malformed", "Malformed URL."),
+    5: ("proxy_error", "Proxy resolution failed."),
+    6: ("dns_error", "Could not resolve host."),
+    7: ("connect_error", "Failed to connect to host."),
+    18: ("transfer_error", "Partial file transfer."),
+    19: ("transfer_error", "Reference file already exists (resume conflict)."),
+    22: ("http_error", "HTTP response >= 400 (use status for details)."),
+    23: ("write_error", "Failed writing received data to disk/socket."),
+    26: ("read_error", "Read error."),
+    27: ("out_of_memory", "Out of memory."),
+    28: ("timeout", "Operation timeout."),
+    35: ("tls_error", "SSL/TLS handshake failed."),
+    42: ("aborted", "Aborted by callback."),
+    47: ("too_many_redirects", "Too many redirects."),
+    48: ("dns_error", "Unknown option specified to DNS resolver."),
+    49: ("dns_error", "Malformed DNS interface/option."),
+    51: ("tls_cert_error", "Peer certificate could not be authenticated."),
+    52: ("server_empty", "Server returned nothing."),
+    53: ("ssl_engine_error", "SSL crypto engine not found."),
+    54: ("ssl_engine_set_error", "Failed setting SSL crypto engine as default."),
+    55: ("send_error", "Failed sending network data."),
+    56: ("recv_error", "Failure when receiving network data."),
+    58: ("no_local_cert", "Problem with local client certificate."),
+    59: ("ssl_cipher_error", "Couldn't use specified SSL cipher."),
+    60: ("tls_cert_error", "Peer certificate cannot be authenticated."),
+    61: ("ssl_key_error", "Unrecognized client certificate format."),
+    67: ("auth_error", "Authentication failure."),
+    77: ("ssl_ca_error", "Problem with reading CA cert (path?)."),
+    78: ("resource_not_found", "Resource not found (HTTP 404)."),
+    79: ("file_error", "Remote file error."),
+    80: ("ssl_shutdown_failed", "Failed to shut down SSL connection."),
+    82: ("http2_error", "Stream error in HTTP/2 framing layer."),
+    83: ("http2_error", "Inadequate transport security for HTTP/2."),
+    84: ("http2_error", "HTTP/2 stream refused."),
+    85: ("http2_error", "HTTP/2 internal error."),
+    90: ("peer_error", "Peer failed verification."),
+    91: ("bad_content_encoding", "Unrecognized transfer encoding."),
+    92: ("http2_error", "HTTP/2 server refused settings."),
+}
+
+
+HTTP_STATUS_ERROR_MAP: Dict[int, Tuple[str, str]] = {
+    401: ("auth_error", "Authentication required or failed."),
+    403: ("auth_error", "Access forbidden."),
+    404: ("resource_not_found", "Resource not found."),
+    409: ("conflict_error", "Conflict when processing request."),
+    422: ("validation_error", "Validation failed (HTTP 422)."),
+    429: ("rate_limit", "Too many requests / rate limited."),
+    500: ("server_error", "Internal server error."),
+    502: ("server_error", "Bad gateway."),
+    503: ("server_error", "Service unavailable."),
+    504: ("server_error", "Gateway timeout."),
+}
+
+
+@dataclass(frozen=True)
+class HttpProfile:
+    name: str
+    timeout_sec: int
+    max_bytes: int
+    follow_redirects: bool
+    retries: int = 0
+    retry_delay: int = 1
+    retry_max_time: Optional[int] = None
+    min_interval_sec: float = 0.0
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "timeout_sec": self.timeout_sec,
+            "max_bytes": self.max_bytes,
+            "follow_redirects": self.follow_redirects,
+            "retries": self.retries,
+            "retry_delay": self.retry_delay,
+            "retry_max_time": self.retry_max_time,
+            "min_interval_sec": self.min_interval_sec,
+        }
+
+
+@dataclass
+class HttpSessionContext:
+    session_id: str
+    safe_id: str
+    base_dir: Path
+    cookie_file: Path
+    curlrc_path: Path
+    config_path: Path
+    config: Dict[str, Any]
 
 
 # ============================================================================
@@ -397,6 +529,1090 @@ class WriteFileTool(BaseTool):
             return f"File written successfully: {isolated_path}"
         except Exception as e:
             return f"Error writing file: {str(e)}"
+
+
+class HttpRequestTool(BaseTool):
+    """
+    Structured HTTP(S) requests via curl with session-aware profiles and telemetry.
+    """
+
+    SUPPORTED_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+
+    def __init__(self):
+        self.working_dir = _WORKING_DIR_PATH
+        self.session_root = HTTP_SESSION_ROOT
+        self.body_dir = HTTP_BODY_DIR
+        self.trace_dir = HTTP_TRACE_DIR
+        self.body_preview_limit = int(os.getenv("HTTP_MAX_BODY_PREVIEW", "4096"))
+        self._curl_path = shutil.which("curl")
+        if not self._curl_path:
+            raise RuntimeError("curl binary not found in PATH")
+
+        self.user_agent = "ai-terminal-http/1.0"
+        self.default_profile_name = "quick_fetch"
+        self.profiles: Dict[str, HttpProfile] = {
+            "quick_fetch": HttpProfile("quick_fetch", timeout_sec=10, max_bytes=2 * 1024 * 1024, follow_redirects=True, retries=0, min_interval_sec=0.0),
+            "gentle_crawl": HttpProfile("gentle_crawl", timeout_sec=30, max_bytes=5 * 1024 * 1024, follow_redirects=True, retries=2, retry_delay=2, retry_max_time=45, min_interval_sec=2.0),
+            "deep_audit": HttpProfile("deep_audit", timeout_sec=60, max_bytes=10 * 1024 * 1024, follow_redirects=False, retries=1, retry_delay=1, retry_max_time=60, min_interval_sec=0.5),
+        }
+        self._session_cache: Dict[str, HttpSessionContext] = {}
+        self._host_last_request: Dict[str, float] = {}
+        self._dns_cache: Dict[str, Tuple[float, List[str]]] = {}
+        self._dns_cache_ttl_sec = int(os.getenv("HTTP_DNS_CACHE_TTL", "300"))
+
+    @property
+    def name(self) -> str:
+        return "http_request"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Structured HTTP client backed by curl with profile presets, persistent sessions, "
+            "and write-out metrics. Prefer this over run_command for web/API work."
+        )
+
+    @property
+    def schema(self) -> Dict[str, Any]:
+        profile_names = sorted(self.profiles.keys())
+        return {
+            "type": "function",
+            "function": {
+                "name": "http_request",
+                "description": (
+                    "Execute HTTP/HTTPS requests with structured output, retries, and metrics. "
+                    "Pick a profile (quick_fetch, gentle_crawl, deep_audit) and optionally bind "
+                    "to a named session for cookie/auth reuse."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "method": {
+                            "type": "string",
+                            "enum": list(self.SUPPORTED_METHODS),
+                            "default": "GET",
+                            "description": "HTTP method to use"
+                        },
+                        "url": {
+                            "type": "string",
+                            "description": "Target URL (http or https only)"
+                        },
+                        "params": {
+                            "type": "object",
+                            "description": "Optional query parameters to append"
+                        },
+                        "headers": {
+                            "type": "object",
+                            "description": "Additional headers (e.g., {'Accept': 'application/json'})"
+                        },
+                        "body_form": {
+                            "type": "object",
+                            "description": "Form fields encoded as application/x-www-form-urlencoded (do not mix with body_json/body_raw)"
+                        },
+                        "body_json": {
+                            "type": "object",
+                            "description": "JSON payload (serialized automatically, sets Content-Type)"
+                        },
+                        "body_raw": {
+                            "type": "string",
+                            "description": "Raw string payload. Supply Content-Type header yourself."
+                        },
+                        "profile": {
+                            "type": "string",
+                            "enum": profile_names,
+                            "default": self.default_profile_name,
+                            "description": "Execution profile controlling timeout/retries"
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": "Named session for cookie/auth reuse (defaults to 'default')"
+                        },
+                        "session_update": {
+                            "type": "object",
+                            "description": "Update session defaults (headers/auth). Fields: default_headers, remove_headers, auth_bearer, clear_auth_bearer, api_key_header, api_key_value, clear_api_key.",
+                            "additionalProperties": False,
+                            "properties": {
+                                "default_headers": {
+                                    "type": "object",
+                                    "description": "Headers to persist for this session (added when missing)"
+                                },
+                                "remove_headers": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Headers to remove from persisted defaults"
+                                },
+                                "auth_bearer": {
+                                    "type": "string",
+                                    "description": "Bearer token stored securely for Authorization header"
+                                },
+                                "clear_auth_bearer": {
+                                    "type": "boolean",
+                                    "description": "Set true to remove stored bearer token"
+                                },
+                                "api_key_header": {
+                                    "type": "string",
+                                    "description": "Header name for API key"
+                                },
+                                "api_key_value": {
+                                    "type": "string",
+                                    "description": "API key value"
+                                },
+                                "clear_api_key": {
+                                    "type": "boolean",
+                                    "description": "Set true to remove stored API key"
+                                }
+                            }
+                        },
+                        "follow_redirects": {
+                            "type": "boolean",
+                            "description": "Override profile redirect behavior"
+                        },
+                        "timeout_sec": {
+                            "type": "integer",
+                            "description": "Override profile timeout (seconds)"
+                        },
+                        "max_bytes": {
+                            "type": "integer",
+                            "description": "Override profile max response bytes"
+                        },
+                        "max_redirects": {
+                            "type": "integer",
+                            "description": "Limit number of redirects when follow_redirects=true"
+                        },
+                        "min_interval_sec": {
+                            "type": "number",
+                            "description": "Throttle requests per host by enforcing a minimum interval (seconds)"
+                        },
+                        "allow_local_networks": {
+                            "type": "boolean",
+                            "description": "Set true to allow loopback/private IPs (defaults to blocked for SSRF safety)"
+                        },
+                        "allow_insecure_tls": {
+                            "type": "boolean",
+                            "description": "Allow self-signed certificates (adds --insecure)"
+                        },
+                        "proxy": {
+                            "type": "string",
+                            "description": "Forward requests through the given proxy URL (e.g., http://user:pass@proxy:8080)"
+                        },
+                        "dns_servers": {
+                            "type": "string",
+                            "description": "Override DNS resolution order (comma-separated IP list passed to curl --dns-servers)"
+                        },
+                        "bind_interface": {
+                            "type": "string",
+                            "description": "Bind outgoing connection to a local interface or IP"
+                        },
+                        "http_version": {
+                            "type": "string",
+                            "enum": ["auto", "1.0", "1.1", "2", "3"],
+                            "description": "Force an HTTP version (default auto-negotiates)"
+                        },
+                        "accept_compression": {
+                            "type": "boolean",
+                            "description": "If true, request compressed responses with curl --compressed"
+                        },
+                        "parse_mode": {
+                            "type": "string",
+                            "enum": ["auto", "json", "none"],
+                            "default": "auto",
+                            "description": "Control response parsing strategy"
+                        },
+                        "json_pointer": {
+                            "type": "string",
+                            "description": "Extract a specific field via RFC 6901 pointer (e.g., '/data/items/0/title')"
+                        },
+                        "verbose_headers": {
+                            "type": "boolean",
+                            "description": "Capture verbose header trace (default true)"
+                        },
+                        "save_body": {
+                            "type": "boolean",
+                            "description": "Persist body to http_bodies even if within preview limit"
+                        }
+                    },
+                    "required": ["url"],
+                    "additionalProperties": False
+                }
+            }
+        }
+
+    @property
+    def usage_examples(self) -> List[str]:
+        return [
+            "http_request(method='GET', url='https://api.github.com/repos/octocat/Hello-World')",
+            "http_request(method='POST', url='https://api.example.com/chat', body_json={'prompt': 'hi'})",
+            "http_request(url='https://news.ycombinator.com', profile='gentle_crawl', accept_compression=True, min_interval_sec=2)",
+            "http_request(method='POST', url='https://httpbin.org/forms/post', body_form={'q': 'curl'}, parse_mode='json', json_pointer='/form/q')"
+        ]
+
+    def execute(
+        self,
+        url: str,
+        method: str = "GET",
+        params: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, Any]] = None,
+        body_form: Optional[Dict[str, Any]] = None,
+        body_json: Optional[Dict[str, Any]] = None,
+        body_raw: Optional[str] = None,
+        profile: Optional[str] = None,
+        session_id: Optional[str] = None,
+        session_update: Optional[Dict[str, Any]] = None,
+        follow_redirects: Optional[bool] = None,
+        timeout_sec: Optional[int] = None,
+        max_bytes: Optional[int] = None,
+        max_redirects: Optional[int] = None,
+        min_interval_sec: Optional[float] = None,
+        allow_local_networks: Optional[bool] = None,
+        allow_insecure_tls: Optional[bool] = None,
+        proxy: Optional[str] = None,
+        dns_servers: Optional[str] = None,
+        bind_interface: Optional[str] = None,
+        http_version: str = "auto",
+        accept_compression: Optional[bool] = None,
+        parse_mode: str = "auto",
+        json_pointer: Optional[str] = None,
+        verbose_headers: Optional[bool] = None,
+        save_body: Optional[bool] = None
+    ) -> str:
+        try:
+            request = self._prepare_request(
+                url=url,
+                method=method,
+                params=params or {},
+                headers=headers or {},
+                body_form=body_form,
+                body_json=body_json,
+                body_raw=body_raw,
+                profile_name=profile,
+                session_id=session_id,
+                session_update=session_update or {},
+                follow_redirects=follow_redirects,
+                timeout_override=timeout_sec,
+                max_bytes_override=max_bytes,
+                max_redirects=max_redirects,
+                min_interval_override=min_interval_sec,
+                allow_local_networks=allow_local_networks,
+                allow_insecure_tls=allow_insecure_tls,
+                proxy=proxy,
+                dns_servers=dns_servers,
+                bind_interface=bind_interface,
+                http_version=http_version,
+                accept_compression=accept_compression,
+                parse_mode=parse_mode,
+                json_pointer=json_pointer,
+                verbose_headers=verbose_headers,
+                save_body=save_body,
+            )
+            envelope = self._perform_request(request)
+            _SESSION_STATE.record_tool_call(
+                self.name,
+                {
+                    "url": request["url"],
+                    "method": request["method"],
+                    "profile": request["profile"].name,
+                    "session_id": request.get("session_id")
+                },
+                success=envelope["ok"],
+                exit_code=envelope.get("curl_exit_code"),
+                error=envelope.get("error")
+            )
+            return json.dumps(envelope, indent=2)
+        except Exception as exc:
+            _SESSION_STATE.record_tool_call(
+                self.name,
+                {"url": url, "method": method},
+                success=False,
+                error=str(exc)
+            )
+            _SESSION_STATE.record_error(self.name, str(exc))
+            return f"Error: {exc}"
+
+    # ------------------------------------------------------------------
+    # Request preparation
+    # ------------------------------------------------------------------
+    def _prepare_request(
+        self,
+        url: str,
+        method: str,
+        params: Dict[str, Any],
+        headers: Dict[str, Any],
+        body_form: Optional[Dict[str, Any]],
+        body_json: Optional[Dict[str, Any]],
+        body_raw: Optional[str],
+        profile_name: Optional[str],
+        session_id: Optional[str],
+        session_update: Dict[str, Any],
+        follow_redirects: Optional[bool],
+        timeout_override: Optional[int],
+        max_bytes_override: Optional[int],
+        max_redirects: Optional[int],
+        min_interval_override: Optional[float],
+        allow_local_networks: Optional[bool],
+        allow_insecure_tls: Optional[bool],
+        proxy: Optional[str],
+        dns_servers: Optional[str],
+        bind_interface: Optional[str],
+        http_version: str,
+        accept_compression: Optional[bool],
+        parse_mode: str,
+        json_pointer: Optional[str],
+        verbose_headers: Optional[bool],
+        save_body: Optional[bool],
+    ) -> Dict[str, Any]:
+        method_upper = method.upper()
+        if method_upper not in self.SUPPORTED_METHODS:
+            raise ValueError(f"Unsupported HTTP method: {method}")
+
+        normalized_url = self._merge_query_params(url, params)
+        parsed = urlparse(normalized_url)
+        host = parsed.hostname
+        if not host:
+            raise ValueError("URL missing host information.")
+
+        profile = self.profiles.get(profile_name or self.default_profile_name)
+        if not profile:
+            raise ValueError(f"Unknown profile: {profile_name}")
+
+        allow_local = bool(allow_local_networks)
+        self._validate_target_host(host, allow_local)
+        min_interval_value = (
+            max(0.0, float(min_interval_override))
+            if min_interval_override is not None
+            else profile.min_interval_sec
+        )
+        throttle_delay = 0.0
+        if min_interval_value > 0:
+            throttle_delay = self._throttle_host(host, min_interval_value)
+
+        session_identifier = session_id
+        if session_identifier is None:
+            session_identifier = "default"
+        else:
+            session_identifier = str(session_identifier)
+            if not session_identifier.strip():
+                session_identifier = None
+        session_ctx = self._ensure_session(session_identifier) if session_identifier else None
+        if session_ctx and session_update:
+            self._apply_session_update(session_ctx, session_update)
+
+        normalized_headers = self._normalize_headers(headers)
+        if session_ctx:
+            normalized_headers = self._apply_session_headers(normalized_headers, session_ctx.config)
+        body_payload = None
+        body_mode = None
+        body_is_json = False
+        provided_bodies = sum(
+            1
+            for candidate in (body_form, body_json, body_raw)
+            if candidate is not None
+        )
+        if provided_bodies > 1:
+            raise ValueError("Provide at most one of body_form, body_json, or body_raw.")
+        if body_json is not None:
+            body_payload = json.dumps(body_json, separators=(",", ":"))
+            body_is_json = True
+            body_mode = "json"
+            if not any(k.lower() == "content-type" for k in normalized_headers):
+                normalized_headers["Content-Type"] = "application/json"
+        elif body_form is not None:
+            form_items: List[Tuple[str, str]] = []
+            for key, value in body_form.items():
+                if value is None:
+                    continue
+                if isinstance(value, list):
+                    for item in value:
+                        form_items.append((str(key), str(item)))
+                else:
+                    form_items.append((str(key), str(value)))
+            body_payload = urlencode(form_items, doseq=True)
+            body_mode = "form"
+            if not any(k.lower() == "content-type" for k in normalized_headers):
+                normalized_headers["Content-Type"] = "application/x-www-form-urlencoded"
+        elif body_raw is not None:
+            body_payload = body_raw
+            body_mode = "raw"
+
+        timeout_value = timeout_override or profile.timeout_sec
+        max_bytes_value = max_bytes_override or profile.max_bytes
+        follow = follow_redirects if follow_redirects is not None else profile.follow_redirects
+        max_redirects_value = max_redirects
+        if max_redirects_value is not None and max_redirects_value < 0:
+            raise ValueError("max_redirects must be >= 0.")
+        min_interval_chosen = min_interval_value if min_interval_override is not None else profile.min_interval_sec
+
+        parse_mode_normalized = (parse_mode or "auto").lower()
+        if parse_mode_normalized not in {"auto", "json", "none"}:
+            raise ValueError("parse_mode must be one of 'auto', 'json', or 'none'.")
+        http_version_normalized = (http_version or "auto").lower()
+        if http_version_normalized not in {"auto", "1.0", "1.1", "2", "3"}:
+            raise ValueError("http_version must be one of auto, 1.0, 1.1, 2, 3.")
+        verbose_choice = True if verbose_headers is None else bool(verbose_headers)
+
+        return {
+            "url": normalized_url,
+            "method": method_upper,
+            "headers": normalized_headers,
+            "body": body_payload,
+            "body_is_json": body_is_json,
+            "body_mode": body_mode,
+            "profile": profile,
+            "session": session_ctx,
+            "session_id": session_ctx.session_id if session_ctx else None,
+            "target_host": host,
+            "follow_redirects": follow,
+            "timeout_sec": timeout_value,
+            "max_bytes": max_bytes_value,
+            "max_redirects": max_redirects_value,
+            "min_interval_sec": min_interval_chosen,
+            "allow_local_networks": allow_local,
+            "allow_insecure_tls": bool(allow_insecure_tls),
+            "proxy": proxy,
+            "dns_servers": dns_servers,
+            "bind_interface": bind_interface,
+            "http_version": http_version_normalized,
+            "accept_compression": bool(accept_compression) if accept_compression is not None else False,
+            "parse_mode": parse_mode_normalized,
+            "json_pointer": json_pointer,
+            "verbose_headers": verbose_choice,
+            "save_body": bool(save_body) if save_body is not None else False,
+            "throttle_delay": throttle_delay,
+        }
+
+    def _normalize_headers(self, headers: Dict[str, Any]) -> Dict[str, str]:
+        normalized = {}
+        for key, value in headers.items():
+            if key is None:
+                continue
+            normalized[str(key).strip()] = str(value)
+        return normalized
+
+    def _merge_query_params(self, url: str, params: Dict[str, Any]) -> str:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError("Only http and https schemes are supported.")
+        existing_params = list(parse_qsl(parsed.query, keep_blank_values=True))
+        for key, value in params.items():
+            if value is None:
+                continue
+            if isinstance(value, list):
+                for item in value:
+                    existing_params.append((str(key), str(item)))
+            else:
+                existing_params.append((str(key), str(value)))
+        new_query = urlencode(existing_params, doseq=True)
+        updated = parsed._replace(query=new_query)
+        return urlunparse(updated)
+
+    # ------------------------------------------------------------------
+    # Network safety helpers
+    # ------------------------------------------------------------------
+    def _validate_target_host(self, host: str, allow_local: bool) -> None:
+        if allow_local:
+            return
+        if self._host_is_ip(host):
+            if self._ip_is_disallowed(host):
+                raise ValueError(f"SSRF protection: host {host} is not reachable from this tool.")
+            return
+        resolved_ips = self._resolve_host_ips(host)
+        if any(self._ip_is_disallowed(ip) for ip in resolved_ips):
+            raise ValueError(f"SSRF protection: {host} resolves to a private or loopback network.")
+
+    def _resolve_host_ips(self, host: str) -> List[str]:
+        cached = self._dns_cache.get(host)
+        now = time.time()
+        if cached and now - cached[0] < self._dns_cache_ttl_sec:
+            return cached[1]
+        ips: List[str] = []
+        try:
+            results = socket.getaddrinfo(host, None)
+            for _family, _type, _proto, _canon, sockaddr in results:
+                if sockaddr and sockaddr[0]:
+                    ips.append(sockaddr[0])
+        except socket.gaierror:
+            return []
+        self._dns_cache[host] = (now, ips)
+        return ips
+
+    def _host_is_ip(self, host: str) -> bool:
+        try:
+            ipaddress.ip_address(host)
+            return True
+        except ValueError:
+            return False
+
+    def _ip_is_disallowed(self, ip_value: str) -> bool:
+        try:
+            ip_obj = ipaddress.ip_address(ip_value)
+        except ValueError:
+            return True
+        return (
+            ip_obj.is_private
+            or ip_obj.is_loopback
+            or ip_obj.is_link_local
+            or ip_obj.is_reserved
+            or ip_obj.is_multicast
+        )
+
+    def _throttle_host(self, host: str, min_interval: float) -> float:
+        last = self._host_last_request.get(host)
+        now = time.monotonic()
+        delay = 0.0
+        if last is not None:
+            elapsed = now - last
+            if elapsed < min_interval:
+                delay = max(0.0, min_interval - elapsed)
+                time.sleep(delay)
+                now = time.monotonic()
+        self._host_last_request[host] = now
+        return delay
+
+    # ------------------------------------------------------------------
+    # Execution helpers
+    # ------------------------------------------------------------------
+    def _perform_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        trace_id = uuid4().hex[:8]
+        marker = self._build_marker(trace_id)
+        command = self._build_command(request, marker)
+        result = self._run_curl(command, request["timeout_sec"])
+        stdout = result.stdout or b""
+        stderr = result.stderr or b""
+        body_bytes, metrics = self._parse_curl_output(stdout, marker)
+        stderr_text = stderr.decode("utf-8", errors="replace").strip()
+
+        status = metrics.get("response_code") or metrics.get("http_code")
+        ok = result.returncode == 0 and status is not None and 200 <= int(status) < 400
+
+        preview, body_path, truncated = self._handle_body_artifacts(
+            trace_id, body_bytes, force_persist=request.get("save_body")
+        )
+        body_format = self._detect_body_format(metrics, body_bytes)
+        parsed_json = None
+        json_pointer_value = None
+        json_pointer_error = None
+        parse_mode = request.get("parse_mode", "auto")
+        if self._should_parse_body(parse_mode, body_format) and body_bytes:
+            parsed_json = self._parse_json_body(body_bytes)
+            pointer = request.get("json_pointer")
+            if parsed_json is not None and pointer:
+                try:
+                    json_pointer_value = self._extract_json_pointer(parsed_json, pointer)
+                except ValueError as exc:
+                    json_pointer_error = str(exc)
+        latency = self._extract_latency(metrics)
+        diagnostics = self._build_diagnostics(metrics)
+
+        header_trace = None
+        if request.get("verbose_headers", True):
+            header_trace = self._parse_verbose_headers(stderr_text)
+
+        error_type, error_message = (None, None)
+        if not ok:
+            error_type, error_message = self._classify_error(
+                exit_code=result.returncode,
+                status=status,
+                metrics=metrics,
+                stderr=stderr_text,
+            )
+        ssrf_block = self._detect_ssrf_violation(metrics, request.get("allow_local_networks"))
+        if ssrf_block:
+            ok = False
+            error_type = error_type or "ssrf_blocked"
+            error_message = error_message or f"SSRF protection blocked remote IP {ssrf_block}."
+        if not error_message:
+            error_message = metrics.get("errormsg") or stderr_text or (None if ok else "Request failed")
+
+        envelope = {
+            "ok": ok,
+            "status": int(status) if status is not None else None,
+            "status_text": metrics.get("errormsg"),
+            "url": request["url"],
+            "request_method": request["method"],
+            "session_id": request.get("session_id"),
+            "target_host": request.get("target_host"),
+            "profile": request["profile"].name,
+            "headers": self._redact_headers(request["headers"]),
+            "content_type": metrics.get("content_type"),
+            "body_format": body_format,
+            "body_preview": preview,
+            "body_path": body_path,
+            "body_truncated": truncated,
+            "parsed_json": parsed_json,
+            "parse_mode": parse_mode,
+            "json_pointer": request.get("json_pointer"),
+            "json_pointer_value": json_pointer_value,
+            "json_pointer_error": json_pointer_error,
+            "metrics": metrics,
+            "diagnostics": diagnostics or None,
+            "latency": latency or None,
+            "curl_exit_code": result.returncode,
+            "stderr": stderr_text or None,
+            "trace_id": trace_id,
+            "error": error_message,
+            "error_type": error_type,
+            "http_headers": header_trace,
+            "throttle_delay_sec": request.get("throttle_delay"),
+            "allow_local_networks": request.get("allow_local_networks"),
+            "min_interval_sec": request.get("min_interval_sec"),
+            "certificate_chain": diagnostics.get("certificate_chain") if diagnostics else None,
+            "ssrf_remote_ip": ssrf_block,
+        }
+
+        self._persist_trace(trace_id, request, envelope, command)
+        return envelope
+
+    def _build_marker(self, trace_id: str) -> str:
+        return f"__AI_HTTP_JSON__{trace_id}__"
+
+    def _build_command(self, request: Dict[str, Any], marker: str) -> List[str]:
+        cmd = [
+            self._curl_path,
+            "--silent",
+            "--show-error",
+            "--no-progress-meter",
+            "--proto",
+            "=http,https",
+            "--user-agent",
+            self.user_agent,
+            "--max-time",
+            str(request["timeout_sec"]),
+            "--max-filesize",
+            str(request["max_bytes"])
+        ]
+
+        session_ctx = request.get("session")
+        if session_ctx:
+            cmd.extend(["--config", str(session_ctx.curlrc_path)])
+
+        profile = request["profile"]
+        if profile.retries > 0:
+            cmd.extend(["--retry", str(profile.retries), "--retry-delay", str(profile.retry_delay)])
+            if profile.retry_max_time:
+                cmd.extend(["--retry-max-time", str(profile.retry_max_time)])
+            cmd.append("--retry-connrefused")
+
+        if request.get("allow_insecure_tls"):
+            cmd.append("--insecure")
+
+        if proxy := request.get("proxy"):
+            cmd.extend(["--proxy", proxy])
+        if dns_servers := request.get("dns_servers"):
+            cmd.extend(["--dns-servers", dns_servers])
+        if bind_interface := request.get("bind_interface"):
+            cmd.extend(["--interface", bind_interface])
+
+        if request["follow_redirects"]:
+            cmd.append("--location")
+            if request.get("max_redirects") is not None:
+                cmd.extend(["--max-redirs", str(request["max_redirects"])])
+        else:
+            cmd.extend(["--max-redirs", "0"])
+
+        http_version = request.get("http_version", "auto")
+        if http_version == "1.0":
+            cmd.append("--http1.0")
+        elif http_version == "1.1":
+            cmd.append("--http1.1")
+        elif http_version == "2":
+            cmd.append("--http2")
+        elif http_version == "3":
+            cmd.append("--http3")
+
+        cmd.extend(["--request", request["method"], "--url", request["url"]])
+
+        for key, value in request["headers"].items():
+            cmd.extend(["--header", f"{key}: {value}"])
+
+        if request["body"] is not None:
+            body_mode = request.get("body_mode")
+            if body_mode == "form":
+                cmd.extend(["--data", request["body"]])
+            else:
+                cmd.extend(["--data-raw", request["body"]])
+
+        if request.get("accept_compression"):
+            cmd.append("--compressed")
+
+        if request.get("verbose_headers", True):
+            cmd.append("--verbose")
+
+        cmd.extend(["-w", f"{marker}%{{json}}"])
+        return cmd
+
+    def _run_curl(self, command: List[str], timeout: int) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=self.working_dir,
+            timeout=timeout + 2
+        )
+
+    def _parse_curl_output(self, stdout: bytes, marker: str) -> Tuple[bytes, Dict[str, Any]]:
+        marker_bytes = marker.encode("utf-8")
+        idx = stdout.rfind(marker_bytes)
+        if idx == -1:
+            raise ValueError("Failed to parse curl output (missing metrics marker).")
+        body = stdout[:idx]
+        metrics_bytes = stdout[idx + len(marker_bytes):].strip()
+        if not metrics_bytes:
+            raise ValueError("Curl metrics missing or empty.")
+        try:
+            metrics = json.loads(metrics_bytes.decode("utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Failed to parse curl metrics: {exc}") from exc
+        return body, metrics
+
+    def _handle_body_artifacts(self, trace_id: str, body_bytes: bytes, force_persist: bool = False) -> Tuple[str, Optional[str], bool]:
+        if body_bytes is None:
+            return "", None, False
+        truncated = len(body_bytes) > self.body_preview_limit
+        preview_bytes = body_bytes[: self.body_preview_limit]
+        preview = preview_bytes.decode("utf-8", errors="replace")
+        body_path = None
+        if truncated or force_persist:
+            body_path = self._write_body_file(trace_id, body_bytes)
+        return preview, body_path, truncated
+
+    def _write_body_file(self, trace_id: str, body_bytes: bytes) -> str:
+        path = self.body_dir / f"{trace_id}.body"
+        path.write_bytes(body_bytes)
+        _RECENT_WRITES.append(str(path))
+        return str(path)
+
+    def _persist_trace(self, trace_id: str, request: Dict[str, Any], envelope: Dict[str, Any], command: List[str]) -> None:
+        trace_payload = {
+            "trace_id": trace_id,
+            "request": {
+                "method": request["method"],
+                "url": request["url"],
+                "session_id": request.get("session_id"),
+                "profile": request["profile"].name,
+                "headers": self._redact_headers(request["headers"]),
+            },
+            "response": {
+                "ok": envelope["ok"],
+                "status": envelope["status"],
+                "content_type": envelope["content_type"],
+                "body_path": envelope["body_path"],
+                "body_truncated": envelope["body_truncated"]
+            },
+            "http_headers": envelope.get("http_headers"),
+            "metrics": envelope["metrics"],
+            "curl_exit_code": envelope.get("curl_exit_code"),
+            "command": self._redact_command(command)
+        }
+        trace_path = self.trace_dir / f"trace-{trace_id}.json"
+        trace_path.write_text(json.dumps(trace_payload, indent=2))
+        _RECENT_WRITES.append(str(trace_path))
+
+    def _redact_headers(self, headers: Dict[str, str]) -> Dict[str, Any]:
+        redacted = {}
+        for key, value in headers.items():
+            redacted[key] = self._redact_header_value(key, value)
+        return redacted
+
+    def _redact_header_value(self, key: str, value: str) -> str:
+        if key.lower() in {"authorization", "cookie", "set-cookie"}:
+            return "<redacted>"
+        return value
+
+    def _redact_command(self, command: List[str]) -> str:
+        safe_parts = []
+        skip_next = False
+        sensitive_flags = {"--header", "--data-raw", "--proxy"}
+        for part in command:
+            if skip_next:
+                safe_parts.append("<redacted>")
+                skip_next = False
+                continue
+            lowered = part.lower()
+            safe_parts.append(part)
+            if lowered in sensitive_flags:
+                skip_next = True
+        return " ".join(shlex.quote(p) for p in safe_parts)
+
+    def _extract_latency(self, metrics: Dict[str, Any]) -> Dict[str, float]:
+        latency = {}
+        for metric_key, label in TIME_KEYS.items():
+            value = metrics.get(metric_key)
+            if value in (None, ""):
+                continue
+            try:
+                latency[label] = float(value)
+            except (TypeError, ValueError):
+                continue
+        return latency
+
+    def _build_diagnostics(self, metrics: Dict[str, Any]) -> Dict[str, Any]:
+        diag = {}
+        mapping = {
+            "http_version": "http_version",
+            "num_redirects": "redirect_count",
+            "redirect_url": "redirect_url",
+            "remote_ip": "remote_ip",
+            "remote_port": "remote_port",
+            "local_ip": "local_ip",
+            "local_port": "local_port",
+            "ssl_verify_result": "ssl_verify_result",
+            "proxy_ssl_verify_result": "proxy_ssl_verify_result",
+            "num_certs": "certificate_count",
+            "certs": "certificate_chain",
+            "size_download": "bytes_download",
+            "size_upload": "bytes_upload",
+            "size_header": "header_bytes",
+            "size_request": "request_bytes",
+            "speed_download": "speed_download",
+            "speed_upload": "speed_upload",
+            "url": "requested_url",
+            "url_effective": "final_url",
+        }
+        for source, target in mapping.items():
+            value = metrics.get(source)
+            if value in (None, ""):
+                continue
+            diag[target] = value
+        return diag
+
+    def _detect_body_format(self, metrics: Dict[str, Any], body_bytes: Optional[bytes]) -> Optional[str]:
+        content_type = (metrics.get("content_type") or "").lower()
+        if "json" in content_type:
+            return "json"
+        if "html" in content_type:
+            return "html"
+        if "xml" in content_type:
+            return "xml"
+        if not body_bytes:
+            return None
+        sample = body_bytes[:512].lstrip()
+        if not sample:
+            return None
+        prefix = sample[:16].lower()
+        if prefix.startswith(b"{") or prefix.startswith(b"["):
+            return "json"
+        if prefix.startswith(b"<!doctype html") or prefix.startswith(b"<html"):
+            return "html"
+        if prefix.startswith(b"<?xml") or sample.startswith(b"<rss"):
+            return "xml"
+        return None
+
+    def _parse_json_body(self, body_bytes: bytes) -> Optional[Any]:
+        try:
+            return json.loads(body_bytes.decode("utf-8"))
+        except Exception:
+            return None
+
+    def _should_parse_body(self, parse_mode: str, body_format: Optional[str]) -> bool:
+        if parse_mode == "none":
+            return False
+        if parse_mode == "json":
+            return True
+        return body_format == "json"
+
+    def _extract_json_pointer(self, data: Any, pointer: str) -> Any:
+        if pointer in (None, "", "/"):
+            return data
+        if not pointer.startswith("/"):
+            raise ValueError("JSON pointer must start with '/'.")
+        current = data
+        parts = pointer.lstrip("/").split("/")
+        for raw_token in parts:
+            token = raw_token.replace("~1", "/").replace("~0", "~")
+            if isinstance(current, list):
+                if not token.isdigit():
+                    raise ValueError(f"Pointer token '{token}' is not a list index.")
+                idx = int(token)
+                if idx >= len(current):
+                    raise ValueError(f"Pointer token '{token}' out of range.")
+                current = current[idx]
+            elif isinstance(current, dict):
+                if token not in current:
+                    raise ValueError(f"Pointer token '{token}' missing in object.")
+                current = current[token]
+            else:
+                raise ValueError(f"Cannot descend into type {type(current).__name__} at token '{token}'.")
+        return current
+
+    def _detect_ssrf_violation(self, metrics: Dict[str, Any], allow_local: bool) -> Optional[str]:
+        if allow_local:
+            return None
+        remote_ip = metrics.get("remote_ip")
+        if remote_ip and self._ip_is_disallowed(remote_ip):
+            return remote_ip
+        return None
+
+    def _parse_verbose_headers(self, stderr_text: Optional[str]) -> Optional[Dict[str, Any]]:
+        if not stderr_text:
+            return None
+        request_headers: List[Dict[str, str]] = []
+        response_headers: List[Dict[str, str]] = []
+        for raw_line in stderr_text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("> "):
+                content = line[2:].strip()
+                if not content or content in {"{", "}"}:
+                    continue
+                entry = self._parse_verbose_line(content, is_request=True)
+                if entry:
+                    request_headers.append(entry)
+            elif line.startswith("< "):
+                content = line[2:].strip()
+                if not content or content in {"{", "}"}:
+                    continue
+                entry = self._parse_verbose_line(content, is_request=False)
+                if entry:
+                    response_headers.append(entry)
+        if not request_headers and not response_headers:
+            return None
+        return {"request": request_headers, "response": response_headers}
+
+    def _parse_verbose_line(self, content: str, is_request: bool) -> Optional[Dict[str, str]]:
+        if ":" in content:
+            name, value = content.split(":", 1)
+            return {
+                "name": name.strip(),
+                "value": self._redact_header_value(name.strip(), value.strip())
+            }
+        return {"line": content}
+
+    def _classify_error(
+        self,
+        exit_code: int,
+        status: Optional[int],
+        metrics: Dict[str, Any],
+        stderr: Optional[str],
+    ) -> Tuple[Optional[str], Optional[str]]:
+        if exit_code:
+            mapped = CURL_EXIT_CODE_MAP.get(exit_code)
+            if mapped:
+                return mapped
+            return (
+                "curl_error",
+                f"Curl exited with code {exit_code}: {stderr or 'Unknown error'}",
+            )
+
+        if status:
+            if status in HTTP_STATUS_ERROR_MAP:
+                return HTTP_STATUS_ERROR_MAP[status]
+            if 500 <= status < 600:
+                return ("server_error", f"Server error (HTTP {status}).")
+            if status == 429:
+                return ("rate_limit", "Too many requests / rate limited.")
+            if status in (401, 403):
+                return ("auth_error", f"Authentication/authorization failed (HTTP {status}).")
+            if 400 <= status < 500:
+                return ("http_error", f"Client error (HTTP {status}).")
+
+        return (None, None)
+
+    # ------------------------------------------------------------------
+    # Session helpers
+    # ------------------------------------------------------------------
+    def _ensure_session(self, session_id: str) -> HttpSessionContext:
+        safe_id = self._sanitize_session_id(session_id)
+        if safe_id in self._session_cache:
+            return self._session_cache[safe_id]
+
+        base_dir = self.session_root / safe_id
+        base_dir.mkdir(parents=True, exist_ok=True)
+        cookie_file = base_dir / "cookies.txt"
+        if not cookie_file.exists():
+            cookie_file.touch()
+            try:
+                os.chmod(cookie_file, 0o600)
+            except PermissionError:
+                pass
+        curlrc_path = base_dir / ".curlrc"
+        curlrc_content = textwrap.dedent(f"""
+            # Auto-generated session config for {session_id}
+            cookie = "{cookie_file}"
+            cookie-jar = "{cookie_file}"
+        """).strip() + "\n"
+        existing_content = curlrc_path.read_text() if curlrc_path.exists() else None
+        if existing_content != curlrc_content:
+            curlrc_path.write_text(curlrc_content)
+        config_path = base_dir / SESSION_CONFIG_FILENAME
+        if config_path.exists():
+            try:
+                config = json.loads(config_path.read_text())
+            except Exception:
+                config = json.loads(json.dumps(DEFAULT_SESSION_CONFIG))
+        else:
+            config = json.loads(json.dumps(DEFAULT_SESSION_CONFIG))
+            config_path.write_text(json.dumps(config, indent=2))
+            try:
+                os.chmod(config_path, 0o600)
+            except PermissionError:
+                pass
+        ctx = HttpSessionContext(
+            session_id=session_id,
+            safe_id=safe_id,
+            base_dir=base_dir,
+            cookie_file=cookie_file,
+            curlrc_path=curlrc_path,
+            config_path=config_path,
+            config=config
+        )
+        self._session_cache[safe_id] = ctx
+        return ctx
+
+    def _sanitize_session_id(self, session_id: str) -> str:
+        safe = re.sub(r"[^a-zA-Z0-9._-]+", "_", session_id.strip())
+        return safe or "default"
+
+    def _save_session_config(self, ctx: HttpSessionContext) -> None:
+        ctx.config_path.write_text(json.dumps(ctx.config, indent=2))
+        try:
+            os.chmod(ctx.config_path, 0o600)
+        except PermissionError:
+            pass
+
+    def _apply_session_update(self, ctx: HttpSessionContext, update: Dict[str, Any]) -> None:
+        config = ctx.config or json.loads(json.dumps(DEFAULT_SESSION_CONFIG))
+        headers = config.get("default_headers") or {}
+        for key, value in (update.get("default_headers") or {}).items():
+            headers[str(key)] = str(value)
+        for key in update.get("remove_headers", []):
+            headers.pop(str(key), None)
+        config["default_headers"] = headers
+
+        if "auth_bearer" in update:
+            config["auth_bearer"] = update.get("auth_bearer") or None
+        if update.get("clear_auth_bearer"):
+            config["auth_bearer"] = None
+
+        api_key = config.get("api_key") or {"header": None, "value": None}
+        if "api_key_header" in update:
+            api_key["header"] = update.get("api_key_header")
+        if "api_key_value" in update:
+            api_key["value"] = update.get("api_key_value")
+        if update.get("clear_api_key"):
+            api_key = {"header": None, "value": None}
+        config["api_key"] = api_key
+
+        ctx.config = config
+        self._save_session_config(ctx)
+
+    def _apply_session_headers(self, headers: Dict[str, str], config: Dict[str, Any]) -> Dict[str, str]:
+        result = dict(headers)
+        defaults = config.get("default_headers") or {}
+        for key, value in defaults.items():
+            if not self._has_header(result, key):
+                result[key] = value
+        bearer = config.get("auth_bearer")
+        if bearer and not self._has_header(result, "Authorization"):
+            result["Authorization"] = f"Bearer {bearer}"
+        api_key = config.get("api_key") or {}
+        api_header = api_key.get("header")
+        api_value = api_key.get("value")
+        if api_header and api_value and not self._has_header(result, api_header):
+            result[api_header] = api_value
+        return result
+
+    def _has_header(self, headers: Dict[str, str], name: str) -> bool:
+        target = name.lower()
+        return any(k.lower() == target for k in headers.keys())
 
 
 # ============================================================================
