@@ -20,6 +20,7 @@ This is an **AI-powered Linux terminal** built with MiniMax M2 (or Kimi-2/custom
 - Resource-limited Python sandbox with write protection, network isolation
 - Optional namespace isolation via bubblewrap (reproducible rootfs)
 - Lean context tracking (10-call live history + history_search for permanent recall, recent errors, session stats)
+- Smart HTTP tooling: templated requests, jq selectors, TLS certificate telemetry, session-aware curl profiles
 - Raw output mode toggle for debugging
 
 **State**: v1.3, 88 closed beads (all issues completed), production-ready with comprehensive docs and test coverage.
@@ -63,7 +64,7 @@ The system currently auto-registers these tools (direct mirror of `tools.py` and
 - `read_file` – Output a file’s contents
 - `write_file` – Create or overwrite files in the working directory
 - `get_context` – Return session metadata, tool history, and recent errors for debugging
-- `http_request` – Structured curl wrapper with profiles, sessions, retries, metrics, and diagnostics (preferred for any HTTP/API work)
+- `http_request` – Structured curl wrapper with profiles, session persistence, templating variables, jq JSON selectors, certificate-chain reporting, retries, metrics, and diagnostics (preferred for any HTTP/API work)
 - `history_search` – Query the persistent event archive when you need to recall work outside the live tool window
 
 Detailed knobs for `http_request` live in `docs/HTTP_REQUEST.md`.

@@ -24,7 +24,7 @@ import sys
 import textwrap
 import time
 from uuid import uuid4
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse, quote_plus
 
 from shell_integration import ShellIntegration
 from command_parser import parse_command
@@ -72,13 +72,16 @@ TIME_KEYS = {
     "time_posttransfer": "posttransfer",
 }
 
+TEMPLATE_PATTERN = re.compile(r"\{\{\s*([a-zA-Z0-9_.-]+)((?:(?:[:|])[a-zA-Z0-9_.-]+)*)\s*\}\}")
+
 DEFAULT_SESSION_CONFIG = {
     "default_headers": {},
     "auth_bearer": None,
     "api_key": {
         "header": None,
         "value": None
-    }
+    },
+    "variables": {}
 }
 
 
@@ -550,6 +553,10 @@ class HttpRequestTool(BaseTool):
         self._curl_path = shutil.which("curl")
         if not self._curl_path:
             raise RuntimeError("curl binary not found in PATH")
+        self._curl_version = self._detect_curl_version()
+        self._supports_certs_write_out = self._curl_version >= (7, 88, 0)
+        self._jq_path = shutil.which("jq")
+        self._jo_path = shutil.which("jo")
 
         self.user_agent = "ai-terminal-http/1.0"
         self.default_profile_name = "quick_fetch"
@@ -562,10 +569,33 @@ class HttpRequestTool(BaseTool):
         self._host_last_request: Dict[str, float] = {}
         self._dns_cache: Dict[str, Tuple[float, List[str]]] = {}
         self._dns_cache_ttl_sec = int(os.getenv("HTTP_DNS_CACHE_TTL", "300"))
+        self._helper_capabilities = {
+            "jq_available": bool(self._jq_path),
+            "jo_available": bool(self._jo_path),
+            "curl_supports_certs": self._supports_certs_write_out,
+        }
 
     @property
     def name(self) -> str:
         return "http_request"
+
+    def _detect_curl_version(self) -> Tuple[int, int, int]:
+        if not self._curl_path:
+            return (0, 0, 0)
+        try:
+            result = subprocess.run(
+                [self._curl_path, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            output = result.stdout or ""
+            match = re.search(r"curl\s+(\d+)\.(\d+)\.(\d+)", output)
+            if match:
+                return tuple(int(part) for part in match.groups())
+        except Exception:
+            pass
+        return (0, 0, 0)
 
     @property
     def description(self) -> str:
@@ -643,6 +673,15 @@ class HttpRequestTool(BaseTool):
                                     "items": {"type": "string"},
                                     "description": "Headers to remove from persisted defaults"
                                 },
+                                "variables": {
+                                    "type": "object",
+                                    "description": "Session-scoped template variables (referenced via {{var}})."
+                                },
+                                "remove_variables": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Template variables to remove from the session store."
+                                },
                                 "auth_bearer": {
                                     "type": "string",
                                     "description": "Bearer token stored securely for Authorization header"
@@ -664,6 +703,10 @@ class HttpRequestTool(BaseTool):
                                     "description": "Set true to remove stored API key"
                                 }
                             }
+                        },
+                        "variables": {
+                            "type": "object",
+                            "description": "Per-request template variables available via {{var}} placeholders in URL, params, headers, and bodies."
                         },
                         "follow_redirects": {
                             "type": "boolean",
@@ -724,6 +767,10 @@ class HttpRequestTool(BaseTool):
                             "type": "string",
                             "description": "Extract a specific field via RFC 6901 pointer (e.g., '/data/items/0/title')"
                         },
+                        "json_selector": {
+                            "type": "string",
+                            "description": "Optional jq expression applied to parsed JSON responses (requires jq binary)."
+                        },
                         "verbose_headers": {
                             "type": "boolean",
                             "description": "Capture verbose header trace (default true)"
@@ -760,6 +807,7 @@ class HttpRequestTool(BaseTool):
         profile: Optional[str] = None,
         session_id: Optional[str] = None,
         session_update: Optional[Dict[str, Any]] = None,
+        variables: Optional[Dict[str, Any]] = None,
         follow_redirects: Optional[bool] = None,
         timeout_sec: Optional[int] = None,
         max_bytes: Optional[int] = None,
@@ -774,6 +822,7 @@ class HttpRequestTool(BaseTool):
         accept_compression: Optional[bool] = None,
         parse_mode: str = "auto",
         json_pointer: Optional[str] = None,
+        json_selector: Optional[str] = None,
         verbose_headers: Optional[bool] = None,
         save_body: Optional[bool] = None
     ) -> str:
@@ -789,6 +838,7 @@ class HttpRequestTool(BaseTool):
                 profile_name=profile,
                 session_id=session_id,
                 session_update=session_update or {},
+                variables=variables or {},
                 follow_redirects=follow_redirects,
                 timeout_override=timeout_sec,
                 max_bytes_override=max_bytes,
@@ -803,6 +853,7 @@ class HttpRequestTool(BaseTool):
                 accept_compression=accept_compression,
                 parse_mode=parse_mode,
                 json_pointer=json_pointer,
+                json_selector=json_selector,
                 verbose_headers=verbose_headers,
                 save_body=save_body,
             )
@@ -845,6 +896,7 @@ class HttpRequestTool(BaseTool):
         profile_name: Optional[str],
         session_id: Optional[str],
         session_update: Dict[str, Any],
+        variables: Dict[str, Any],
         follow_redirects: Optional[bool],
         timeout_override: Optional[int],
         max_bytes_override: Optional[int],
@@ -859,6 +911,7 @@ class HttpRequestTool(BaseTool):
         accept_compression: Optional[bool],
         parse_mode: str,
         json_pointer: Optional[str],
+        json_selector: Optional[str],
         verbose_headers: Optional[bool],
         save_body: Optional[bool],
     ) -> Dict[str, Any]:
@@ -866,26 +919,10 @@ class HttpRequestTool(BaseTool):
         if method_upper not in self.SUPPORTED_METHODS:
             raise ValueError(f"Unsupported HTTP method: {method}")
 
-        normalized_url = self._merge_query_params(url, params)
-        parsed = urlparse(normalized_url)
-        host = parsed.hostname
-        if not host:
-            raise ValueError("URL missing host information.")
-
+        request_vars = {str(k): "" if v is None else str(v) for k, v in (variables or {}).items()}
         profile = self.profiles.get(profile_name or self.default_profile_name)
         if not profile:
             raise ValueError(f"Unknown profile: {profile_name}")
-
-        allow_local = bool(allow_local_networks)
-        self._validate_target_host(host, allow_local)
-        min_interval_value = (
-            max(0.0, float(min_interval_override))
-            if min_interval_override is not None
-            else profile.min_interval_sec
-        )
-        throttle_delay = 0.0
-        if min_interval_value > 0:
-            throttle_delay = self._throttle_host(host, min_interval_value)
 
         session_identifier = session_id
         if session_identifier is None:
@@ -898,28 +935,62 @@ class HttpRequestTool(BaseTool):
         if session_ctx and session_update:
             self._apply_session_update(session_ctx, session_update)
 
-        normalized_headers = self._normalize_headers(headers)
+        scope = self._build_variable_scope(session_ctx, request_vars)
+        templated_params = self._render_template_mapping(params, scope)
+        templated_url = self._render_template_string(url, scope)
+        normalized_url = self._merge_query_params(templated_url, templated_params)
+        parsed = urlparse(normalized_url)
+        host = parsed.hostname
+        if not host:
+            raise ValueError("URL missing host information.")
+        allow_local = bool(allow_local_networks)
+        self._validate_target_host(host, allow_local)
+        min_interval_value = (
+            max(0.0, float(min_interval_override))
+            if min_interval_override is not None
+            else profile.min_interval_sec
+        )
+        throttle_delay = 0.0
+        if min_interval_value > 0:
+            throttle_delay = self._throttle_host(host, min_interval_value)
+
+        scope = self._build_variable_scope(
+            session_ctx,
+            request_vars,
+            extra={
+                "target_host": host or "",
+                "profile": profile.name,
+                "session_id": session_ctx.session_id if session_ctx else "",
+                "method": method_upper,
+            },
+        )
+        templated_headers = self._render_template_mapping(headers, scope)
+        normalized_headers = self._normalize_headers(templated_headers)
         if session_ctx:
             normalized_headers = self._apply_session_headers(normalized_headers, session_ctx.config)
         body_payload = None
         body_mode = None
         body_is_json = False
+        templated_body_form = self._render_template_mapping(body_form, scope) if body_form is not None else None
+        templated_body_json = self._render_template_value(body_json, scope) if body_json is not None else None
+        templated_body_raw = self._render_template_string(body_raw, scope)
+
         provided_bodies = sum(
             1
-            for candidate in (body_form, body_json, body_raw)
+            for candidate in (templated_body_form, templated_body_json, templated_body_raw)
             if candidate is not None
         )
         if provided_bodies > 1:
             raise ValueError("Provide at most one of body_form, body_json, or body_raw.")
-        if body_json is not None:
-            body_payload = json.dumps(body_json, separators=(",", ":"))
+        if templated_body_json is not None:
+            body_payload = json.dumps(templated_body_json, separators=(",", ":"))
             body_is_json = True
             body_mode = "json"
             if not any(k.lower() == "content-type" for k in normalized_headers):
                 normalized_headers["Content-Type"] = "application/json"
-        elif body_form is not None:
+        elif templated_body_form is not None:
             form_items: List[Tuple[str, str]] = []
-            for key, value in body_form.items():
+            for key, value in templated_body_form.items():
                 if value is None:
                     continue
                 if isinstance(value, list):
@@ -931,8 +1002,8 @@ class HttpRequestTool(BaseTool):
             body_mode = "form"
             if not any(k.lower() == "content-type" for k in normalized_headers):
                 normalized_headers["Content-Type"] = "application/x-www-form-urlencoded"
-        elif body_raw is not None:
-            body_payload = body_raw
+        elif templated_body_raw is not None:
+            body_payload = templated_body_raw
             body_mode = "raw"
 
         timeout_value = timeout_override or profile.timeout_sec
@@ -976,6 +1047,7 @@ class HttpRequestTool(BaseTool):
             "accept_compression": bool(accept_compression) if accept_compression is not None else False,
             "parse_mode": parse_mode_normalized,
             "json_pointer": json_pointer,
+            "json_selector": json_selector,
             "verbose_headers": verbose_choice,
             "save_body": bool(save_body) if save_body is not None else False,
             "throttle_delay": throttle_delay,
@@ -1005,6 +1077,72 @@ class HttpRequestTool(BaseTool):
         new_query = urlencode(existing_params, doseq=True)
         updated = parsed._replace(query=new_query)
         return urlunparse(updated)
+
+    def _build_variable_scope(
+        self,
+        session_ctx: Optional[HttpSessionContext],
+        request_vars: Dict[str, str],
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, str]:
+        scope: Dict[str, str] = {}
+        if session_ctx:
+            for key, value in (session_ctx.config.get("variables") or {}).items():
+                scope[str(key)] = "" if value is None else str(value)
+        for key, value in (request_vars or {}).items():
+            scope[str(key)] = "" if value is None else str(value)
+        if extra:
+            for key, value in extra.items():
+                if value is None:
+                    continue
+                scope[str(key)] = str(value)
+        return scope
+
+    def _render_template_mapping(self, data: Dict[str, Any], scope: Dict[str, str]) -> Dict[str, Any]:
+        return {key: self._render_template_value(value, scope) for key, value in data.items()}
+
+    def _render_template_value(self, value: Any, scope: Dict[str, str]) -> Any:
+        if isinstance(value, str):
+            return self._render_template_string(value, scope)
+        if isinstance(value, list):
+            return [self._render_template_value(item, scope) for item in value]
+        if isinstance(value, dict):
+            return {k: self._render_template_value(v, scope) for k, v in value.items()}
+        return value
+
+    def _render_template_string(self, value: Optional[str], scope: Dict[str, str]) -> Optional[str]:
+        if value is None or not isinstance(value, str) or not scope:
+            return value
+
+        def _apply_filters(raw_value: str, suffix: Optional[str]) -> str:
+            if suffix:
+                filters = [token for token in suffix.replace("|", ":").split(":") if token]
+            else:
+                filters = []
+            result = raw_value
+            for filter_name in filters:
+                name = filter_name.lower()
+                if name == "trim":
+                    result = result.strip()
+                elif name == "lower":
+                    result = result.lower()
+                elif name == "upper":
+                    result = result.upper()
+                elif name == "url":
+                    result = quote_plus(result)
+                elif name == "json":
+                    result = json.dumps(result, separators=(",", ":"))
+                else:
+                    # Unknown filter -> leave value unchanged
+                    continue
+            return result
+
+        def replacer(match: re.Match[str]) -> str:
+            var_name = match.group(1)
+            filters = match.group(2)
+            raw_value = scope.get(var_name, "")
+            return _apply_filters(raw_value, filters)
+
+        return TEMPLATE_PATTERN.sub(replacer, value)
 
     # ------------------------------------------------------------------
     # Network safety helpers
@@ -1074,12 +1212,12 @@ class HttpRequestTool(BaseTool):
     # ------------------------------------------------------------------
     def _perform_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
         trace_id = uuid4().hex[:8]
-        marker = self._build_marker(trace_id)
-        command = self._build_command(request, marker)
+        markers = self._build_markers(trace_id)
+        command = self._build_command(request, markers)
         result = self._run_curl(command, request["timeout_sec"])
         stdout = result.stdout or b""
         stderr = result.stderr or b""
-        body_bytes, metrics = self._parse_curl_output(stdout, marker)
+        body_bytes, metrics, certs_raw = self._parse_curl_output(stdout, markers)
         stderr_text = stderr.decode("utf-8", errors="replace").strip()
 
         status = metrics.get("response_code") or metrics.get("http_code")
@@ -1101,8 +1239,22 @@ class HttpRequestTool(BaseTool):
                     json_pointer_value = self._extract_json_pointer(parsed_json, pointer)
                 except ValueError as exc:
                     json_pointer_error = str(exc)
+        json_selector_value = None
+        json_selector_error = None
+        json_selector = request.get("json_selector")
+        if json_selector:
+            if parsed_json is None:
+                json_selector_error = "Response body is not JSON."
+            elif not self._jq_path:
+                json_selector_error = "jq binary not available on host."
+            else:
+                try:
+                    json_selector_value = self._run_jq_selector(json_selector, parsed_json)
+                except Exception as exc:
+                    json_selector_error = str(exc)
         latency = self._extract_latency(metrics)
-        diagnostics = self._build_diagnostics(metrics)
+        cert_chain = self._normalize_certificates(certs_raw)
+        diagnostics = self._build_diagnostics(metrics, cert_chain)
 
         header_trace = None
         if request.get("verbose_headers", True):
@@ -1144,6 +1296,9 @@ class HttpRequestTool(BaseTool):
             "json_pointer": request.get("json_pointer"),
             "json_pointer_value": json_pointer_value,
             "json_pointer_error": json_pointer_error,
+            "json_selector": json_selector,
+            "json_selector_value": json_selector_value,
+            "json_selector_error": json_selector_error,
             "metrics": metrics,
             "diagnostics": diagnostics or None,
             "latency": latency or None,
@@ -1156,17 +1311,21 @@ class HttpRequestTool(BaseTool):
             "throttle_delay_sec": request.get("throttle_delay"),
             "allow_local_networks": request.get("allow_local_networks"),
             "min_interval_sec": request.get("min_interval_sec"),
-            "certificate_chain": diagnostics.get("certificate_chain") if diagnostics else None,
+            "certificate_chain": cert_chain,
+            "helper_capabilities": self._helper_capabilities,
             "ssrf_remote_ip": ssrf_block,
         }
 
         self._persist_trace(trace_id, request, envelope, command)
         return envelope
 
-    def _build_marker(self, trace_id: str) -> str:
-        return f"__AI_HTTP_JSON__{trace_id}__"
+    def _build_markers(self, trace_id: str) -> Dict[str, Optional[str]]:
+        base = f"__AI_HTTP_JSON__{trace_id}__"
+        markers = {"json": f"{base}JSON__"}
+        markers["cert"] = f"{base}CERT__" if self._supports_certs_write_out else None
+        return markers
 
-    def _build_command(self, request: Dict[str, Any], marker: str) -> List[str]:
+    def _build_command(self, request: Dict[str, Any], markers: Dict[str, Optional[str]]) -> List[str]:
         cmd = [
             self._curl_path,
             "--silent",
@@ -1238,7 +1397,11 @@ class HttpRequestTool(BaseTool):
         if request.get("verbose_headers", True):
             cmd.append("--verbose")
 
-        cmd.extend(["-w", f"{marker}%{{json}}"])
+        write_out = f"{markers['json']}%{{json}}"
+        cert_marker = markers.get("cert")
+        if cert_marker:
+            write_out += f"{cert_marker}%{{certs}}"
+        cmd.extend(["-w", write_out])
         return cmd
 
     def _run_curl(self, command: List[str], timeout: int) -> subprocess.CompletedProcess:
@@ -1250,20 +1413,38 @@ class HttpRequestTool(BaseTool):
             timeout=timeout + 2
         )
 
-    def _parse_curl_output(self, stdout: bytes, marker: str) -> Tuple[bytes, Dict[str, Any]]:
-        marker_bytes = marker.encode("utf-8")
-        idx = stdout.rfind(marker_bytes)
+    def _parse_curl_output(self, stdout: bytes, markers: Dict[str, Optional[str]]) -> Tuple[bytes, Dict[str, Any], Optional[Any]]:
+        json_marker_bytes = (markers["json"] or "").encode("utf-8")
+        idx = stdout.rfind(json_marker_bytes)
         if idx == -1:
             raise ValueError("Failed to parse curl output (missing metrics marker).")
         body = stdout[:idx]
-        metrics_bytes = stdout[idx + len(marker_bytes):].strip()
+        trailing = stdout[idx + len(json_marker_bytes):]
+        cert_marker = markers.get("cert")
+        cert_bytes = None
+        if cert_marker:
+            cert_marker_bytes = cert_marker.encode("utf-8")
+            cert_idx = trailing.rfind(cert_marker_bytes)
+            if cert_idx != -1:
+                cert_bytes = trailing[cert_idx + len(cert_marker_bytes):].strip()
+                metrics_bytes = trailing[:cert_idx].strip()
+            else:
+                metrics_bytes = trailing.strip()
+        else:
+            metrics_bytes = trailing.strip()
         if not metrics_bytes:
             raise ValueError("Curl metrics missing or empty.")
         try:
             metrics = json.loads(metrics_bytes.decode("utf-8"))
         except json.JSONDecodeError as exc:
             raise ValueError(f"Failed to parse curl metrics: {exc}") from exc
-        return body, metrics
+        cert_data = None
+        if cert_bytes:
+            try:
+                cert_data = json.loads(cert_bytes.decode("utf-8"))
+            except json.JSONDecodeError:
+                cert_data = None
+        return body, metrics, cert_data
 
     def _handle_body_artifacts(self, trace_id: str, body_bytes: bytes, force_persist: bool = False) -> Tuple[str, Optional[str], bool]:
         if body_bytes is None:
@@ -1346,7 +1527,7 @@ class HttpRequestTool(BaseTool):
                 continue
         return latency
 
-    def _build_diagnostics(self, metrics: Dict[str, Any]) -> Dict[str, Any]:
+    def _build_diagnostics(self, metrics: Dict[str, Any], cert_chain: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         diag = {}
         mapping = {
             "http_version": "http_version",
@@ -1374,7 +1555,35 @@ class HttpRequestTool(BaseTool):
             if value in (None, ""):
                 continue
             diag[target] = value
+        if cert_chain:
+            diag["certificate_chain"] = cert_chain
         return diag
+
+    def _normalize_certificates(self, certs_raw: Optional[Any]) -> Optional[List[Dict[str, Any]]]:
+        if not certs_raw:
+            return None
+        cert_entries: Any = certs_raw
+        if isinstance(certs_raw, dict) and "certs" in certs_raw:
+            cert_entries = certs_raw.get("certs")
+        if not isinstance(cert_entries, list):
+            return None
+        normalized: List[Dict[str, Any]] = []
+        for cert in cert_entries:
+            if not isinstance(cert, dict):
+                continue
+            normalized.append(
+                {
+                    "subject": cert.get("Subject"),
+                    "issuer": cert.get("Issuer"),
+                    "valid_from": cert.get("Start date") or cert.get("Start Date"),
+                    "valid_to": cert.get("Expire date") or cert.get("Expire Date"),
+                    "serial": cert.get("Serial Number"),
+                    "sha256": cert.get("SHA256") or cert.get("SHA256 Fingerprint"),
+                    "sha1": cert.get("SHA1") or cert.get("SHA1 Fingerprint"),
+                    "public_key_algorithm": cert.get("Public Key type") or cert.get("Public Algorithm"),
+                }
+            )
+        return normalized or None
 
     def _detect_body_format(self, metrics: Dict[str, Any], body_bytes: Optional[bytes]) -> Optional[str]:
         content_type = (metrics.get("content_type") or "").lower()
@@ -1403,6 +1612,42 @@ class HttpRequestTool(BaseTool):
             return json.loads(body_bytes.decode("utf-8"))
         except Exception:
             return None
+
+    def _run_jq_selector(self, selector: str, payload: Any) -> Any:
+        if not self._jq_path:
+            raise RuntimeError("jq binary not available.")
+        try:
+            proc = subprocess.run(
+                [self._jq_path, "--compact-output", selector],
+                input=json.dumps(payload, separators=(",", ":")),
+                text=True,
+                capture_output=True,
+                timeout=3,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Failed to launch jq: {exc}") from exc
+        if proc.returncode != 0:
+            error = proc.stderr.strip() or f"jq exited with {proc.returncode}"
+            raise RuntimeError(error)
+        output = proc.stdout.strip()
+        if not output:
+            return None
+        lines = [line for line in output.splitlines() if line.strip()]
+        if not lines:
+            return None
+        if len(lines) == 1:
+            line = lines[0]
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError:
+                return line
+        results = []
+        for line in lines:
+            try:
+                results.append(json.loads(line))
+            except json.JSONDecodeError:
+                results.append(line)
+        return results
 
     def _should_parse_body(self, parse_mode: str, body_format: Optional[str]) -> bool:
         if parse_mode == "none":
@@ -1579,6 +1824,13 @@ class HttpRequestTool(BaseTool):
         for key in update.get("remove_headers", []):
             headers.pop(str(key), None)
         config["default_headers"] = headers
+
+        variables = config.get("variables") or {}
+        for key, value in (update.get("variables") or {}).items():
+            variables[str(key)] = "" if value is None else str(value)
+        for key in update.get("remove_variables", []):
+            variables.pop(str(key), None)
+        config["variables"] = variables
 
         if "auth_bearer" in update:
             config["auth_bearer"] = update.get("auth_bearer") or None

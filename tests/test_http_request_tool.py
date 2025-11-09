@@ -27,15 +27,28 @@ def _fake_metrics():
     }
 
 
+def _install_marker_stub(monkeypatch, tool, include_cert=False):
+    base = "__TEST_MARKER__"
+    markers = {
+        "json": base + "__JSON__",
+        "cert": base + "__CERT__" if include_cert else None,
+    }
+
+    def _factory(trace_id):
+        return dict(markers)
+
+    monkeypatch.setattr(tool, "_build_markers", _factory)
+    return markers
+
+
 def test_http_request_tool_parses_metrics_and_returns_envelope(monkeypatch):
     tool = HttpRequestTool()
-    marker = "__TEST_MARKER__"
-    monkeypatch.setattr(tool, "_build_marker", lambda trace_id: marker)
+    markers = _install_marker_stub(monkeypatch, tool)
 
     body = b'{"message":"ok"}'
     metrics_dict = _fake_metrics()
     metrics = json.dumps(metrics_dict).encode("utf-8")
-    stdout = body + marker.encode("utf-8") + metrics
+    stdout = body + markers["json"].encode("utf-8") + metrics
     verbose = (
         "> GET /api HTTP/1.1\n"
         "> Host: example.com\n"
@@ -70,6 +83,7 @@ def test_http_request_tool_parses_metrics_and_returns_envelope(monkeypatch):
     assert "--config" in captured["command"]
     assert data["http_headers"]["request"][0]["line"] == "GET /api HTTP/1.1"
     assert data["http_headers"]["response"][1]["name"] == "Content-Type"
+    assert data["helper_capabilities"]["jq_available"] is not None
 
 
 def test_http_request_tool_rejects_non_http_scheme():
@@ -80,9 +94,8 @@ def test_http_request_tool_rejects_non_http_scheme():
 
 def test_http_request_tool_maps_exit_code(monkeypatch):
     tool = HttpRequestTool()
-    marker = "__TEST_MARKER__"
-    monkeypatch.setattr(tool, "_build_marker", lambda trace_id: marker)
-    stdout = marker.encode("utf-8") + json.dumps(_fake_metrics()).encode("utf-8")
+    markers = _install_marker_stub(monkeypatch, tool)
+    stdout = markers["json"].encode("utf-8") + json.dumps(_fake_metrics()).encode("utf-8")
     fake_result = SimpleNamespace(returncode=6, stdout=stdout, stderr=b"Could not resolve host")
     monkeypatch.setattr(tool, "_run_curl", lambda *args, **kwargs: fake_result)
 
@@ -95,12 +108,11 @@ def test_http_request_tool_maps_exit_code(monkeypatch):
 
 def test_http_request_tool_maps_http_status(monkeypatch):
     tool = HttpRequestTool()
-    marker = "__TEST_MARKER__"
-    monkeypatch.setattr(tool, "_build_marker", lambda trace_id: marker)
     metrics = _fake_metrics()
     metrics["response_code"] = 404
     metrics["http_code"] = 404
-    stdout = marker.encode("utf-8") + json.dumps(metrics).encode("utf-8")
+    markers = _install_marker_stub(monkeypatch, tool)
+    stdout = markers["json"].encode("utf-8") + json.dumps(metrics).encode("utf-8")
     fake_result = SimpleNamespace(returncode=0, stdout=stdout, stderr=b"")
     monkeypatch.setattr(tool, "_run_curl", lambda *args, **kwargs: fake_result)
 
@@ -112,12 +124,11 @@ def test_http_request_tool_maps_http_status(monkeypatch):
 
 def test_http_request_tool_detects_html(monkeypatch):
     tool = HttpRequestTool()
-    marker = "__TEST_MARKER__"
-    monkeypatch.setattr(tool, "_build_marker", lambda trace_id: marker)
     html = b"<!doctype html><html><body>hi</body></html>"
     metrics = _fake_metrics()
     metrics["content_type"] = "text/plain"
-    stdout = html + marker.encode("utf-8") + json.dumps(metrics).encode("utf-8")
+    markers = _install_marker_stub(monkeypatch, tool)
+    stdout = html + markers["json"].encode("utf-8") + json.dumps(metrics).encode("utf-8")
     fake_result = SimpleNamespace(returncode=0, stdout=stdout, stderr=b"")
     monkeypatch.setattr(tool, "_run_curl", lambda *args, **kwargs: fake_result)
 
@@ -128,9 +139,8 @@ def test_http_request_tool_detects_html(monkeypatch):
 
 def test_session_update_persists_and_applies_headers(monkeypatch):
     tool = HttpRequestTool()
-    marker = "__TEST_MARKER__"
-    monkeypatch.setattr(tool, "_build_marker", lambda trace_id: marker)
-    stdout = marker.encode("utf-8") + json.dumps(_fake_metrics()).encode("utf-8")
+    markers = _install_marker_stub(monkeypatch, tool)
+    stdout = markers["json"].encode("utf-8") + json.dumps(_fake_metrics()).encode("utf-8")
     verbose = b"> GET / HTTP/1.1\n"
     fake_result = SimpleNamespace(returncode=0, stdout=stdout, stderr=verbose)
     monkeypatch.setattr(tool, "_run_curl", lambda *args, **kwargs: fake_result)
@@ -181,9 +191,8 @@ def test_http_request_tool_blocks_private_ip(monkeypatch):
 
 def test_http_request_tool_allows_local_with_override(monkeypatch):
     tool = HttpRequestTool()
-    marker = "__TEST_MARKER__"
-    monkeypatch.setattr(tool, "_build_marker", lambda trace_id: marker)
-    stdout = marker.encode("utf-8") + json.dumps(_fake_metrics()).encode("utf-8")
+    markers = _install_marker_stub(monkeypatch, tool)
+    stdout = markers["json"].encode("utf-8") + json.dumps(_fake_metrics()).encode("utf-8")
     fake_result = SimpleNamespace(returncode=0, stdout=stdout, stderr=b"")
     monkeypatch.setattr(tool, "_run_curl", lambda *args, **kwargs: fake_result)
 
@@ -195,11 +204,10 @@ def test_http_request_tool_allows_local_with_override(monkeypatch):
 
 def test_http_request_tool_json_pointer_extraction(monkeypatch):
     tool = HttpRequestTool()
-    marker = "__TEST_MARKER__"
-    monkeypatch.setattr(tool, "_build_marker", lambda trace_id: marker)
+    markers = _install_marker_stub(monkeypatch, tool)
 
     body = b'{"outer":{"message":"hello"}}'
-    stdout = body + marker.encode("utf-8") + json.dumps(_fake_metrics()).encode("utf-8")
+    stdout = body + markers["json"].encode("utf-8") + json.dumps(_fake_metrics()).encode("utf-8")
     fake_result = SimpleNamespace(returncode=0, stdout=stdout, stderr=b"")
     monkeypatch.setattr(tool, "_run_curl", lambda *args, **kwargs: fake_result)
 
@@ -215,9 +223,8 @@ def test_http_request_tool_json_pointer_extraction(monkeypatch):
 
 def test_http_request_tool_body_form_sets_encoding(monkeypatch):
     tool = HttpRequestTool()
-    marker = "__TEST_MARKER__"
-    monkeypatch.setattr(tool, "_build_marker", lambda trace_id: marker)
-    stdout = marker.encode("utf-8") + json.dumps(_fake_metrics()).encode("utf-8")
+    markers = _install_marker_stub(monkeypatch, tool)
+    stdout = markers["json"].encode("utf-8") + json.dumps(_fake_metrics()).encode("utf-8")
     fake_result = SimpleNamespace(returncode=0, stdout=stdout, stderr=b"")
     captured = {}
 
@@ -239,9 +246,8 @@ def test_http_request_tool_body_form_sets_encoding(monkeypatch):
 
 def test_http_request_tool_injects_proxy(monkeypatch):
     tool = HttpRequestTool()
-    marker = "__TEST_MARKER__"
-    monkeypatch.setattr(tool, "_build_marker", lambda trace_id: marker)
-    stdout = marker.encode("utf-8") + json.dumps(_fake_metrics()).encode("utf-8")
+    markers = _install_marker_stub(monkeypatch, tool)
+    stdout = markers["json"].encode("utf-8") + json.dumps(_fake_metrics()).encode("utf-8")
     fake_result = SimpleNamespace(returncode=0, stdout=stdout, stderr=b"")
     captured = {}
     monkeypatch.setattr(
@@ -261,3 +267,88 @@ def test_http_request_tool_injects_proxy(monkeypatch):
     proxy_index = command.index("--proxy")
     assert command[proxy_index + 1] == "http://proxy.local:8080"
     assert "--compressed" in command
+
+
+def test_http_request_tool_surfaces_certificate_chain(monkeypatch):
+    tool = HttpRequestTool()
+    tool._supports_certs_write_out = True
+    tool._helper_capabilities["curl_supports_certs"] = True
+    markers = _install_marker_stub(monkeypatch, tool, include_cert=True)
+    body = b"{}"
+    certs = [
+        {
+            "Subject": "CN=example.com",
+            "Issuer": "CN=Example CA",
+            "Start date": "2024-01-01",
+            "Expire date": "2025-01-01",
+            "Serial Number": "00AA",
+            "SHA256": "abc",
+        }
+    ]
+    stdout = (
+        body
+        + markers["json"].encode("utf-8")
+        + json.dumps(_fake_metrics()).encode("utf-8")
+        + markers["cert"].encode("utf-8")
+        + json.dumps(certs).encode("utf-8")
+    )
+    fake_result = SimpleNamespace(returncode=0, stdout=stdout, stderr=b"")
+    monkeypatch.setattr(tool, "_run_curl", lambda *args, **kwargs: fake_result)
+    response = json.loads(tool.execute(url="https://example.com"))
+    assert response["certificate_chain"][0]["subject"] == "CN=example.com"
+    assert response["helper_capabilities"]["curl_supports_certs"] is True
+
+
+def test_http_request_tool_json_selector_uses_jq(monkeypatch):
+    tool = HttpRequestTool()
+    markers = _install_marker_stub(monkeypatch, tool)
+    body = b'{"phase":"full"}'
+    stdout = body + markers["json"].encode("utf-8") + json.dumps(_fake_metrics()).encode("utf-8")
+    fake_result = SimpleNamespace(returncode=0, stdout=stdout, stderr=b"")
+    monkeypatch.setattr(tool, "_run_curl", lambda *args, **kwargs: fake_result)
+    tool._jq_path = "/usr/bin/jq"
+    tool._helper_capabilities["jq_available"] = True
+    called = {}
+
+    def fake_selector(selector, payload):
+        called["selector"] = selector
+        called["payload"] = payload
+        return "waning"
+
+    monkeypatch.setattr(tool, "_run_jq_selector", fake_selector)
+    data = json.loads(
+        tool.execute(url="https://example.com", json_selector=".phase", parse_mode="json")
+    )
+    assert data["json_selector_value"] == "waning"
+    assert data["json_selector_error"] is None
+    assert called["selector"] == ".phase"
+
+
+def test_http_request_tool_applies_template_variables(monkeypatch):
+    tool = HttpRequestTool()
+    markers = _install_marker_stub(monkeypatch, tool)
+    stdout = markers["json"].encode("utf-8") + json.dumps(_fake_metrics()).encode("utf-8")
+    fake_result = SimpleNamespace(returncode=0, stdout=stdout, stderr=b"")
+    captured = {}
+
+    def fake_run(command, *args, **kwargs):
+        captured["command"] = command
+        return fake_result
+
+    monkeypatch.setattr(tool, "_run_curl", fake_run)
+    tool.execute(
+        url="https://{{api_host}}/{{endpoint}}",
+        session_id="templating",
+        session_update={"variables": {"api_host": "api.example.com"}},
+        variables={"endpoint": "status"},
+        headers={"X-Trace": "{{endpoint|upper}}"},
+    )
+    command = captured["command"]
+    url_index = command.index("--url")
+    assert command[url_index + 1] == "https://api.example.com/status"
+    header_values = [
+        command[idx + 1]
+        for idx, value in enumerate(command)
+        if value == "--header" and idx + 1 < len(command)
+    ]
+    assert "X-Trace: STATUS" in header_values
