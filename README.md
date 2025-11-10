@@ -10,20 +10,22 @@ This is an **AI-powered Linux terminal** built with MiniMax M2 (or Kimi-2/custom
 
 **Architecture**:
 - **agent.py**: ReAct loop engine (max 15 steps) with tool calling, history trimming, session state tracking, and multi-step planning
-- **tools.py**: 9 auto-registered tools (read/write files, run commands, Python sandbox with pandas/numpy/matplotlib, context queries, Wikipedia search)
+- **tools.py**: Auto-registered tool suite (run/read/write commands, filesystem snapshotting, Python sandbox with pandas/numpy/matplotlib, context queries, history search, HTTP client)
 - **config.py**: Multi-backend support (MiniMax/Kimi-2/custom OpenAI-compatible APIs) with env-based configuration
 - **shell_integration.py**: Persistent bash/zsh wrapper, working directory isolation (`ai-terminal-wd/`)
 - **db_logger.py**: SQLite session logging with telemetry
+- **filesystem_context.py**: Persists shell-derived cwd snapshots plus read/write events to SQLite + JSONL so agents always know the real workspace layout
 
 **Key Features**:
 - Shell-first philosophy (prefer `awk/sed/jq` over Python for text/math)
 - Resource-limited Python sandbox with write protection, network isolation
 - Optional namespace isolation via bubblewrap (reproducible rootfs)
+- Persistent filesystem awareness (auto-logged cwd, recent file events, absolute/relative path hints surfaced via the `filesystem_snapshot` tool and prompt injections)
 - Lean context tracking (10-call live history + history_search for permanent recall, recent errors, session stats)
 - Smart HTTP tooling: templated requests, jq selectors, TLS certificate telemetry, session-aware curl profiles
 - Raw output mode toggle for debugging
 
-**Extended Memory:** The new `history_search` tool backs every session with a persistent SQLite store. When the live 10-call window no longer holds relevant work, the agent can query older sessions by keyword, time range, or tool name, then cite those results. See `docs/HISTORY_TOOL.md` for workflow details.
+**Extended Memory & Filesystem Context:** High-signal events stream into JSONL (`logs/events/<session>.jsonl`) and are mirrored into `logs/history/history.db`, powering the `history_search` tool for cross-session recall. In parallel, shell executions and file reads/writes are captured by `filesystem_context.py` (SQLite + JSONL) so agents always know the true cwd, sandbox roots, and recent file mutations without rerunning `pwd/ls`. See `docs/HISTORY_TOOL.md` and `filesystem_context.py` for implementation notes.
 
 **State**: v1.3, 88 closed beads (all issues completed), production-ready with comprehensive docs and test coverage.
 
@@ -66,10 +68,24 @@ The system currently auto-registers these tools (direct mirror of `tools.py` and
 - `read_file` – Output a file’s contents
 - `write_file` – Create or overwrite files in the working directory
 - `get_context` – Return session metadata, tool history, and recent errors for debugging
+- `filesystem_snapshot` – Fetch the latest persisted cwd snapshot plus recent read/write telemetry so path decisions are accurate without extra shell probes
 - `http_request` – Structured curl wrapper with profiles, session persistence, templating variables, jq JSON selectors, certificate-chain reporting, retries, metrics, and diagnostics (preferred for any HTTP/API work)
 - `history_search` – Query the persistent event archive when you need to recall work outside the live tool window
 
 Detailed knobs for `http_request` live in `docs/HTTP_REQUEST.md`.
+
+## Workflow & Issue Tracking
+
+This repo uses **bd (beads)** for all work tracking. Never add Markdown TODO lists—open or update beads instead:
+
+```bash
+bd ready --json                  # see unblocked work
+bd create "Title" -t feature -p 1 --json
+bd update bd-123 --status in_progress --json
+bd close bd-123 --reason "Done" --json
+```
+
+AI-generated plans/design docs must live under `history/` (e.g., `history/PLAN.md`). Keep the repository root focused on durable assets.
 
 ## Installation
 

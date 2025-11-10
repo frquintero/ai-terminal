@@ -5,6 +5,7 @@ from utils.system_info import get_system_info, format_system_info
 from db_logger import DBLogger
 from event_memory import EventLog, EventRetriever, EventRetrieverConfig
 from history_store import get_history_store
+from filesystem_context import get_fs_context_store
 import openai
 import json
 import re
@@ -63,6 +64,11 @@ class MiniAgent:
         except Exception as exc:
             self.history_store = None
             self._log("TRACE_WARNING", f"History store unavailable: {exc}")
+        try:
+            self.fs_context_store = get_fs_context_store()
+        except Exception as exc:
+            self.fs_context_store = None
+            self._log("TRACE_WARNING", f"Filesystem context store unavailable: {exc}")
         
         # Tool output collector for deterministic rendering
         self._current_step_tool_outputs = []
@@ -165,12 +171,11 @@ ReAct loop rules:
 - Action JSON must match an available tool schema exactly; omit speculative actions.
 - Wait for `Observation` messages (tool outputs) before issuing another Action. Keep loops under 4 iterations unless user insists.
 
-Filesystem context:
-- {WORKING_DIR_PREFIX}/ is your sandbox root; get_context reports both the absolute path and your logical working dir. Reference the absolute path when explaining locations to the user, but use short relative paths (./src/app.py) in commands for clarity.
-- run_command always executes from {WORKING_DIR_PREFIX}/, so you never need an explicit cd. Stay inside this tree—no ../ escapes or writes outside the sandbox.
-- Keep temporary artifacts and notebooks under {WORKING_DIR_PREFIX}/workspace/ (create it if missing) so your generated files stay organized and easy to clean up.
-- write_file and read_file resolve paths relative to {WORKING_DIR_PREFIX}/. If you need to touch files elsewhere in the repo, compute the absolute path first, then pass the relative form rooted at {WORKING_DIR_PREFIX}/.
-- When invoking run_interactive editors, pass the fully-qualified path you plan to edit so the tool opens the intended file.
+        Filesystem context:
+        - {WORKING_DIR_PREFIX}/ is the sandbox root. Shell tools already reset into it, so never prepend cd or escape above this tree.
+        - Use filesystem_snapshot (fast) or get_context when you need cwd, workspace roots, or recent file activity. They return both absolute and relative paths so you can decide which form to use.
+        - Keep notebooks, temp scripts, and scratch files under {WORKING_DIR_PREFIX}/workspace/ to stay organized and make cleanup trivial.
+        - write_file/read_file resolve relative to {WORKING_DIR_PREFIX}/. When launching run_interactive, pass the absolute target path taken from the snapshot output.
 
 Memory & artifacts:
 - Each turn includes an \"Agent Memory\" system message listing high-signal events (errors, tool results, summaries). Scan it before planning so you do not repeat commands.
@@ -178,10 +183,11 @@ Memory & artifacts:
 - If artifact_summary is present, trust and cite it directly; fetch the artifact only for detailed follow-ups.
 - Long-term recall lives in history_search: when the user references earlier work, or when you suspect relevant actions, diagnostics, or regressions live beyond the last ~10 tool calls, issue history_search with short keywords (and optional session/time filters) before answering, then cite only the portions you truly need.
 
-Key tools:
-- run_command - primary executor; compose pipelines for efficient processing.
-- get_context - cheap JSON snapshot (cwd, git branch, tool history, errors, sandbox limits). Use instead of manual environment probes.
-- run_python_sandbox - isolated Python with data-science stack and write guards; only for workloads shell cannot handle.
+        Key tools:
+        - run_command - primary executor; compose pipelines for efficient processing.
+        - get_context - cheap JSON snapshot (cwd, git branch, tool history, errors, sandbox limits). Use instead of manual environment probes.
+        - filesystem_snapshot - fetches persisted cwd/path hints plus recent file events without re-running pwd/ls/git status.
+        - run_python_sandbox - isolated Python with data-science stack and write guards; only for workloads shell cannot handle.
 - read_file / write_file - direct file access within the working directory.
 - run_interactive - launch full-screen programs (vim, top); user must interact directly.
 
@@ -302,6 +308,9 @@ Execution style:
             memory_block = self._build_memory_block()
             if memory_block:
                 messages.append({"role": "system", "content": memory_block})
+        snapshot_msg = self._filesystem_snapshot_message()
+        if snapshot_msg:
+            messages.append(snapshot_msg)
         messages.extend(conversation)
         return messages
 
@@ -313,6 +322,49 @@ Execution style:
         except Exception as exc:
             self._log("TRACE_WARNING", f"Failed to build memory block: {exc}")
             return None
+
+    def _filesystem_snapshot_message(self) -> Optional[dict]:
+        if not self.fs_context_store:
+            return None
+        try:
+            snapshot = self.fs_context_store.get_latest_snapshot(self.session_id)
+            events = self.fs_context_store.get_recent_events(self.session_id, limit=4)
+        except Exception as exc:
+            self._log("TRACE_WARNING", f"Failed to fetch filesystem snapshot: {exc}")
+            return None
+        if not snapshot and not events:
+            return None
+        content_lines = ["Filesystem snapshot:"]
+        if snapshot:
+            content_lines.append(f"- cwd: {snapshot.get('shell_cwd') or 'unknown'}")
+            content_lines.append(f"- workspace: {snapshot.get('working_dir') or 'unknown'}")
+            hint = snapshot.get("workspace_hint")
+            if hint:
+                content_lines.append(f"- keep scratch work under: {hint}")
+            last_cmd = snapshot.get("command")
+            if last_cmd:
+                exit_code = snapshot.get("exit_code")
+                command_line = f"- last command: {last_cmd}"
+                if exit_code is not None:
+                    command_line += f" (exit {exit_code})"
+                content_lines.append(command_line)
+            metadata = snapshot.get("metadata") or {}
+            candidates = metadata.get("path_candidates") or []
+            if candidates:
+                candidate_labels = []
+                for cand in candidates[:3]:
+                    rel = cand.get("relative_path") or cand.get("token")
+                    exists = "✓" if cand.get("exists") else "?"
+                    candidate_labels.append(f"{rel}({exists})")
+                content_lines.append(f"- path hints: {', '.join(candidate_labels)}")
+        if events:
+            content_lines.append("Recent file activity:")
+            for event in events[-3:]:
+                rel_path = event.get("relative_path") or event.get("requested_path")
+                content_lines.append(
+                    f"  • {event.get('operation')} {rel_path} ({event.get('source')})"
+                )
+        return {"role": "system", "content": "\n".join(content_lines)}
 
     @staticmethod
     def _extract_json_object(text: str) -> str | None:

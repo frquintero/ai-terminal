@@ -50,6 +50,8 @@ logs/
 # Test data files
 *.csv
 test.csv
+tests/.fs_context_test.db
+tests/.fs_context_jsonl/
 
 # Sandbox execution directories
 sandbox_runs/

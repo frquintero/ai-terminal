@@ -30,6 +30,7 @@ from shell_integration import ShellIntegration
 from command_parser import parse_command
 from event_memory import summarize_event_log
 from history_store import get_history_store, HistoryStoreError
+from filesystem_context import get_fs_context_store
 
 
 # ============================================================================
@@ -51,6 +52,12 @@ def _get_working_dir_path() -> str:
 # Track recently written files for context awareness
 _RECENT_WRITES: deque = deque(maxlen=100)
 _RECENT_FILE_EVENTS: deque = deque(maxlen=200)
+
+def _get_fs_store():
+    try:
+        return get_fs_context_store()
+    except Exception:
+        return None
 
 _WORKING_DIR_PATH = Path(_get_working_dir_path())
 HTTP_SESSION_ROOT = _WORKING_DIR_PATH / ".http_sessions"
@@ -364,6 +371,80 @@ def _record_file_event(
         "interactive_hint": abs_path
     }
     _RECENT_FILE_EVENTS.append(entry)
+    store = _get_fs_store()
+    if store and _SESSION_STATE.session_id:
+        try:
+            store.record_file_event(_SESSION_STATE.session_id, entry)
+        except Exception:
+            pass
+
+
+def _extract_path_candidates(command: str, base_dir: str) -> List[Dict[str, Any]]:
+    """Heuristically extract path-like tokens from the command string."""
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    candidates: List[Dict[str, Any]] = []
+    skip_tokens = {"|", "||", "&&", ";", ">", ">>", "<"}
+
+    def _looks_like_path(token: str) -> bool:
+        if not token or token in skip_tokens:
+            return False
+        if token.startswith("-") or token.startswith("$"):
+            return False
+        if token in {"sudo", "env"}:
+            return False
+        if "/" in token or token.startswith(".") or token.startswith("~"):
+            return True
+        if "." in token and len(token) <= 128:
+            return True
+        return False
+
+    for token in tokens:
+        if not _looks_like_path(token):
+            continue
+        expanded = token
+        if token.startswith("~"):
+            expanded = os.path.expanduser(token)
+        if os.path.isabs(expanded):
+            abs_path = expanded
+        else:
+            abs_path = os.path.abspath(os.path.join(base_dir, expanded))
+        candidates.append({
+            "token": token,
+            "absolute_path": abs_path,
+            "relative_path": _relativize_to_working_dir(abs_path),
+            "exists": os.path.exists(abs_path)
+        })
+    return candidates
+
+
+def _record_shell_snapshot(command: str, exit_code: Optional[int], shell_cwd: Optional[str], working_dir: str):
+    """Persist snapshot of the shell state after a command executes."""
+    store = _get_fs_store()
+    if not store or not _SESSION_STATE.session_id:
+        return
+    cwd = shell_cwd or working_dir
+    metadata = {
+        "relative_cwd": _relativize_to_working_dir(cwd),
+        "recent_activity": list(_RECENT_FILE_EVENTS)[-20:],
+        "path_candidates": _extract_path_candidates(command, cwd or working_dir),
+    }
+    payload = {
+        "shell_cwd": cwd,
+        "working_dir": working_dir,
+        "workspace_hint": os.path.join(working_dir, "workspace"),
+        "sandbox_root": WORKING_DIR_PREFIX,
+        "command": command,
+        "command_preview": command[:240],
+        "exit_code": exit_code,
+        "metadata": metadata,
+    }
+    try:
+        store.record_snapshot(_SESSION_STATE.session_id, payload)
+    except Exception:
+        pass
 
 
 # ============================================================================
@@ -2035,7 +2116,17 @@ class RunCommandTool(BaseTool):
             # Execute command via shell integration
             # Force reset to working directory before each command (stateless cwd)
             wrapped = f"cd {shlex.quote(self.working_dir)}; {command}"
-            return self.shell.run_command(wrapped, reset_dir=self.working_dir)
+            result = self.shell.run_command(wrapped, reset_dir=self.working_dir)
+            try:
+                _record_shell_snapshot(
+                    command=command,
+                    exit_code=getattr(self.shell, "last_exit_code", None),
+                    shell_cwd=self.shell.get_current_dir(),
+                    working_dir=self.working_dir,
+                )
+            except Exception:
+                pass
+            return result
             
         except Exception as e:
             return f"Error executing command: {str(e)}"
@@ -2987,8 +3078,86 @@ class GetContextTool(BaseTool):
         event_summary = summarize_event_log(_SESSION_STATE.session_id)
         if event_summary:
             context["event_memory"] = event_summary
+
+        store = _get_fs_store()
+        if store and _SESSION_STATE.session_id:
+            try:
+                persisted_snapshot = store.get_latest_snapshot(_SESSION_STATE.session_id)
+                persisted_events = store.get_recent_events(_SESSION_STATE.session_id, limit=5)
+                if persisted_snapshot:
+                    context["filesystem"]["persisted_snapshot"] = persisted_snapshot
+                if persisted_events:
+                    context["filesystem"]["persisted_events"] = persisted_events
+            except Exception:
+                pass
         
         return json.dumps(context, indent=2)
+
+
+# ============================================================================
+# Filesystem snapshot tool
+# ============================================================================
+
+class FilesystemSnapshotTool(BaseTool):
+    """
+    Fetch the latest persisted filesystem snapshot plus recent file events.
+    """
+
+    @property
+    def name(self) -> str:
+        return "filesystem_snapshot"
+
+    @property
+    def description(self) -> str:
+        return "Return the latest persisted filesystem snapshot plus recent file events for the active session."
+
+    @property
+    def schema(self) -> Dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": "filesystem_snapshot",
+                "description": "Return the latest filesystem snapshot and recent file events captured from shell activity.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of recent file events to include (default 15).",
+                            "minimum": 1,
+                            "maximum": 50
+                        }
+                    },
+                    "additionalProperties": False
+                }
+            }
+        }
+
+    def execute(self, limit: int = 15) -> str:
+        store = _get_fs_store()
+        if not store or not _SESSION_STATE.session_id:
+            fallback = list(_RECENT_FILE_EVENTS)[-limit:]
+            payload = {
+                "session_id": _SESSION_STATE.session_id,
+                "snapshot": None,
+                "recent_events": fallback
+            }
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = 15
+        limit = max(1, min(limit, 50))
+        snapshot = store.get_latest_snapshot(_SESSION_STATE.session_id)
+        events = store.get_recent_events(_SESSION_STATE.session_id, limit=limit)
+        if not events:
+            events = list(_RECENT_FILE_EVENTS)[-limit:]
+        payload = {
+            "session_id": _SESSION_STATE.session_id,
+            "snapshot": snapshot,
+            "recent_events": events
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 # ============================================================================
