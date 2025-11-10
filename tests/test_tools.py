@@ -1,11 +1,8 @@
 import unittest
 import tempfile
 import os
-from unittest.mock import patch
 
-# Mock ShellIntegration to avoid shell initialization during import
-with patch('shell_integration.ShellIntegration'):
-    from tools import ReadFileTool, WriteFileTool
+from tools import ReadFileTool, WriteFileTool
 
 class TestFileTools(unittest.TestCase):
     def setUp(self):
@@ -29,7 +26,7 @@ class TestFileTools(unittest.TestCase):
         """Test handling of a non-existent file."""
         nonexistent_path = "/tmp/nonexistent_file.txt"
         result = self.read_tool.execute(file_path=nonexistent_path)
-        self.assertIn("Error reading file", result)
+        self.assertIn("File not found in working directory or app directory", result)
 
     def test_write_file_create_new(self):
         """Test successful creation and writing to a new file."""

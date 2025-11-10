@@ -165,10 +165,12 @@ ReAct loop rules:
 - Action JSON must match an available tool schema exactly; omit speculative actions.
 - Wait for `Observation` messages (tool outputs) before issuing another Action. Keep loops under 4 iterations unless user insists.
 
-Working directory rules:
-- run_command auto-CDs into {WORKING_DIR_PREFIX}/; use relative paths (./file.py). Never write outside that directory (no ../ redirects).
-- write_file paths are relative to {WORKING_DIR_PREFIX}/ (do not prefix it).
-- read_file searches {WORKING_DIR_PREFIX}/ first, then the project root.
+Filesystem context:
+- {WORKING_DIR_PREFIX}/ is your sandbox root; get_context reports both the absolute path and your logical working dir. Reference the absolute path when explaining locations to the user, but use short relative paths (./src/app.py) in commands for clarity.
+- run_command always executes from {WORKING_DIR_PREFIX}/, so you never need an explicit cd. Stay inside this tree—no ../ escapes or writes outside the sandbox.
+- Keep temporary artifacts and notebooks under {WORKING_DIR_PREFIX}/workspace/ (create it if missing) so your generated files stay organized and easy to clean up.
+- write_file and read_file resolve paths relative to {WORKING_DIR_PREFIX}/. If you need to touch files elsewhere in the repo, compute the absolute path first, then pass the relative form rooted at {WORKING_DIR_PREFIX}/.
+- When invoking run_interactive editors, pass the fully-qualified path you plan to edit so the tool opens the intended file.
 
 Memory & artifacts:
 - Each turn includes an \"Agent Memory\" system message listing high-signal events (errors, tool results, summaries). Scan it before planning so you do not repeat commands.
@@ -370,6 +372,51 @@ Execution style:
             parsed["final_answer"] = text[final_idx + len("Final Answer:") :].strip()
 
         return parsed
+
+    @classmethod
+    def _render_user_facing_content(cls, content: str | None) -> str:
+        """Redact Action payloads while preserving Thought/Final Answer for UI display."""
+        text = (content or "").strip()
+        if not text:
+            return ""
+        parsed = cls._parse_react_directives(text)
+        sections: list[str] = []
+        thought = parsed.get("thought")
+        final_answer = parsed.get("final_answer")
+        if thought:
+            sections.append(f"Thought: {thought}")
+        if final_answer:
+            sections.append(f"Final Answer: {final_answer}")
+        if sections:
+            return "\n\n".join(sections).strip()
+        cleaned = cls._strip_action_blocks(text)
+        return cleaned or text
+
+    @staticmethod
+    def _strip_action_blocks(text: str) -> str:
+        """Remove Action JSON blocks from assistant text."""
+        lines = text.splitlines()
+        cleaned_lines: list[str] = []
+        skipping = False
+        fence_mode = False
+        for line in lines:
+            stripped = line.strip()
+            if not skipping and stripped.startswith("Action:"):
+                skipping = True
+                fence_mode = False
+                continue
+            if skipping:
+                if stripped.startswith("```"):
+                    fence_mode = not fence_mode
+                    continue
+                if not fence_mode and (not stripped or stripped.startswith("Final Answer:") or stripped.startswith("Thought:")):
+                    skipping = False
+                    if stripped:
+                        cleaned_lines.append(line)
+                    continue
+                continue
+            cleaned_lines.append(line)
+        return "\n".join(cleaned_lines).strip()
 
     @classmethod
     def _format_observation_content(
@@ -935,9 +982,12 @@ Execution style:
             # For interactive tools, skip LLM commentary - just show tool results
             content = "\n\n".join(output["result"] for output in self._current_step_tool_outputs)
         else:
-            content = assistant_message.content or ""
+            raw_content = assistant_message.content or ""
             if self.config.hide_thinking:
-                content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+                raw_content = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL).strip()
+            content = self._render_user_facing_content(raw_content)
+            if not content and raw_content:
+                content = raw_content
             
             # Only inject raw outputs when SHOW_RAW_OUTPUT is explicitly enabled
             if self._current_step_tool_outputs and self.config.show_raw_output:

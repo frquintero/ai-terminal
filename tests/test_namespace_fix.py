@@ -11,7 +11,7 @@ Tests:
 
 import sys
 import json
-from tools import TOOLS, _RECENT_WRITES
+from tools import TOOLS, _RECENT_WRITES, _RECENT_FILE_EVENTS
 
 def test_stateless_run_command():
     """Test that run_command always executes from working_dir"""
@@ -56,6 +56,7 @@ def test_file_write_tracking():
     
     # Clear previous writes
     _RECENT_WRITES.clear()
+    _RECENT_FILE_EVENTS.clear()
     
     write_tool = TOOLS['write_file']
     
@@ -71,6 +72,11 @@ def test_file_write_tracking():
     for f in files:
         assert f in tracked, f"File {f} should be tracked"
         print(f"✓ {f} tracked")
+
+    events = list(_RECENT_FILE_EVENTS)
+    for f in files:
+        assert any(evt["relative_path"].endswith(f) for evt in events), f"{f} missing from recent file events"
+        print(f"✓ {f} recorded with absolute/relative metadata")
     
     print("\n✅ TEST 2 PASSED: File writes are tracked\n")
 
@@ -106,6 +112,12 @@ def test_get_context_tool():
     # Verify recent writes
     assert 'context_test.txt' in context['recent_writes'], "Should track recent write"
     print(f"✓ recent_writes: {context['recent_writes']}")
+
+    assert 'filesystem' in context, "Filesystem block should exist"
+    fs = context['filesystem']
+    assert any(entry["relative_path"].endswith("context_test.txt") for entry in fs.get("recent_activity", [])), \
+        "Filesystem activity should include context_test.txt"
+    print(f"✓ filesystem metadata: {json.dumps(fs, indent=2)}")
     
     print("\n✅ TEST 3 PASSED: get_context works correctly\n")
 

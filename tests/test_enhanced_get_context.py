@@ -10,17 +10,18 @@ Validates that get_context returns all expected fields:
 import json
 import sys
 import os
-from unittest.mock import patch
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-with patch('shell_integration.ShellIntegration'):
-    from tools import GetContextTool, _SESSION_STATE, TOOLS
+from tools import GetContextTool, _SESSION_STATE, TOOLS, _RECENT_FILE_EVENTS
 
 def test_get_context_structure():
     """Test that get_context returns expected JSON structure"""
     _SESSION_STATE.reset("test-session-123")
+    _RECENT_FILE_EVENTS.clear()
+    write_tool = TOOLS["write_file"]
+    write_tool.execute("context_meta/test.txt", "context verification")
     
     # Simulate tool calls/errors
     _SESSION_STATE.record_tool_call(
@@ -56,7 +57,8 @@ def test_get_context_structure():
         "configuration",
         "repository",
         "capabilities",
-        "activity"
+        "activity",
+        "filesystem"
     ]
     for field in new_fields:
         assert field in result, f"Missing new field: {field}"
@@ -113,6 +115,16 @@ def test_get_context_structure():
     assert "last_command_exit_code" in activity
     assert activity["last_command_exit_code"] == 0
 
+    filesystem = result["filesystem"]
+    assert filesystem["workspace_root"].endswith("ai-terminal-wd")
+    assert "recent_activity" in filesystem
+    assert isinstance(filesystem["recent_activity"], list)
+    assert filesystem["recent_activity"], "Expected at least one filesystem event"
+    last_event = filesystem["recent_activity"][-1]
+    assert last_event["operation"] == "write"
+    assert last_event["source"] == "write_file"
+    assert last_event["interactive_hint"].endswith("context_meta/test.txt")
+
 def test_bounded_history():
     """Test that tool_history and recent_errors are bounded"""
     _SESSION_STATE.reset("test-session-bounded")
@@ -132,9 +144,9 @@ def test_bounded_history():
     
     result = json.loads(GetContextTool().execute())
     
-    assert len(result["tool_history"]) == 20
+    assert len(result["tool_history"]) == 10
     first_index = json.loads(result["tool_history"][0]["args"])["index"]
-    assert first_index == 5
+    assert first_index == 15
     
     assert len(result["recent_errors"]) == 3
     

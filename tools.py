@@ -50,6 +50,7 @@ def _get_working_dir_path() -> str:
 
 # Track recently written files for context awareness
 _RECENT_WRITES: deque = deque(maxlen=100)
+_RECENT_FILE_EVENTS: deque = deque(maxlen=200)
 
 _WORKING_DIR_PATH = Path(_get_working_dir_path())
 HTTP_SESSION_ROOT = _WORKING_DIR_PATH / ".http_sessions"
@@ -318,6 +319,53 @@ class SessionState:
 _SESSION_STATE = SessionState()
 
 
+def _abs_working_dir() -> str:
+    """Return the absolute working directory path."""
+    return os.path.abspath(_get_working_dir_path())
+
+
+def _relativize_to_working_dir(path: str) -> str:
+    """Return a path relative to the working directory when possible."""
+    working_dir = _abs_working_dir()
+    try:
+        return os.path.relpath(path, working_dir)
+    except ValueError:
+        return path
+
+
+def _classify_path_location(path: str) -> str:
+    """Classify a path as belonging to the workspace, project root, or elsewhere."""
+    working_dir = _abs_working_dir()
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    normalized = os.path.abspath(path)
+    if normalized == working_dir or normalized.startswith(f"{working_dir}{os.sep}"):
+        return "workspace"
+    if normalized == project_root or normalized.startswith(f"{project_root}{os.sep}"):
+        return "project"
+    return "external"
+
+
+def _record_file_event(
+    operation: str,
+    requested_path: str,
+    source: str,
+    absolute_path: Optional[str] = None
+) -> None:
+    """Track recent file reads/writes with absolute and relative context."""
+    abs_path = os.path.abspath(absolute_path or requested_path)
+    entry = {
+        "operation": operation,
+        "requested_path": requested_path,
+        "relative_path": _relativize_to_working_dir(abs_path),
+        "absolute_path": abs_path,
+        "location": _classify_path_location(abs_path),
+        "source": source,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "interactive_hint": abs_path
+    }
+    _RECENT_FILE_EVENTS.append(entry)
+
+
 # ============================================================================
 # Base Tool Interface
 # ============================================================================
@@ -452,7 +500,9 @@ class ReadFileTool(BaseTool):
                 )
             
             with open(target_path, 'r', encoding='utf-8') as f:
-                return f.read()
+                content = f.read()
+            _record_file_event("read", file_path, "read_file", absolute_path=target_path)
+            return content
         except UnicodeDecodeError:
             return f"Error: File is not valid UTF-8 text. Use run_command with cat/hexdump for binary files."
         except Exception as e:
@@ -531,6 +581,7 @@ class WriteFileTool(BaseTool):
             
             # Track this write for context awareness
             _RECENT_WRITES.append(file_path)
+            _record_file_event("write", file_path, "write_file", absolute_path=isolated_path)
             
             return f"File written successfully: {isolated_path}"
         except Exception as e:
@@ -1460,8 +1511,10 @@ class HttpRequestTool(BaseTool):
     def _write_body_file(self, trace_id: str, body_bytes: bytes) -> str:
         path = self.body_dir / f"{trace_id}.body"
         path.write_bytes(body_bytes)
-        _RECENT_WRITES.append(str(path))
-        return str(path)
+        path_str = str(path)
+        _RECENT_WRITES.append(path_str)
+        _record_file_event("write", _relativize_to_working_dir(path_str), "http_request", absolute_path=path_str)
+        return path_str
 
     def _persist_trace(self, trace_id: str, request: Dict[str, Any], envelope: Dict[str, Any], command: List[str]) -> None:
         trace_payload = {
@@ -1487,7 +1540,9 @@ class HttpRequestTool(BaseTool):
         }
         trace_path = self.trace_dir / f"trace-{trace_id}.json"
         trace_path.write_text(json.dumps(trace_payload, indent=2))
-        _RECENT_WRITES.append(str(trace_path))
+        trace_path_str = str(trace_path)
+        _RECENT_WRITES.append(trace_path_str)
+        _record_file_event("write", _relativize_to_working_dir(trace_path_str), "http_request", absolute_path=trace_path_str)
 
     def _redact_headers(self, headers: Dict[str, str]) -> Dict[str, Any]:
         redacted = {}
@@ -2818,6 +2873,8 @@ class GetContextTool(BaseTool):
                     shell_cwd = shell_instance.get_current_dir()
         except Exception:
             pass
+        if shell_cwd is not None and not isinstance(shell_cwd, str):
+            shell_cwd = str(shell_cwd)
         
         # Get git repository context
         git_context = {}
@@ -2854,6 +2911,10 @@ class GetContextTool(BaseTool):
                     "Namespace isolation requested but not active."
         elif requested_isolation:
             isolation_warning = "Namespace isolation requested but shell not initialized."
+        if isolation_rootfs is not None and not isinstance(isolation_rootfs, str):
+            isolation_rootfs = str(isolation_rootfs)
+        if isolation_warning is not None and not isinstance(isolation_warning, str):
+            isolation_warning = str(isolation_warning)
         
         isolation_config = {
             "requested": requested_isolation,
@@ -2915,6 +2976,12 @@ class GetContextTool(BaseTool):
             "activity": {
                 "last_command_exit_code": _SESSION_STATE.last_exit_code
             }
+        }
+
+        context["filesystem"] = {
+            "workspace_root": working_dir,
+            "workspace_hint": os.path.join(working_dir, "workspace"),
+            "recent_activity": list(_RECENT_FILE_EVENTS)
         }
         
         event_summary = summarize_event_log(_SESSION_STATE.session_id)
