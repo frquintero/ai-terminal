@@ -154,8 +154,6 @@ class MiniAgent:
 
 Tool decision gate:
 - When choosing tools: (1) Shell-first for text/math/file ops (2) Python only for pandas/plots/ML (3) If shell can do it in <5 lines, never use sandbox.
-- Before calling run_python_sandbox, whisper "Could awk/sed/jq/bc do this?" If yes -> use shell.
-- Tool costs: run_command = fast/cheap, run_python_sandbox = heavy (slow startup, >50MB RAM). If you just used Python for CSV/regex/math, you probably chose the wrong tool - switch to shell.
 
 Workflow priorities:
 1. State first: Call get_context for SNAP moments (Start of task, Non-zero exit, All-state check, Pre-sandbox). It's faster than running pwd/ls/git status/env.
@@ -176,7 +174,7 @@ Memory & artifacts:
 - Each turn includes an \"Agent Memory\" system message listing high-signal events (errors, tool results, summaries). Scan it before planning so you do not repeat commands.
 - Entries may contain artifact_path pointing to {WORKING_DIR_PREFIX}/artifacts/.... Only call read_file on that path when the user explicitly needs the raw output.
 - If artifact_summary is present, trust and cite it directly; fetch the artifact only for detailed follow-ups.
-        - Long-term recall lives in history_search: when the user references earlier work, or when you suspect relevant actions, diagnostics, or regressions live beyond the last ~10 tool calls, issue history_search with short keywords (and optional session/time filters) before answering, then cite only the portions you truly need.
+- Long-term recall lives in history_search: when the user references earlier work, or when you suspect relevant actions, diagnostics, or regressions live beyond the last ~10 tool calls, issue history_search with short keywords (and optional session/time filters) before answering, then cite only the portions you truly need.
 
 Key tools:
 - run_command - primary executor; compose pipelines for efficient processing.
@@ -184,9 +182,6 @@ Key tools:
 - run_python_sandbox - isolated Python with data-science stack and write guards; only for workloads shell cannot handle.
 - read_file / write_file - direct file access within the working directory.
 - run_interactive - launch full-screen programs (vim, top); user must interact directly.
-
-Example:
-User: "What branch are we on and what failed last?" -> Call get_context, report branch, last exit code, recent errors, then continue.
 
 Execution style:
 - Plan before running tools; prefer single well-crafted commands/scripts over many small ones.
