@@ -1,11 +1,11 @@
-# History Search Tool
+# History Tooling
 
 Permanent, on-demand memory for AI Terminal.
 
 ## Why it exists
 - Session `tool_history` is intentionally lean (last ~10 calls) to keep prompts cheap.
 - Users still expect the agent to recall earlier work (e.g., moon phase diagnostics from session 171).
-- JSONL logs already capture every event, so we index them into a searchable SQLite store and expose the `history_search` tool.
+- JSONL logs already capture every event, so we index them into a searchable SQLite store and expose `history_sql` for precise SELECT/INSERT/UPDATE access. There is no fuzzy fallback—if a SQL query returns zero rows, that context truly isn’t recorded yet.
 
 ## Storage & Resilience
 - Database path: `logs/history/history.db` (override via `HISTORY_DB_PATH`).
@@ -28,54 +28,70 @@ Schema (simplified):
 | `detail_json` | Full JSON payload (mirrors event log entry)       |
 | `artifact_path` | Points to persisted outputs when available     |
 
-## `history_search` Tool Contract
+Auxiliary table: `agent_memories` captures agent-authored notes (`session_id`, `topic`, `content`, `tags`, `metadata_json`, timestamps) so MiniAgent can append durable summaries without mutating the primary `events` feed.
 
-| Parameter   | Type    | Notes                                                                 |
-| ----------- | ------- | ---------------------------------------------------------------------- |
-| `query`     | string  | Keywords or natural language (case-insensitive `LIKE` search).        |
-| `session_id`| string  | Filter to a single session (`"171"`, `"ai-terminal-logs"`).           |
-| `since`     | string  | ISO timestamp lower bound.                                            |
-| `until`     | string  | ISO timestamp upper bound.                                            |
-| `tool`      | string  | Filter by tool name (`run_command`, `http_request`, …).               |
-| `limit`     | int     | 1–25 (default 5) for bounded responses.                               |
+## Schema snapshot
 
-Output structure:
+Two tables exist in `logs/history/history.db`:
+
+| Table | Purpose | Key columns |
+| ----- | ------- | ----------- |
+| `events` | Canonical log of tool interactions | `session_id`, `timestamp`, `event_type`, `tool`, `summary`, `detail_json`, `artifact_path`, `keywords` |
+| `agent_memories` | Agent-authored notes | `session_id`, `topic`, `content`, `tags`, `metadata_json`, timestamps |
+
+Use the `history_schema` tool (see below) to list tables or call `describe_table` to inspect the actual column metadata before forming SQL queries.
+
+## `history_sql` Tool Contract (sole interface)
+
+This tool executes a single SELECT/INSERT/UPDATE statement with bound parameters. Guard rails:
+- Trailing semicolons are removed, but embedded semicolons are rejected (single statement only).
+- DELETE/DROP/ALTER/TRUNCATE/VACUUM/ATTACH/DETACH/REPLACE and PRAGMA statements are blocked.
+- SELECT responses are capped (default 50 rows, caller-adjustable up to 200) to keep outputs concise.
+
+| Parameter      | Type    | Notes                                                                                 |
+| -------------- | ------- | ------------------------------------------------------------------------------------- |
+| `statement`    | string  | Required SQL statement (no DELETE/DROP/ALTER).                                        |
+| `params`       | array   | Optional positional bindings for `?` placeholders.                                    |
+| `named_params` | object  | Optional named bindings for `:name` placeholders (mutually exclusive with `params`).  |
+| `max_rows`     | int     | Row cap for SELECT queries (default 50, max 200).                                     |
+
+Response shape:
 ```json
 {
-  "matches": [
-    {
-      "session_id": "171",
-      "timestamp": "2025-11-09T14:12:03.482Z",
-      "event_type": "tool_result",
-      "tool": "http_request",
-      "summary": "Moon API response (200)",
-      "detail_preview": "Return JSON with phase=waning gibbous",
-      "artifact_path": "ai-terminal-wd/artifacts/171_moon_api.txt",
-      "source_ref": {
-        "type": "history_db",
-        "event_id": 42,
-        "session_log": "logs/events/171.jsonl"
-      }
-    }
-  ],
-  "stats": {
-    "returned": 1,
-    "limit": 5,
-    "total_available": 3
-  }
+  "statement": "SELECT summary FROM events WHERE session_id = ? ORDER BY id DESC",
+  "operation": "select",
+  "execution_ms": 3.42,
+  "rows_returned": 1,
+  "columns": ["summary"],
+  "rows": [{"summary": "Andrés Quintero is my son."}],
+  "truncated": false
 }
+```
+INSERT/UPDATE replies also include `rowcount` and `last_insert_rowid` (for inserts).
+
+## `history_schema` Tool
+
+`history_schema` complements `history_sql` by exposing the DB structure:
+
+| Action | Description |
+| ------ | ----------- |
+| `list_tables` (default) | Returns all table names in sorted order |
+| `describe_table` | Returns column metadata (`name`, `type`, `notnull`, `default_value`, `primary_key`) for the requested table |
+
+Example usage:
+```json
+{"tool": "history_schema", "arguments": {"action": "describe_table", "table": "events"}}
 ```
 
 ## Agent Guidance
 - Default to the live `tool_history` (last ~10 calls) for immediate continuity.
-- Invoke `history_search` when:
-  1. The user references earlier work/sessions.
-  2. You suspect relevant steps were trimmed from `tool_history`.
-  3. You need authoritative recall before performing a risky/destructive action.
-- Keep queries focused (keywords + optional time/session filters) so responses stay concise.
+- When the user references earlier work or you sense trimmed context, first run `history_schema` (list tables + describe `events`/`agent_memories`) unless you recently fetched the schema. Then issue `history_sql` with concise SELECT statements using the confirmed columns (e.g., `WHERE summary LIKE '%cv%' AND session_id = '177'`).
+- If a SQL query returns zero rows, treat that as authoritative—ask the user for more details or record a new memory instead of falling back to fuzzy guesses.
 - Only quote the portions of results needed for the current answer; cite artifacts if the user wants raw data.
+- Use `history_sql` for all deterministic recall, aggregations, or to append a structured memory (`INSERT INTO agent_memories(...) VALUES (...)`). DELETE/DROP/ALTER remain blocked at the tool boundary.
 
 ## Developer Notes
 - The store is shared across the agent and tools via `history_store.get_history_store()`.
 - Tests can swap in a temporary DB using `history_store._set_history_store_for_tests`.
+- The `history_sql` executor enforces WAL + foreign keys, validates statements, and commits INSERT/UPDATE operations atomically while logging failures.
 - Future enhancements (tracked via beads) can add FTS indexing, clustering, or summarization helpers.

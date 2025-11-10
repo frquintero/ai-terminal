@@ -10,7 +10,7 @@ This is an **AI-powered Linux terminal** built with MiniMax M2 (or Kimi-2/custom
 
 **Architecture**:
 - **agent.py**: ReAct loop engine (max 15 steps) with tool calling, history trimming, session state tracking, and multi-step planning
-- **tools.py**: Auto-registered tool suite (run/read/write commands, filesystem snapshotting, Python sandbox with pandas/numpy/matplotlib, context queries, history search, HTTP client)
+- **tools.py**: Auto-registered tool suite (run/read/write commands, filesystem snapshotting, Python sandbox with pandas/numpy/matplotlib, context queries, history_sql memory access, HTTP client)
 - **config.py**: Multi-backend support (MiniMax/Kimi-2/custom OpenAI-compatible APIs) with env-based configuration
 - **shell_integration.py**: Persistent bash/zsh wrapper, working directory isolation (`ai-terminal-wd/`)
 - **db_logger.py**: SQLite session logging with telemetry
@@ -21,11 +21,12 @@ This is an **AI-powered Linux terminal** built with MiniMax M2 (or Kimi-2/custom
 - Resource-limited Python sandbox with write protection, network isolation
 - Optional namespace isolation via bubblewrap (reproducible rootfs)
 - Persistent filesystem awareness (auto-logged cwd, recent file events, absolute/relative path hints surfaced via the `filesystem_snapshot` tool and prompt injections)
-- Lean context tracking (10-call live history + history_search for permanent recall, recent errors, session stats)
+- Lean context tracking (10-call live history + history_sql-first permanent recall, recent errors, session stats)
+- Structured history DB access via `history_schema` + `history_sql` so the agent can inspect tables, then run parameterized SELECT/INSERT/UPDATE statements (DELETE/DROP blocked) for precise recall and memory writing
 - Smart HTTP tooling: templated requests, jq selectors, TLS certificate telemetry, session-aware curl profiles
 - Raw output mode toggle for debugging
 
-**Extended Memory & Filesystem Context:** High-signal events stream into JSONL (`logs/events/<session>.jsonl`) and are mirrored into `logs/history/history.db`, powering the `history_search` tool for cross-session recall. In parallel, shell executions and file reads/writes are captured by `filesystem_context.py` (SQLite + JSONL) so agents always know the true cwd, sandbox roots, and recent file mutations without rerunning `pwd/ls`. See `docs/HISTORY_TOOL.md` and `filesystem_context.py` for implementation notes.
+**Extended Memory & Filesystem Context:** High-signal events stream into JSONL (`logs/events/<session>.jsonl`) and are mirrored into `logs/history/history.db`, powering the `history_sql` tool for authoritative SELECT/INSERT/UPDATE access. In parallel, shell executions and file reads/writes are captured by `filesystem_context.py` (SQLite + JSONL) so agents always know the true cwd, sandbox roots, and recent file mutations without rerunning `pwd/ls`. See `docs/HISTORY_TOOL.md` and `filesystem_context.py` for implementation notes.
 
 **State**: v1.3, 88 closed beads (all issues completed), production-ready with comprehensive docs and test coverage.
 
@@ -70,7 +71,8 @@ The system currently auto-registers these tools (direct mirror of `tools.py` and
 - `get_context` – Return session metadata, tool history, and recent errors for debugging
 - `filesystem_snapshot` – Fetch the latest persisted cwd snapshot plus recent read/write telemetry so path decisions are accurate without extra shell probes
 - `http_request` – Structured curl wrapper with profiles, session persistence, templating variables, jq JSON selectors, certificate-chain reporting, retries, metrics, and diagnostics (preferred for any HTTP/API work)
-- `history_search` – Query the persistent event archive when you need to recall work outside the live tool window
+- `history_schema` – List history tables or describe specific columns so you know the schema before querying
+- `history_sql` – Run parameterized SELECT/INSERT/UPDATE statements against `logs/history/history.db` (DELETE/DROP blocked) to retrieve or append durable memories with precise filters
 
 Detailed knobs for `http_request` live in `docs/HTTP_REQUEST.md`.
 
@@ -126,7 +128,7 @@ Key settings in `.env`:
 - `EVENT_LOG_RETENTION_DAYS` (default: `7`) - Auto-delete event logs older than N days.
 - `EVENT_MEMORY_MAX_EVENTS` / `EVENT_MEMORY_MAX_CHARS` - Upper bounds for the Agent Memory block sent to the LLM.
 - `EVENT_MEMORY_ARTIFACT_THRESHOLD` (default: `8192`) - Tool outputs larger than this many bytes are persisted as artifacts under `ai-terminal-wd/artifacts/`.
-- `SESSION_TOOL_HISTORY_LIMIT` (default: `10`) - Live `tool_history` length. Lower values reduce prompt cost; rely on `history_search` for older context.
+- `SESSION_TOOL_HISTORY_LIMIT` (default: `10`) - Live `tool_history` length. Lower values reduce prompt cost; rely on `history_sql` (with concise SELECTs) for older context.
 
 ### Python Sandbox Configuration
 - `SANDBOX_PATH` (default: `./sandbox_runs`) - Directory for sandbox execution environments

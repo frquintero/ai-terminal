@@ -30,6 +30,7 @@ from shell_integration import ShellIntegration
 from command_parser import parse_command
 from event_memory import summarize_event_log
 from history_store import get_history_store, HistoryStoreError
+from history_sql import get_history_sql_executor, HistorySQLExecutionError
 from filesystem_context import get_fs_context_store
 
 
@@ -2803,34 +2804,34 @@ except Exception as _e:
 
 
 # ============================================================================
-# History Search Tool
+# History SQL Tool
 # ============================================================================
 
-class HistorySearchTool(BaseTool):
+class HistorySQLTool(BaseTool):
     """
-    Query the persistent history store for past interactions beyond the live window.
+    Run guarded SELECT/INSERT/UPDATE statements against the history DB.
     """
 
     def __init__(self):
-        self._store = get_history_store()
+        self._executor_factory = get_history_sql_executor
 
     @property
     def name(self) -> str:
-        return "history_search"
+        return "history_sql"
 
     @property
     def description(self) -> str:
         return (
-            "Search the long-term history store (keywords, session id, time ranges) "
-            "to recall past tool calls and outputs."
+            "Primary interface for the history DB: run parameterized SELECT/INSERT/UPDATE statements "
+            "to recall or store memories. DELETE/DROP and other destructive verbs are blocked."
         )
 
     @property
     def usage_examples(self) -> List[str]:
         return [
-            "history_search(query=\"moon phase\", limit=3)",
-            "history_search(session_id=\"171\", tool=\"http_request\", limit=5)",
-            "history_search(query=\"deploy logs\", since=\"2025-11-01T00:00:00Z\")",
+            "history_sql(statement=\"SELECT <columns> FROM events WHERE <conditions> ORDER BY <field> DESC\", max_rows=<int>)",
+            "history_sql(statement=\"INSERT INTO agent_memories(session_id, topic, content) VALUES('<session>', '<topic>', '<content>')\")",
+            "history_sql(statement=\"UPDATE agent_memories SET tags = '<tags>' WHERE id = <row_id>\")",
         ]
 
     @property
@@ -2838,72 +2839,123 @@ class HistorySearchTool(BaseTool):
         return {
             "type": "function",
             "function": {
-                "name": "history_search",
+                "name": "history_sql",
                 "description": (
-                    "Look up prior tool events when the user references earlier work or when "
-                    "the needed context is outside the last ~10 tool calls."
+                    "Query or append to the long-term history database with SELECT/INSERT/UPDATE statements. "
+                    "Use parameter binding instead of string concatenation. DELETE/DROP are forbidden."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "query": {
+                        "statement": {
                             "type": "string",
-                            "description": "Keywords describing the event to find."
+                            "description": "SQL statement (single SELECT/INSERT/UPDATE). Omit trailing semicolons."
                         },
-                        "session_id": {
-                            "type": "string",
-                            "description": "Restrict results to a single session id."
+                        "params": {
+                            "type": "array",
+                            "items": {"type": ["string", "number", "boolean", "null"]},
+                            "description": "Optional positional parameters bound in order (use ? placeholders)."
                         },
-                        "since": {
-                            "type": "string",
-                            "description": "ISO-8601 timestamp; include events at or after this time."
+                        "named_params": {
+                            "type": "object",
+                            "additionalProperties": {"type": ["string", "number", "boolean", "null"]},
+                            "description": "Optional named parameters (use :name placeholders). Cannot combine with params."
                         },
-                        "until": {
-                            "type": "string",
-                            "description": "ISO-8601 timestamp; include events at or before this time."
-                        },
-                        "tool": {
-                            "type": "string",
-                            "description": "Filter by tool name (run_command, http_request, etc.)."
-                        },
-                        "limit": {
+                        "max_rows": {
                             "type": "integer",
                             "minimum": 1,
-                            "maximum": 25,
-                            "description": "Return at most this many matches (default 5)."
+                            "maximum": 200,
+                            "description": "Row cap for SELECT queries (default 50)."
                         }
-                    }
+                    },
+                    "required": ["statement"],
+                    "additionalProperties": False
                 }
             }
         }
 
     def execute(
         self,
-        query: Optional[str] = None,
-        session_id: Optional[str] = None,
-        since: Optional[str] = None,
-        until: Optional[str] = None,
-        tool: Optional[str] = None,
-        limit: Optional[int] = None,
+        statement: str,
+        params: Optional[List[Any]] = None,
+        named_params: Optional[Dict[str, Any]] = None,
+        max_rows: Optional[int] = None,
     ) -> str:
+        if params and named_params:
+            return "Provide either positional params or named_params, not both."
+        bindings: Optional[Any] = named_params if named_params is not None else params
         try:
-            cap = int(limit) if limit is not None else 5
-        except (TypeError, ValueError):
-            cap = 5
-        try:
-            result = self._store.search(
-                query=query.strip() if query else None,
-                session_id=session_id.strip() if session_id else None,
-                since=since.strip() if since else None,
-                until=until.strip() if until else None,
-                tool=tool.strip() if tool else None,
-                limit=cap,
-            )
+            executor = self._executor_factory()
+            result = executor.execute(statement, params=bindings, max_rows=max_rows)
             return json.dumps(result, ensure_ascii=False, indent=2)
-        except HistoryStoreError as exc:
-            return f"History search failed: {exc}"
+        except HistorySQLExecutionError as exc:
+            return f"History SQL error: {exc}"
         except Exception as exc:
-            return f"Unexpected history search error: {exc}"
+            return f"Unexpected history SQL error: {exc}"
+
+
+class HistorySchemaTool(BaseTool):
+    """Expose history DB schema metadata (tables + columns)."""
+
+    def __init__(self):
+        self._executor_factory = get_history_sql_executor
+
+    @property
+    def name(self) -> str:
+        return "history_schema"
+
+    @property
+    def description(self) -> str:
+        return "Inspect the history database schema (list tables or describe a table's columns)."
+
+    @property
+    def usage_examples(self) -> List[str]:
+        return [
+            "history_schema()",
+            "history_schema(action=\"describe_table\", table=\"events\")",
+        ]
+
+    @property
+    def schema(self) -> Dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": "history_schema",
+                "description": (
+                    "Inspect history DB schema: list tables or describe columns before issuing history_sql queries."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["list_tables", "describe_table"],
+                            "description": "list_tables (default) returns table names; describe_table returns column metadata.",
+                        },
+                        "table": {
+                            "type": "string",
+                            "description": "Table name to describe when action is describe_table.",
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+        }
+
+    def execute(self, action: str = "list_tables", table: Optional[str] = None) -> str:
+        executor = self._executor_factory()
+        try:
+            if action == "describe_table":
+                if not table:
+                    raise HistorySQLExecutionError("table is required for describe_table")
+                columns = executor.describe_table(table)
+                return json.dumps({"table": table, "columns": columns}, ensure_ascii=False, indent=2)
+            tables = executor.list_tables()
+            return json.dumps({"tables": tables}, ensure_ascii=False, indent=2)
+        except HistorySQLExecutionError as exc:
+            return f"History schema error: {exc}"
+        except Exception as exc:
+            return f"Unexpected history schema error: {exc}"
 
 
 # ============================================================================

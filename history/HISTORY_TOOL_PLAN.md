@@ -7,10 +7,11 @@
 
 ## Solution Overview
 1. **Permanent Event Store** – Maintain a self-healing SQLite database (e.g., `logs/history/history.db`) that mirrors each finalized tool interaction: session id, timestamps, tool, query, summary, payload pointer.
-2. **`history_search` Tool** – A first-class tool in `tools.py` that lets the agent query the store by keywords, time ranges, session numbers, or tool names. Responses return structured snippets plus references back to the JSONL trace if deeper dives are needed.
+2. **`history_schema` Tool** – Lightweight helper that lists tables / describes columns so the agent knows the schema before querying.
+3. **`history_sql` Tool** – A first-class tool in `tools.py` that lets the agent run parameterized SELECT/INSERT/UPDATE statements over the store (DELETE/DROP blocked). Responses return structured rows plus references back to the JSONL trace if deeper dives are needed.
 3. **Agent Guidance & Memory Balance** – Update the MiniAgent system prompt so it knows:
    - use normal `tool_history` for short-term context,
-   - call `history_search` whenever the user references work that predates the live window (or when it senses gaps),
+   - call `history_sql` whenever the user references work that predates the live window (or when it senses gaps),
    - interpret results as authoritative historical memory.
    - Tighten short-term memory to ~10 interactions (configurable) now that deep history is available, keeping prompts lean without sacrificing recall.
 
@@ -20,26 +21,20 @@
   - Optional `attachments` table for paths to stored bodies (`http_traces`, etc.).
 - **Auto-bootstrap**: On launch we check schema integrity; if missing or corrupt we recreate and backfill from existing `logs/events/*.jsonl`.
 - **Ingestion**: Each successful tool call writes a row. Include derived keywords (normalized text) for fast LIKE queries.
-- **Search**: Support filters (`session_id`, `since`, `until`, `tool`, `text`). Apply LIMIT/OFFSET defaults to keep payloads small.
+- **Querying**: Encourage concise WHERE clauses (session/time/tool filters, keywords) so SELECT statements stay fast and bounded.
 
-## Tool Contract (`history_search`)
-- **Inputs**:
-  - `query` (string, optional) – keywords or natural language.
-  - `session_id` / `since` / `until` – narrow time ranges.
-  - `tool` or `category` hints (optional).
-  - `limit` (default 5) to bound results.
-- **Outputs**:
-  - `matches` array with `session_id`, `timestamp`, `tool`, `summary`, `detail_excerpt`, `source_ref`.
-  - `suggestions` (optional) if no hits found (e.g., “Try earlier session 168”).
-  - `stats` describing total hits vs returned.
+## Tool Contract (`history_sql`)
+- **Statements**: Single SELECT/INSERT/UPDATE with positional or named parameters; DELETE/DROP/ALTER rejected.
+- **Result caps**: SELECT responses limited (default 50, up to 200) to keep payloads bounded.
+- **Outputs**: Operation type, execution time, columns, rows (JSON objects), truncation flag, and rowcount/last_insert_rowid for writes.
 
 ## Agent Prompt Updates
 - Document in README (high-level) that extended history exists; place detailed guidance + examples in `docs/HISTORY_TOOL.md`.
 - **Prompt budget guardrails**: keep guidance compact (≤2 sentences) while encoding the rules below so payload stays lean.
 - System instructions snippet:
-  > If user intent references past work or you detect gaps beyond the last ~10 tool calls, invoke `history_search` with succinct keywords (and optional filters) before replying. Only include the relevant portions of results in your response.
+  > If user intent references past work or you detect gaps beyond the last ~10 tool calls, invoke `history_sql` with a concise SELECT (short keywords/WHERE clauses) before replying. Only include the relevant portions of results in your response.
 - Teach the agent explicit triggers, e.g., “user mentions ‘earlier session’,” “self is unsure whether prior step exists,” or “must cite precedent,” plus a reminder to avoid redundant history lookups when current context already covers the question.
-- Ensure `get_context.available_tools.all` includes `history_search` so tooling/CLI surfaces it.
+- Ensure `get_context.available_tools.all` includes `history_sql` so tooling/CLI surfaces it.
 
 ## Gains
 - **User**: Can reference weeks-old tasks; agent can cite precise past outputs, reducing repeated troubleshooting.
@@ -49,8 +44,8 @@
 ## Implementation Tasks (for beads)
 1. Create & bootstrap database (auto-validate schema, backfill JSONL).
 2. Record finalized tool interactions into both JSONL and DB.
-3. Implement `history_search` tool + tests.
-4. Update docs, `get_context`, and prompts so the tool is discoverable.
+3. Implement `history_schema` + `history_sql` tools with tests.
+4. Update docs, `get_context`, and prompts so both tools are discoverable.
 5. (Optional follow-up) Provide summarization helpers for very long result sets or topic clustering.
 
 This plan aligns with the user directive: the agent keeps lightweight working memory but can deliberately consult a permanent, searchable history whenever needed.

@@ -1,10 +1,6 @@
-import json
 from pathlib import Path
 
-import pytest
-
-from history_store import HistoryStore, _set_history_store_for_tests
-from tools import HistorySearchTool
+from history_store import HistoryStore
 
 
 def record_sample_events(store: HistoryStore):
@@ -56,18 +52,3 @@ def test_history_store_records_and_filters(tmp_path: Path):
     session_only = store.search(session_id="172")
     assert session_only["stats"]["returned"] == 1
     assert session_only["matches"][0]["tool"] == "run_command"
-
-
-def test_history_search_tool_returns_json(tmp_path: Path, monkeypatch):
-    db_path = tmp_path / "history.db"
-    store = HistoryStore(db_path)
-    record_sample_events(store)
-    _set_history_store_for_tests(store)
-    try:
-        tool = HistorySearchTool()
-        output = tool.execute(query="moon", limit=2)
-        payload = json.loads(output)
-        assert payload["matches"], "Expected matches in history search output"
-        assert payload["stats"]["limit"] == 2
-    finally:
-        _set_history_store_for_tests(None)

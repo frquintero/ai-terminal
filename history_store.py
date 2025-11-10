@@ -79,6 +79,22 @@ class HistoryStore:
 
         CREATE INDEX IF NOT EXISTS idx_events_type_time
             ON events(event_type, timestamp DESC);
+
+        CREATE TABLE IF NOT EXISTS agent_memories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            topic TEXT,
+            content TEXT NOT NULL,
+            tags TEXT,
+            metadata_json TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_agent_memories_session
+            ON agent_memories(session_id, created_at DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_agent_memories_topic
+            ON agent_memories(topic);
         """
         self._conn.executescript(schema_sql)
 
@@ -164,7 +180,7 @@ class HistoryStore:
         limit: int = 5,
     ) -> Dict[str, Any]:
         """Query stored events with optional filters."""
-        limit = max(1, min(limit, 25))
+        limit = max(1, min(limit, 100))
         filters: List[str] = []
         params: List[Any] = []
 

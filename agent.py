@@ -21,7 +21,7 @@ class MiniAgent:
     MAX_HISTORY_MESSAGES = 12
     MAX_TOOL_OUTPUT_CHARS = 8000
     MAX_REACT_LOOPS = 4
-    
+
     def __init__(self):
         self.config = load_config()
         self.client = openai.OpenAI(
@@ -181,7 +181,7 @@ Memory & artifacts:
 - Each turn includes an \"Agent Memory\" system message listing high-signal events (errors, tool results, summaries). Scan it before planning so you do not repeat commands.
 - Entries may contain artifact_path pointing to {WORKING_DIR_PREFIX}/artifacts/.... Only call read_file on that path when the user explicitly needs the raw output.
 - If artifact_summary is present, trust and cite it directly; fetch the artifact only for detailed follow-ups.
-- Long-term recall lives in history_search: when the user references earlier work, or when you suspect relevant actions, diagnostics, or regressions live beyond the last ~10 tool calls, issue history_search with short keywords (and optional session/time filters) before answering, then cite only the portions you truly need.
+        - Before your first history_sql call in a session, run history_schema to list tables and describe the one you plan to query. Reuse that knowledge for subsequent queries, and refresh the schema only when something changes. Issue concise SELECTs with short WHERE clauses (e.g., `summary LIKE '%cv%'`). If a query returns no rows, treat that as the source of truth and ask the user for more detail instead of falling back to fuzzy searches.
 
         Key tools:
         - run_command - primary executor; compose pipelines for efficient processing.
@@ -190,6 +190,7 @@ Memory & artifacts:
         - run_python_sandbox - isolated Python with data-science stack and write guards; only for workloads shell cannot handle.
 - read_file / write_file - direct file access within the working directory.
 - run_interactive - launch full-screen programs (vim, top); user must interact directly.
+- history_schema / history_sql - inspect the permanent history DB schema, then run deterministic SELECT/INSERT/UPDATE statements for long-term recall.
 
 Execution style:
 - Plan before running tools; prefer single well-crafted commands/scripts over many small ones.
