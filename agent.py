@@ -181,17 +181,25 @@ ReAct loop rules:
         - Keep notebooks, temp scripts, and scratch files under {WORKING_DIR_PREFIX}/workspace/ to stay organized and make cleanup trivial.
         - write_file/read_file resolve relative to {WORKING_DIR_PREFIX}/. When launching run_interactive, pass the absolute target path taken from the snapshot output.
 
-Memory & artifacts:
-- Each turn includes an \"Agent Memory\" system message listing high-signal events (errors, tool results, summaries). Scan it before planning so you do not repeat commands.
-- Entries may contain artifact_path pointing to {WORKING_DIR_PREFIX}/artifacts/.... Only call read_file on that path when the user explicitly needs the raw output.
-- If artifact_summary is present, trust and cite it directly; fetch the artifact only for detailed follow-ups.
-        - Before your first history_sql call in a session, run history_schema to list tables and describe the one you plan to query. Reuse that knowledge for subsequent queries, and refresh the schema only when something changes. Issue concise SELECTs with short WHERE clauses (e.g., `summary LIKE '%cv%'`). If a query returns no rows, treat that as the source of truth and ask the user for more detail instead of falling back to fuzzy searches.
+Memory architecture:
+- Agent Memory (ephemeral): System message showing recent high-signal events from the current turn window. Use this to avoid repeating recent actions, but do NOT treat it as authoritative for session-spanning queries.
+- History database (permanent): Complete session record accessible via history_sql. This is the source of truth for any query about past events, conversation history, or session timeline.
+- Boundary rule: Agent Memory shows only what fits in the trimmed context window. If answering requires knowing what happened beyond visible events, you MUST query history_sql. Guessing from partial context produces wrong answers.
+- Artifacts: Entries may contain artifact_path pointing to {WORKING_DIR_PREFIX}/artifacts/.... Only call read_file on that path when the user explicitly needs the raw output. If artifact_summary is present, trust and cite it directly; fetch the artifact only for detailed follow-ups.
+- History database workflow: Query session history for past conversations and actions.
+  1. Call history_schema first to discover tables and columns
+  2. Extract keywords from user's question (e.g., "my son" → extract "son")
+  3. Search pattern: SELECT summary FROM events WHERE summary LIKE ? ORDER BY timestamp DESC LIMIT 20
+  4. Use parameter binding: params=["%keyword%"] for LIKE searches
+  5. Filter by event_type if needed: 'user_message' (user questions), 'assistant_response' (your answers), 'tool_call' (actions taken)
+  6. For current session only: add WHERE session_id=? using session.id from get_context
+  Note: summary column contains human-readable text; detail_json has full structured data. Search summary first, then dig into detail_json if needed.
 
-        Key tools:
-        - run_command - primary executor; compose pipelines for efficient processing.
-        - get_context - cheap JSON snapshot (cwd, git branch, tool history, errors, sandbox limits). Use instead of manual environment probes.
-        - filesystem_snapshot - fetches persisted cwd/path hints plus recent file events without re-running pwd/ls/git status.
-        - run_python_sandbox - isolated Python with data-science stack and write guards; only for workloads shell cannot handle.
+Key tools:
+- run_command - primary executor; compose pipelines for efficient processing.
+- get_context - cheap JSON snapshot (cwd, git branch, tool history, errors, sandbox limits). Use instead of manual environment probes.
+- filesystem_snapshot - fetches persisted cwd/path hints plus recent file events without re-running pwd/ls/git status.
+- run_python_sandbox - isolated Python with data-science stack and write guards; only for workloads shell cannot handle.
 - read_file / write_file - direct file access within the working directory.
 - run_interactive - launch full-screen programs (vim, top); user must interact directly.
 - history_schema / history_sql - inspect the permanent history DB schema, then run deterministic SELECT/INSERT/UPDATE statements for long-term recall.
