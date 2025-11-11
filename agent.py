@@ -74,6 +74,9 @@ class MiniAgent:
         self._current_step_tool_outputs = []
         self._pending_tool_history = None
         
+        # Track current turn's user message to protect it from trimming
+        self._current_turn_user_msg = None
+        
         # Build system prompt with available tools
         system_prompt = self._build_system_prompt(system_context)
         self.message_history = [{"role": "system", "content": system_prompt}]
@@ -782,6 +785,7 @@ Execution style:
     def _trim_history(self):
         """
         Keep the system message plus the most recent N exchanges, truncating tool output if needed.
+        Always protects the current turn's user message from being trimmed.
         """
         if self._pending_tool_history:
             self._truncate_tool_outputs(self.message_history)
@@ -792,12 +796,30 @@ Execution style:
 
         system_msg = self.message_history[0]
         messages = [self._to_dict_message(m) for m in self.message_history[1:]]
+        
+        # Find the protected user message if it exists
+        protected_user_idx = -1
+        if self._current_turn_user_msg is not None:
+            for i, msg in enumerate(messages):
+                if msg is self._current_turn_user_msg or (
+                    msg.get('role') == 'user' and 
+                    msg.get('content') == self._current_turn_user_msg.get('content')
+                ):
+                    protected_user_idx = i
+                    break
+        
         max_other = max(self.MAX_HISTORY_MESSAGES - 1, 0)
 
         if max_other <= 0:
             recent: list[dict] = []
         else:
             recent = messages[-max_other:] if len(messages) > max_other else messages
+            
+            # If protected user message would be dropped, ensure it's included
+            if protected_user_idx != -1 and protected_user_idx < len(messages) - max_other:
+                # Include protected message plus the most recent messages
+                # Keep everything from protected message onwards
+                recent = messages[protected_user_idx:]
 
         self._truncate_tool_outputs(recent)
 
@@ -816,7 +838,10 @@ Execution style:
         # Log incoming user query
         self._log("USER_QUERY", user_input)
         
-        self.message_history.append({"role": "user", "content": user_input})
+        # Add user message and protect it for the entire turn
+        user_msg = {"role": "user", "content": user_input}
+        self.message_history.append(user_msg)
+        self._current_turn_user_msg = user_msg  # Protect from trimming during this turn
         self._record_user_event(user_input)
         
         # Trim history before API call to prevent token exhaustion
@@ -844,6 +869,7 @@ Execution style:
                     )
                 
                 if response.choices is None:
+                    self._current_turn_user_msg = None  # Cleanup on error
                     if hasattr(response, 'base_resp'):
                         base_resp = response.base_resp
                         if isinstance(base_resp, dict) and 'status_msg' in base_resp:
@@ -874,6 +900,7 @@ Execution style:
                 _SESSION_STATE.record_error("openai_api", str(e), error_info)
                 self._record_error_event("openai_api", str(e), error_info)
                 ui.error(f"API Error: {str(e)} (trace {trace_id})")
+                self._current_turn_user_msg = None  # Cleanup on error
                 return {"content": None, "error": str(e), "elapsed_time": ui.get_elapsed_time()}
             
             react_parse = self._parse_react_directives(assistant_message.content)
@@ -1077,10 +1104,12 @@ Execution style:
                 }
                 self.message_history.append(error_message)
                 ui.warning(error_message["content"])
+                self._current_turn_user_msg = None  # Cleanup on max steps
                 return {"content": error_message["content"], "error": None, "elapsed_time": ui.get_elapsed_time()}
         
         # Safety check: if we exit the loop without breaking, return error
         if step_count >= max_steps:
+            self._current_turn_user_msg = None  # Cleanup on max steps
             return {
                 "content": "Maximum processing steps reached without a final answer.",
                 "error": "max_steps_exceeded",
@@ -1135,6 +1164,9 @@ Execution style:
                 "tool_calls_this_turn": len(self._current_step_tool_outputs),
             },
         )
+        
+        # Clear protected user message at end of turn
+        self._current_turn_user_msg = None
         
         return {
             "content": content,
