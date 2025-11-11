@@ -3,9 +3,9 @@
 Permanent, on-demand memory for AI Terminal.
 
 ## Why it exists
-- Session `tool_history` is intentionally lean (last ~10 calls) to keep prompts cheap.
+- Conversational history is capped at a short working memory (3 exchanges) and session `tool_history` is intentionally lean (last ~10 calls) to keep prompts cheap, while every completed tool interaction is summarized (tool name, args preview, call_id, success, exit code, preview text) into the Agent Memory block so the prompt can discard it without losing context.
 - Users still expect the agent to recall earlier work (e.g., moon phase diagnostics from session 171).
-- JSONL logs already capture every event, so we index them into a searchable SQLite store and expose `history_sql` for precise SELECT/INSERT/UPDATE access. There is no fuzzy fallback—if a SQL query returns zero rows, that context truly isn’t recorded yet.
+- JSONL logs already capture every event, so we index them into a searchable SQLite store and expose `history_sql` for precise SELECT/INSERT/UPDATE access. There is no fuzzy fallback—if a SQL query returns zero rows, that context truly isn’t recorded yet, and you should consult the user for more detail or write a new memory instead.
 
 ## Storage & Resilience
 - Database path: `logs/history/history.db` (override via `HISTORY_DB_PATH`).
@@ -84,11 +84,11 @@ Example usage:
 ```
 
 ## Agent Guidance
-- Default to the live `tool_history` (last ~10 calls) for immediate continuity.
-- When the user references earlier work or you sense trimmed context, first run `history_schema` (list tables + describe `events`/`agent_memories`) unless you recently fetched the schema. Then issue `history_sql` with concise SELECT statements using the confirmed columns (e.g., `WHERE summary LIKE '%cv%' AND session_id = '177'`).
-- If a SQL query returns zero rows, treat that as authoritative—ask the user for more details or record a new memory instead of falling back to fuzzy guesses.
+- Default to the strict short working memory (system message + latest three exchanges) and rely on the Agent Memory block for any recently completed tool interactions; that block already summarizes tool name, args preview, call_id, exit code, and a trimmed output preview so the prompt stays small.
+- When the user references earlier work or you sense trimmed context, treat `history_sql` as the only memory tool and start by running `history_schema` (list tables + describe `events`/`agent_memories`) before your first SQL call in the session. Refresh the schema only when something changes in the DB so you always know the exact columns you are querying.
+- After `history_schema` confirms the layout, issue concise `history_sql` SELECT/INSERT/UPDATE statements with confirmed column names (e.g., `WHERE summary LIKE '%cv%' AND session_id = '177'`). If a query returns zero rows, treat that as authoritative—ask the user for more details or record a new memory instead of falling back to fuzzy guesses.
 - Only quote the portions of results needed for the current answer; cite artifacts if the user wants raw data.
-- Use `history_sql` for all deterministic recall, aggregations, or to append a structured memory (`INSERT INTO agent_memories(...) VALUES (...)`). DELETE/DROP/ALTER remain blocked at the tool boundary.
+- Use `history_sql` for all deterministic recall, aggregations, or to append a structured memory (`INSERT INTO agent_memories(...) VALUES (... )`). DELETE/DROP/ALTER remain blocked at the tool boundary.
 
 ## Developer Notes
 - The store is shared across the agent and tools via `history_store.get_history_store()`.

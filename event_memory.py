@@ -130,6 +130,10 @@ class EventRetrieverConfig:
 class EventRetriever:
     """Priority-aware selection of historical events for prompt injection."""
 
+    TOOL_OUTPUT_PREVIEW_LIMIT = 160
+    TOOL_ARGS_PREVIEW_LIMIT = 160
+    MESSAGE_PREVIEW_LIMIT = 220
+
     def __init__(self, config: Optional[EventRetrieverConfig] = None):
         self.config = config or EventRetrieverConfig()
 
@@ -190,8 +194,9 @@ class EventRetriever:
         lines: List[str] = []
         total_chars = 0
         for event in events:
-            payload = dict(event)
-            payload.pop("_seq", None)
+            payload = self._compact_event_for_memory(event)
+            if not payload:
+                continue
             line = json.dumps(payload, ensure_ascii=False)
             total_chars += len(line) + 1
             if total_chars > self.config.max_chars:
@@ -207,6 +212,86 @@ class EventRetriever:
             "explicitly needs the underlying data."
         )
         return header + "\n" + "\n".join(lines)
+
+    @staticmethod
+    def _truncate_text(value: Optional[str], limit: int) -> Optional[str]:
+        if not value:
+            return None
+        text = str(value)
+        if len(text) <= limit:
+            return text
+        ellipsis = "..." if limit >= 3 else ""
+        slice_len = max(limit - len(ellipsis), 0)
+        return text[:slice_len] + ellipsis
+
+    def _compact_event_for_memory(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        """Strip bulky fields so Agent Memory stays lightweight."""
+        event_type = event.get("type") or "unknown"
+        compact: Dict[str, Any] = {
+            "type": event_type,
+            "timestamp": event.get("timestamp"),
+        }
+
+        if event_type == "tool_result":
+            compact["tool"] = event.get("tool")
+            compact["success"] = event.get("success", True)
+            if event.get("exit_code") is not None:
+                compact["exit_code"] = event.get("exit_code")
+            if event.get("artifact_summary"):
+                compact["artifact_summary"] = event.get("artifact_summary")
+            if event.get("artifact_path"):
+                compact["artifact_path"] = event.get("artifact_path")
+            if event.get("tool_call_id"):
+                compact["tool_call_id"] = event.get("tool_call_id")
+            preview = (
+                event.get("artifact_summary")
+                or event.get("output_preview")
+            )
+            preview = self._truncate_text(preview, self.TOOL_OUTPUT_PREVIEW_LIMIT)
+            if preview:
+                compact["output_preview"] = preview
+        elif event_type == "tool_call":
+            compact["tool"] = event.get("tool")
+            args_preview = self._truncate_text(
+                event.get("args_preview"),
+                self.TOOL_ARGS_PREVIEW_LIMIT,
+            )
+            if args_preview:
+                compact["args_preview"] = args_preview
+            if event.get("tool_call_id"):
+                compact["tool_call_id"] = event.get("tool_call_id")
+        elif event_type in ("user_message", "assistant_response"):
+            preview = self._truncate_text(
+                event.get("content_preview"),
+                self.MESSAGE_PREVIEW_LIMIT,
+            )
+            if preview:
+                key = "content_preview"
+                compact[key] = preview
+        elif event_type == "error":
+            compact["source"] = event.get("source")
+            err = self._truncate_text(event.get("error"), self.MESSAGE_PREVIEW_LIMIT)
+            if err:
+                compact["error"] = err
+        elif event_type == "summary":
+            summary = self._truncate_text(
+                event.get("summary") or event.get("note"),
+                self.MESSAGE_PREVIEW_LIMIT,
+            )
+            if summary:
+                compact["summary"] = summary
+        else:
+            fallback = self._truncate_text(
+                event.get("content_preview")
+                or event.get("summary")
+                or event.get("output_preview"),
+                self.MESSAGE_PREVIEW_LIMIT,
+            )
+            if fallback:
+                compact["summary"] = fallback
+
+        # Remove empty/None values to keep payload tight
+        return {k: v for k, v in compact.items() if v not in (None, "")}
 
 
 def summarize_event_log(session_id: Optional[str]) -> Optional[Dict[str, Any]]:

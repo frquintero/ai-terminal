@@ -21,12 +21,14 @@ This is an **AI-powered Linux terminal** built with MiniMax M2 (or Kimi-2/custom
 - Resource-limited Python sandbox with write protection, network isolation
 - Optional namespace isolation via bubblewrap (reproducible rootfs)
 - Persistent filesystem awareness (auto-logged cwd, recent file events, absolute/relative path hints surfaced via the `filesystem_snapshot` tool and prompt injections)
-- Lean context tracking (10-call live history + history_sql-first permanent recall, recent errors, session stats)
+- Short working memory (3-turn live history + history_sql-first permanent recall, recent errors, session stats) that aggressively trims tool call dialogs from the prompt because every completed tool interaction is summarized in the Agent Memory block (tool name, args preview, call_id, outcome) while `history_sql` remains the single on-demand memory tool.
 - Structured history DB access via `history_schema` + `history_sql` so the agent can inspect tables, then run parameterized SELECT/INSERT/UPDATE statements (DELETE/DROP blocked) for precise recall and memory writing
 - Smart HTTP tooling: templated requests, jq selectors, TLS certificate telemetry, session-aware curl profiles
 - Raw output mode toggle for debugging
 
-**Extended Memory & Filesystem Context:** High-signal events stream into JSONL (`logs/events/<session>.jsonl`) and are mirrored into `logs/history/history.db`, powering the `history_sql` tool for authoritative SELECT/INSERT/UPDATE access. In parallel, shell executions and file reads/writes are captured by `filesystem_context.py` (SQLite + JSONL) so agents always know the true cwd, sandbox roots, and recent file mutations without rerunning `pwd/ls`. See `docs/HISTORY_TOOL.md` and `filesystem_context.py` for implementation notes.
+**Extended Memory & Filesystem Context:** High-signal events stream into JSONL (`logs/events/<session>.jsonl`) and are mirrored into `logs/history/history.db`, powering the `history_sql` tool for authoritative SELECT/INSERT/UPDATE access. Tool interactions are summarized (tool name, args preview, call_id, outcomes) and inserted into the Agent Memory block so the short working memory window can remain at 3 turns without losing context. In parallel, shell executions and file reads/writes are captured by `filesystem_context.py` (SQLite + JSONL) so agents always know the true cwd, sandbox roots, and recent file mutations without rerunning `pwd/ls`. See `docs/HISTORY_TOOL.md` and `filesystem_context.py` for implementation notes.
+
+_Always run `history_schema` before your first `history_sql` query so you know the tables/columns you’re targeting._
 
 **State**: v1.3, 88 closed beads (all issues completed), production-ready with comprehensive docs and test coverage.
 

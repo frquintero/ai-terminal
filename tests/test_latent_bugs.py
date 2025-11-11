@@ -75,111 +75,61 @@ def test_message_history_trimming():
     
     print("✓ Message history trimming works correctly")
 
-def test_trim_history_preserves_tool_calls():
-    """Ensure trimming keeps latest assistant tool_call anchor"""
+def test_flush_pending_tool_history_prunes_tool_entries():
+    """Pending tool calls should be removed once they are flushed"""
     from agent import MiniAgent
-    
+
     agent = MiniAgent()
-    agent.MAX_HISTORY_MESSAGES = 6  # Force aggressive trimming
-    
-    # Reset to only the system message for deterministic ordering
-    agent.message_history = [agent.message_history[0]]
-    
-    # Add some older chatter
-    for i in range(5):
-        agent.message_history.append({"role": "user", "content": f"before {i}"})
-    
-    tool_call_id = "call-123"
-    agent.message_history.append({
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [{
-            "id": tool_call_id,
-            "type": "function",
-            "function": {"name": "run_command", "arguments": "{}"}
-        }]
-    })
-    agent.message_history.append({
-        "role": "tool",
-        "content": "result",
-        "tool_call_id": tool_call_id
-    })
-    
-    # Add more chatter to push the tool_call out of the normal window
-    for i in range(10):
-        agent.message_history.append({"role": "user", "content": f"after {i}"})
-    
+    system_msg = agent.message_history[0]
+    assistant_entry = {"role": "assistant", "content": "", "tool_calls": [{"id": "call-abc", "type": "function", "function": {"name": "read_file", "arguments": "{\"file_path\": \"notes.txt\"}"}}]}
+    tool_message = {"role": "tool", "content": "output", "tool_call_id": "call-abc"}
+    agent.message_history.extend([assistant_entry, tool_message, {"role": "user", "content": "later"}])
+
+    agent._pending_tool_history = {
+        "tool_call_ids": {"call-abc"},
+    }
+    agent._flush_pending_tool_history()
+
+    assert assistant_entry not in agent.message_history, "Assistant tool call should be removed"
+    assert all(
+        msg.get("tool_call_id") != "call-abc"
+        for msg in agent.message_history
+        if msg.get("role") == "tool"
+    ), "Tool output should be removed"
+    assert agent.message_history[0] == system_msg, "System message must remain"
+
+    print("✓ Pending tool history is pruned after flush")
+
+def test_trim_history_skips_trim_when_pending():
+    """Do not drop tool anchors while pending"""
+    from agent import MiniAgent
+
+    agent = MiniAgent()
+    agent.MAX_HISTORY_MESSAGES = 3
+    system_msg = agent.message_history[0]
+    assistant_entry = {"role": "assistant", "content": "", "tool_calls": [{"id": "call-xyz", "type": "function", "function": {"name": "run_command", "arguments": "{\"command\": \"echo hi\"}"}}]}
+    tool_message = {"role": "tool", "content": "output", "tool_call_id": "call-xyz"}
+    agent.message_history = [
+        system_msg,
+        {"role": "user", "content": "first"},
+        assistant_entry,
+        tool_message,
+        {"role": "user", "content": "second"},
+    ]
+    agent._pending_tool_history = {"tool_call_ids": {"call-xyz"}}
+
     agent._trim_history()
-    
-    # The assistant message with tool_calls must still be present
+    assert len(agent.message_history) >= 4, "History should not trim while pending"
     assert any(
         msg.get("role") == "assistant" and msg.get("tool_calls")
         for msg in agent.message_history
-    ), "Latest assistant tool_call message should be preserved"
-    
-    print("✓ Trim history preserves pending tool calls")
+    ), "Assistant tool call must remain while pending"
 
-def test_trim_history_drops_orphan_tool_outputs():
-    """Ensure trimming removes tool outputs whose assistant anchor was trimmed"""
-    from agent import MiniAgent
-    
-    agent = MiniAgent()
-    agent.MAX_HISTORY_MESSAGES = 6
-    agent.message_history = [agent.message_history[0]]
-    
-    orphan_id = "call-dangling"
-    anchor_id = "call-latest"
-    agent.message_history.extend([
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [{
-                "id": orphan_id,
-                "type": "function",
-                "function": {"name": "run_command", "arguments": "{\"command\": \"echo hi\"}"}
-            }]
-        },
-        {
-            "role": "tool",
-            "content": "output",
-            "tool_call_id": orphan_id
-        },
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [{
-                "id": anchor_id,
-                "type": "function",
-                "function": {"name": "run_command", "arguments": "{\"command\": \"echo bye\"}"}
-            }]
-        },
-        {
-            "role": "tool",
-            "content": "fresh output",
-            "tool_call_id": anchor_id
-        },
-    ])
-    
-    # Add two more user messages so trimming slices between the first assistant/tool pair
-    for i in range(2):
-        agent.message_history.append({"role": "user", "content": f"later {i}"})
-    
+    agent._pending_tool_history = None
     agent._trim_history()
-    
-    trimmed_roles = [msg.get("role") for msg in agent.message_history]
-    assert trimmed_roles[1] != "tool", "Trimmed history should not start with orphan tool output"
-    assert all(
-        msg.get("tool_call_id") != orphan_id
-        for msg in agent.message_history
-        if msg.get("role") == "tool"
-    ), "Orphan tool output should be dropped"
-    assert any(
-        msg.get("tool_call_id") == anchor_id
-        for msg in agent.message_history
-        if msg.get("role") == "tool"
-    ), "Recent tool outputs should remain intact"
-    
-    print("✓ Trim history drops orphan tool outputs")
+    assert len(agent.message_history) <= agent.MAX_HISTORY_MESSAGES, "History should trim once pending cleared"
+
+    print("✓ Pending tool anchors survive trimming until flush")
 
 def test_sanitize_history_reports_tool_state():
     """Ensure sanitize helper normalizes messages and returns diagnostics"""
@@ -267,8 +217,8 @@ if __name__ == "__main__":
         test_interactive_detection_with_flags()
         test_non_interactive_allowed()
         test_message_history_trimming()
-        test_trim_history_preserves_tool_calls()
-        test_trim_history_drops_orphan_tool_outputs()
+        test_flush_pending_tool_history_prunes_tool_entries()
+        test_trim_history_skips_trim_when_pending()
         test_sanitize_history_reports_tool_state()
         test_tool_output_truncation()
         

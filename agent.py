@@ -18,7 +18,7 @@ from rich.live import Live
 
 class MiniAgent:
     # Configuration for message history management
-    MAX_HISTORY_MESSAGES = 12
+    MAX_HISTORY_MESSAGES = 3
     MAX_TOOL_OUTPUT_CHARS = 8000
     MAX_REACT_LOOPS = 4
 
@@ -72,6 +72,7 @@ class MiniAgent:
         
         # Tool output collector for deterministic rendering
         self._current_step_tool_outputs = []
+        self._pending_tool_history = None
         
         # Build system prompt with available tools
         system_prompt = self._build_system_prompt(system_context)
@@ -575,6 +576,36 @@ Execution style:
             "tool_messages": tool_messages
         }
 
+    def _mark_pending_tool_history(self, tool_call_ids: list[str]):
+        if not tool_call_ids:
+            return
+        self._pending_tool_history = {
+            "tool_call_ids": set(tool_call_ids),
+        }
+
+    def _flush_pending_tool_history(self):
+        pending = self._pending_tool_history
+        if not pending:
+            return
+        tool_call_ids = pending.get("tool_call_ids") or set()
+        remaining = []
+        for msg in self.message_history:
+            role = msg.get("role")
+            if role == "assistant" and msg.get("tool_calls"):
+                tc_ids = {
+                    (tc or {}).get("id")
+                    for tc in msg.get("tool_calls", [])
+                    if isinstance(tc, dict)
+                }
+                if tc_ids & tool_call_ids:
+                    continue
+            if role == "tool" and msg.get("tool_call_id") in tool_call_ids:
+                continue
+            remaining.append(msg)
+        self.message_history = remaining
+        self._pending_tool_history = None
+        self._trim_history()
+
     def _persist_openai_payload(self, trace_id: str, messages: Optional[List[dict]] = None):
         """Write the exact OpenAI payload to disk for later debugging."""
         try:
@@ -602,6 +633,71 @@ Execution style:
             self._log("OPENAI_REQUEST", json.dumps(summary, ensure_ascii=False))
         except Exception as e:
             self._log("TRACE_WARNING", f"Failed to log OpenAI trace {trace_id}: {e}")
+
+    def _persist_openai_response(self, trace_id: str, assistant_message, response=None):
+        """Save the raw assistant response for debugging."""
+        try:
+            trace_dir = Path("logs/openai_responses")
+            trace_dir.mkdir(parents=True, exist_ok=True)
+            response_payload = {
+                "trace_id": trace_id,
+                "assistant_message": self._to_dict_message(assistant_message),
+            }
+            if response is not None:
+                finish_reason = None
+                usage = None
+                try:
+                    finish_reason = (
+                        response.choices[0].finish_reason
+                        if response.choices and len(response.choices) > 0
+                        else None
+                    )
+                except Exception:
+                    finish_reason = None
+                try:
+                    usage_obj = getattr(response, "usage", None)
+                    if usage_obj:
+                        usage = {
+                            "prompt_tokens": getattr(usage_obj, "prompt_tokens", None),
+                            "completion_tokens": getattr(usage_obj, "completion_tokens", None),
+                            "total_tokens": getattr(usage_obj, "total_tokens", None),
+                        }
+                except Exception:
+                    usage = None
+                response_payload.update(
+                    {
+                        "id": getattr(response, "id", None),
+                        "model": getattr(response, "model", None),
+                        "created": getattr(response, "created", None),
+                        "finish_reason": finish_reason,
+                        "usage": usage,
+                    }
+                )
+            trace_path = trace_dir / f"{trace_id}.json"
+            trace_path.write_text(json.dumps(response_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            self._log("TRACE_WARNING", f"Failed to persist OpenAI response {trace_id}: {e}")
+
+    def _log_openai_response(self, trace_id: str, assistant_message, response=None):
+        """Log a compact summary of the assistant response."""
+        try:
+            tool_calls = getattr(assistant_message, "tool_calls", None) or []
+            finish_reason = None
+            if response is not None:
+                try:
+                    if response.choices and len(response.choices) > 0:
+                        finish_reason = getattr(response.choices[0], "finish_reason", None)
+                except Exception:
+                    finish_reason = None
+            summary = {
+                "trace_id": trace_id,
+                "assistant_preview": self._truncate_preview(getattr(assistant_message, "content", "") or "", 400),
+                "tool_calls": len(tool_calls),
+                "finish_reason": finish_reason,
+            }
+            self._log("OPENAI_RESPONSE", json.dumps(summary, ensure_ascii=False))
+        except Exception as e:
+            self._log("TRACE_WARNING", f"Failed to log OpenAI response summary {trace_id}: {e}")
 
     @staticmethod
     def _normalize_tool_calls(tool_calls: list) -> list[dict]:
@@ -672,78 +768,39 @@ Execution style:
         
         return out
     
+    def _truncate_tool_outputs(self, messages: list[dict]):
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("role") != "tool":
+                continue
+            content = msg.get("content", "")
+            if isinstance(content, str) and len(content) > self.MAX_TOOL_OUTPUT_CHARS:
+                extra = len(content) - self.MAX_TOOL_OUTPUT_CHARS
+                msg["content"] = content[:self.MAX_TOOL_OUTPUT_CHARS] + f"\n...[truncated {extra} chars]"
+
     def _trim_history(self):
         """
-        Simple history trimming: keep last N messages (plus system), truncate long tool outputs.
-        Ensures the most recent assistant message containing tool_calls is always retained so
-        subsequent tool observations have a valid tool_call_id anchor.
+        Keep the system message plus the most recent N exchanges, truncating tool output if needed.
         """
+        if self._pending_tool_history:
+            self._truncate_tool_outputs(self.message_history)
+            return
+
         if len(self.message_history) <= self.MAX_HISTORY_MESSAGES:
             return
-        
+
         system_msg = self.message_history[0]
         messages = [self._to_dict_message(m) for m in self.message_history[1:]]
         max_other = max(self.MAX_HISTORY_MESSAGES - 1, 0)
-        
-        if not messages:
-            self.message_history = [system_msg]
-            return
-        
-        if len(messages) <= max_other:
-            recent = messages
+
+        if max_other <= 0:
+            recent: list[dict] = []
         else:
-            start_idx = len(messages) - max_other if max_other > 0 else len(messages)
-            
-            # Protect the latest assistant tool_call message from being trimmed
-            protected_idx = None
-            for idx in range(len(messages) - 1, -1, -1):
-                msg = messages[idx]
-                if isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("tool_calls"):
-                    protected_idx = idx
-                    break
-            if protected_idx is not None and protected_idx < start_idx:
-                start_idx = protected_idx
-            
-            recent = messages[start_idx:]
-        
-        # Drop any tool messages that lost their originating assistant call.
-        # OpenAI rejects payloads that contain tool outputs without a preceding assistant/tool_call pair.
-        pruned_recent = []
-        seen_tool_calls: set[str] = set()
-        dropped_orphans = 0
-        for msg in recent:
-            if not isinstance(msg, dict):
-                msg = self._to_dict_message(msg)
-            role = msg.get("role")
-            if role == "assistant" and msg.get("tool_calls"):
-                for tc in msg["tool_calls"]:
-                    tc_id = tc.get("id")
-                    if tc_id:
-                        seen_tool_calls.add(tc_id)
-                pruned_recent.append(msg)
-            elif role == "tool":
-                tool_call_id = msg.get("tool_call_id")
-                if tool_call_id and tool_call_id in seen_tool_calls:
-                    pruned_recent.append(msg)
-                else:
-                    dropped_orphans += 1
-            else:
-                pruned_recent.append(msg)
-        if dropped_orphans:
-            self._log(
-                "HISTORY_TRIM_DROP",
-                f"Dropped {dropped_orphans} orphan tool messages during trim"
-            )
-        recent = pruned_recent
-        
-        # Truncate only extremely long tool outputs
-        for msg in recent:
-            if isinstance(msg, dict) and msg.get("role") == "tool":
-                content = msg.get("content", "")
-                if isinstance(content, str) and len(content) > self.MAX_TOOL_OUTPUT_CHARS:
-                    extra = len(content) - self.MAX_TOOL_OUTPUT_CHARS
-                    msg["content"] = content[:self.MAX_TOOL_OUTPUT_CHARS] + f"\n...[truncated {extra} chars]"
-        
+            recent = messages[-max_other:] if len(messages) > max_other else messages
+
+        self._truncate_tool_outputs(recent)
+
         self.message_history = [system_msg] + recent
 
     def process_input(self, user_input: str) -> dict:
@@ -800,8 +857,11 @@ Execution style:
                         return {"content": None, "error": "No base_resp found", "elapsed_time": ui.get_elapsed_time()}
 
                 assistant_message = response.choices[0].message
+                self._flush_pending_tool_history()
                 self._persist_openai_payload(trace_id, request_messages)
+                self._persist_openai_response(trace_id, assistant_message, response)
                 self._log_openai_trace(trace_id, tool_state, request_messages)
+                self._log_openai_response(trace_id, assistant_message, response)
                 
             except Exception as e:
                 self._persist_openai_payload(trace_id, request_messages)
@@ -847,6 +907,7 @@ Execution style:
                 assistant_entry = self._to_dict_message(assistant_message)
                 assistant_entry["tool_calls"] = normalized_tool_calls
                 self.message_history.append(assistant_entry)
+                tool_call_ids = [tc.get("id") for tc in normalized_tool_calls if tc.get("id")]
                 
                 # Show step indicator for multi-step operations
                 if len(normalized_tool_calls) > 1 or step_count > 0:
@@ -982,6 +1043,7 @@ Execution style:
 
                     executed_actions.append(self._summarize_action(tool_name, args))
 
+                self._mark_pending_tool_history(tool_call_ids)
                 self._append_plan_reminder(
                     react_parse.get("thought"),
                     executed_actions

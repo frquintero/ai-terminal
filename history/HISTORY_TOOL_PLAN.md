@@ -9,11 +9,12 @@
 1. **Permanent Event Store** – Maintain a self-healing SQLite database (e.g., `logs/history/history.db`) that mirrors each finalized tool interaction: session id, timestamps, tool, query, summary, payload pointer.
 2. **`history_schema` Tool** – Lightweight helper that lists tables / describes columns so the agent knows the schema before querying.
 3. **`history_sql` Tool** – A first-class tool in `tools.py` that lets the agent run parameterized SELECT/INSERT/UPDATE statements over the store (DELETE/DROP blocked). Responses return structured rows plus references back to the JSONL trace if deeper dives are needed.
-3. **Agent Guidance & Memory Balance** – Update the MiniAgent system prompt so it knows:
+4. **Agent Memory Summaries** – After each tool cycle we log tool_call/tool_result events with the `tool_call_id` so the Agent Memory block can report the tool name, args, outcome, and truncated output preview. With that summary in place, we drop the tool call/observation pair from the live prompt, keeping the working memory at three exchanges while letting `history_sql` provide deeper recall.
+5. **Agent Guidance & Memory Balance** – Update the MiniAgent system prompt so it knows:
    - use normal `tool_history` for short-term context,
    - call `history_sql` whenever the user references work that predates the live window (or when it senses gaps),
    - interpret results as authoritative historical memory.
-   - Tighten short-term memory to ~10 interactions (configurable) now that deep history is available, keeping prompts lean without sacrificing recall.
+   - Tighten short-term memory to ~3 interactions (configurable) now that deep history is available, keeping prompts ultra-lean without sacrificing recall.
 
 ## Data & Storage Design
 - **Database**: SQLite, auto-initialized on startup; tables:
