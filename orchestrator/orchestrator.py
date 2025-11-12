@@ -685,6 +685,19 @@ Success: {success}
             }
             step_results.append(step_result)
             
+            # Persist step output to database
+            output_preview = exec_result["result"][:1000] if exec_result["result"] else None
+            self.memory.save_step_output(
+                cycle_id=cycle_id,
+                step_id=step_id,
+                tool_name=step["tool_name"],
+                tool_args=tool_args,
+                success=exec_result["success"],
+                exit_code=exec_result.get("exit_code"),
+                output_preview=output_preview,
+                artifact_path=None  # TODO: Implement artifact storage for large outputs
+            )
+            
             if exec_result["success"]:
                 steps_completed += 1
             else:

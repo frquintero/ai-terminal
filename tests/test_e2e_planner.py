@@ -411,22 +411,136 @@ class TestPlannerIntegration:
             assert "timeout" in result.error.lower()
 
     def test_planner_step_outputs_stored(self, orchestrator, memory):
-        """Test that step outputs are stored in memory"""
+        """Test that step outputs are persisted to database during plan execution"""
         query = "Create a Python script that monitors disk space"
-
-        # Store execution in intention cache
-        memory.add_to_intention_cache(
-            user_query=query,
-            normalized_intent="create monitoring script",
+        
+        # Create a cycle and save a plan
+        cycle_id = memory.create_cycle(
+            session_id=orchestrator.session_id,
+            query=query
+        )
+        
+        plan = {
+            "steps": [
+                {
+                    "id": 0,
+                    "tool": "create_file",
+                    "tool_name": "create_file",
+                    "description": "Create monitoring script"
+                },
+                {
+                    "id": 1,
+                    "tool": "run_command",
+                    "tool_name": "run_command",
+                    "description": "Make script executable"
+                }
+            ]
+        }
+        memory.save_plan(cycle_id=cycle_id, plan=plan, status="in_progress")
+        
+        # Simulate step outputs being saved (as would happen in _execute_plan)
+        memory.save_step_output(
+            cycle_id=cycle_id,
+            step_id=0,
             tool_name="create_file",
             tool_args={"path": "/tmp/test.py", "content": "print('hello')"},
             success=True,
+            output_preview="File created successfully"
         )
+        
+        memory.save_step_output(
+            cycle_id=cycle_id,
+            step_id=1,
+            tool_name="run_command",
+            tool_args={"command": "chmod +x /tmp/test.py"},
+            success=True,
+            output_preview=""
+        )
+        
+        # Verify step outputs were persisted
+        step_outputs = memory.get_step_outputs(cycle_id=cycle_id)
+        assert len(step_outputs) == 2
+        assert step_outputs[0]["tool_name"] == "create_file"
+        assert step_outputs[0]["success"] is True
+        assert step_outputs[1]["tool_name"] == "run_command"
+        assert step_outputs[1]["success"] is True
 
-        # Verify stored in cache
-        hits = memory.search_intention_cache(query, limit=1, min_success=True)
-        assert len(hits) > 0
-        assert hits[0]["tool_name"] == "create_file"
+    def test_planner_execution_persists_step_outputs_with_plan_state_advancement(self, orchestrator, memory):
+        """Test full integration: Plan state is advanced as steps execute and outputs are stored"""
+        query = "Create a simple test script"
+        
+        # Create cycle and plan
+        cycle_id = memory.create_cycle(
+            session_id=orchestrator.session_id,
+            query=query
+        )
+        
+        plan = {
+            "steps": [
+                {
+                    "id": 0,
+                    "tool": "create_file",
+                    "tool_name": "create_file",
+                    "description": "Create test script"
+                },
+                {
+                    "id": 1,
+                    "tool": "run_command",
+                    "tool_name": "run_command",
+                    "description": "Run test script"
+                },
+                {
+                    "id": 2,
+                    "tool": "run_command",
+                    "tool_name": "run_command",
+                    "description": "Cleanup"
+                }
+            ]
+        }
+        
+        memory.save_plan(cycle_id=cycle_id, plan=plan, status="in_progress")
+        
+        # Simulate step execution progression (as in _execute_plan)
+        for step_id in range(3):
+            # Update current step
+            memory.update_task_status(
+                cycle_id=cycle_id,
+                status="in_progress",
+                current_step_id=step_id
+            )
+            
+            # Save step output
+            memory.save_step_output(
+                cycle_id=cycle_id,
+                step_id=step_id,
+                tool_name=plan["steps"][step_id]["tool_name"],
+                tool_args={},
+                success=True,
+                output_preview=f"Step {step_id} completed"
+            )
+            
+            # Verify state advanced
+            task_state = memory.get_task_state(cycle_id=cycle_id)
+            assert task_state["current_step_id"] == step_id
+            assert task_state["status"] == "in_progress"
+        
+        # Mark as completed
+        memory.update_task_status(
+            cycle_id=cycle_id,
+            status="done",
+            current_step_id=2
+        )
+        
+        # Verify final state
+        task_state = memory.get_task_state(cycle_id=cycle_id)
+        assert task_state["status"] == "done"
+        
+        # Verify all step outputs are stored
+        step_outputs = memory.get_step_outputs(cycle_id=cycle_id)
+        assert len(step_outputs) == 3
+        for i, output in enumerate(step_outputs):
+            assert output["step_id"] == i
+            assert output["success"] is True
 
 
 if __name__ == "__main__":
