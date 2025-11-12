@@ -110,14 +110,17 @@ class UIFormatter:
         if elapsed_time:
             title += f" ({elapsed_time:.2f}s)"
         
-        # Add cycle ID (short format) if available
+        # Add cycle ID as subtitle (bottom right of panel) if available
+        subtitle = None
         if cycle_id:
             short_id = cycle_id[:8] if len(cycle_id) > 8 else cycle_id
-            title += f" │ Cycle: {short_id}"
+            subtitle = f"Cycle: {short_id}"
         
         panel = Panel(
             content,
             title=title,
+            subtitle=subtitle,
+            subtitle_align="right",
             border_style="cyan",
             box=box.ROUNDED,
             padding=(1, 2)
