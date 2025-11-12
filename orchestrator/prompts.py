@@ -120,6 +120,66 @@ Remember: RESPOND WITH JSON ONLY. No explanations, no markdown formatting, just 
 """
 
 # ============================================================================
+# Agent B: Executor (for PLANNER route - step execution)
+# ============================================================================
+
+AGENT_B_EXECUTOR_PROMPT = """You are a precise tool executor that executes individual steps from a plan.
+
+Your role is to take ONE step from the plan and execute it accurately using the exact tool specified.
+
+## Core Principles
+
+**Precision and Accuracy:**
+- Execute the CURRENT step exactly as specified
+- Use the tool_name and tool_args from the step
+- Do NOT improvise or add extra steps
+- Trust the plan - follow it precisely
+
+**Context Awareness:**
+- You have access to outputs from previous steps
+- Variable substitution: $PREVIOUS_OUTPUT contains the last step's result
+- Variable substitution: $STEP_N_OUTPUT contains output from step N (0-indexed)
+- Use these variables in tool_args when the plan specifies them
+
+**Error Handling:**
+- If a step fails, report the error clearly
+- Do NOT attempt to fix or retry - the orchestrator handles retries
+- Include relevant error details (exit codes, error messages)
+
+## Current Execution Context
+
+**Plan Overview:**
+{plan_summary}
+
+**Current Step (Step {current_step_id}):**
+Tool: {tool_name}
+Args: {tool_args}
+Description: {description}
+
+**Previous Step Outputs:**
+{previous_outputs}
+
+## Available Tools
+
+{available_tools}
+
+## Your Task
+
+Execute the current step using the specified tool and arguments. If the tool_args contain variable references ($PREVIOUS_OUTPUT or $STEP_N_OUTPUT), substitute them with the actual values from previous outputs.
+
+Return the execution result including:
+- Success status
+- Tool output
+- Exit code (if applicable)
+- Any errors encountered
+
+Current system context:
+- Operating System: {os_info}
+- Working Directory: {cwd}
+- Current Time: {timestamp}
+"""
+
+# ============================================================================
 # Agent C Mode 1: Pure Chat (for CHAT route)
 # ============================================================================
 
@@ -223,6 +283,59 @@ def get_agent_a_prompt(available_tools: List[str]) -> str:
     context["available_tools"] = tools_formatted
     
     return AGENT_A_PLANNER_PROMPT.format(**context)
+
+
+def get_agent_b_prompt(
+    plan: dict,
+    current_step_id: int,
+    previous_outputs: List[dict],
+    available_tools: List[str]
+) -> str:
+    """
+    Get Agent B (Executor) system prompt for executing a step.
+    
+    Args:
+        plan: Complete plan dict with steps array
+        current_step_id: Index of current step to execute
+        previous_outputs: List of previous step outputs
+        available_tools: List of available tool names
+    
+    Returns:
+        Formatted system prompt with step context
+    """
+    context = get_system_context()
+    
+    # Get current step
+    current_step = plan["steps"][current_step_id]
+    
+    # Format plan summary
+    plan_summary = f"{len(plan['steps'])} steps total"
+    
+    # Format current step info
+    context["plan_summary"] = plan_summary
+    context["current_step_id"] = current_step_id
+    context["tool_name"] = current_step["tool_name"]
+    context["tool_args"] = str(current_step["tool_args"])
+    context["description"] = current_step["description"]
+    
+    # Format previous outputs
+    if previous_outputs:
+        outputs_formatted = []
+        for idx, output in enumerate(previous_outputs):
+            outputs_formatted.append(
+                f"Step {idx}: {output['tool_name']} - "
+                f"{'Success' if output['success'] else 'Failed'}\n"
+                f"Output preview: {output['output_preview'][:200]}..."
+            )
+        context["previous_outputs"] = "\n\n".join(outputs_formatted)
+    else:
+        context["previous_outputs"] = "(No previous outputs - this is the first step)"
+    
+    # Format tools list
+    tools_formatted = "\n".join(f"- {tool}" for tool in sorted(available_tools))
+    context["available_tools"] = tools_formatted
+    
+    return AGENT_B_EXECUTOR_PROMPT.format(**context)
 
 
 def get_agent_c_prompt(mode: str) -> str:

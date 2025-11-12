@@ -9,7 +9,7 @@ PLANNER route implemented in Phase 3
 import os
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from config import Config
 from llm_client import LLMClient
@@ -495,23 +495,252 @@ Success: {success}
             )
         
         # Save plan to task_state
-        self.memory.save_task_plan(
+        self.memory.save_plan(
             cycle_id=cycle_id,
             plan=plan,
-            status="pending"  # Phase 4 will change to "in_progress" when executing
+            status="in_progress"
         )
         
-        # Phase 3 MVP: Just return the plan, no execution yet
-        # Phase 4 will implement Agent B step execution loop
-        agent_c_response = f"Plan generated successfully with {len(plan['steps'])} steps. Execution will be implemented in Phase 4."
+        # Phase 4: Execute plan via Agent B step loop
+        try:
+            execution_result = self._execute_plan(cycle_id, query, plan)
+            
+            # Mark as completed
+            self.memory.update_task_status(
+                cycle_id=cycle_id,
+                status="done",
+                current_step_id=len(plan["steps"]) - 1
+            )
+            
+            # Call Agent C summarizer to generate final response
+            agent_c_response = self._call_agent_c_summarizer(
+                cycle_id=cycle_id,
+                query=query,
+                plan=plan,
+                execution_result=execution_result
+            )
+            
+            return OrchestratorResult(
+                cycle_id=cycle_id,
+                route="PLANNER",
+                query=query,
+                agent_c_response=agent_c_response,
+                execution_result=execution_result
+            )
         
-        return OrchestratorResult(
-            cycle_id=cycle_id,
-            route="PLANNER",
-            query=query,
-            agent_c_response=agent_c_response,
-            execution_result={"plan": plan, "status": "pending"}
+        except Exception as e:
+            # Mark as error
+            self.memory.update_task_status(
+                cycle_id=cycle_id,
+                status="error",
+                error_message=str(e)
+            )
+            
+            # Call Agent C to explain error
+            agent_c_response = self._call_agent_c_narrator(
+                cycle_id=cycle_id,
+                query=query,
+                tool_name="plan_executor",
+                tool_output=f"Execution failed: {str(e)}",
+                success=False
+            )
+            
+            return OrchestratorResult(
+                cycle_id=cycle_id,
+                route="PLANNER",
+                query=query,
+                agent_c_response=agent_c_response,
+                error=str(e)
+            )
+    
+    def _execute_plan(
+        self,
+        cycle_id: str,
+        query: str,
+        plan: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Execute plan steps sequentially via ToolExecutor.
+        
+        Args:
+            cycle_id: Cycle ID for logging
+            query: User's original query
+            plan: Validated plan dict
+        
+        Returns:
+            Dict with execution summary:
+                - steps_completed: Number of steps completed
+                - steps_failed: Number of steps failed
+                - step_results: List of step execution results
+                - success: Overall success flag
+        
+        Workflow:
+        1. For each step in plan:
+           a. Substitute variables in tool_args ($PREVIOUS_OUTPUT, $STEP_N_OUTPUT)
+           b. Execute via ToolExecutor
+           c. Log to step_outputs table
+           d. Update task_state current_step_id
+           e. On failure: record error, continue or abort based on severity
+        2. Return execution summary
+        """
+        step_results = []
+        steps_completed = 0
+        steps_failed = 0
+        
+        for step_id, step in enumerate(plan["steps"]):
+            # Update current step in task_state
+            self.memory.update_task_status(
+                cycle_id=cycle_id,
+                status="in_progress",
+                current_step_id=step_id
+            )
+            
+            # Substitute variables in tool_args
+            tool_args = self._substitute_step_variables(
+                step["tool_args"],
+                step_results
+            )
+            
+            # Execute step
+            exec_result = self.tool_executor.execute(
+                tool_name=step["tool_name"],
+                tool_args=tool_args,
+                cycle_id=cycle_id,
+                step_id=step_id
+            )
+            
+            # Record result
+            step_result = {
+                "step_id": step_id,
+                "tool_name": step["tool_name"],
+                "tool_args": tool_args,
+                "description": step["description"],
+                "success": exec_result["success"],
+                "output": exec_result["result"],
+                "exit_code": exec_result.get("exit_code"),
+                "error": exec_result.get("error")
+            }
+            step_results.append(step_result)
+            
+            if exec_result["success"]:
+                steps_completed += 1
+            else:
+                steps_failed += 1
+                # For now, continue execution even on failure
+                # Future: make this configurable per step or plan
+        
+        return {
+            "steps_completed": steps_completed,
+            "steps_failed": steps_failed,
+            "total_steps": len(plan["steps"]),
+            "step_results": step_results,
+            "success": steps_failed == 0
+        }
+    
+    def _substitute_step_variables(
+        self,
+        tool_args: Dict[str, Any],
+        previous_results: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Substitute variables in tool arguments.
+        
+        Supports:
+        - $PREVIOUS_OUTPUT: Output from last step
+        - $STEP_N_OUTPUT: Output from step N (0-indexed)
+        
+        Args:
+            tool_args: Tool arguments dict (may contain variable references)
+            previous_results: List of previous step results
+        
+        Returns:
+            Tool arguments with variables substituted
+        """
+        import json
+        import re
+        
+        # Convert to JSON string for easy substitution
+        args_str = json.dumps(tool_args)
+        
+        # Substitute $PREVIOUS_OUTPUT
+        if previous_results:
+            last_output = previous_results[-1]["output"]
+            args_str = args_str.replace("$PREVIOUS_OUTPUT", last_output)
+        
+        # Substitute $STEP_N_OUTPUT
+        for match in re.finditer(r'\$STEP_(\d+)_OUTPUT', args_str):
+            step_num = int(match.group(1))
+            if step_num < len(previous_results):
+                step_output = previous_results[step_num]["output"]
+                args_str = args_str.replace(match.group(0), step_output)
+        
+        # Parse back to dict
+        return json.loads(args_str)
+    
+    def _call_agent_c_summarizer(
+        self,
+        cycle_id: str,
+        query: str,
+        plan: Dict[str, Any],
+        execution_result: Dict[str, Any]
+    ) -> str:
+        """
+        Call Agent C in summarizer mode to present execution results.
+        
+        Args:
+            cycle_id: Cycle ID for logging
+            query: User's original query
+            plan: The plan that was executed
+            execution_result: Results from _execute_plan
+        
+        Returns:
+            Conversational summary from Agent C
+        """
+        # Build context for Agent C
+        context = f"""User Query: {query}
+
+Plan Executed: {len(plan['steps'])} steps
+- Steps completed: {execution_result['steps_completed']}
+- Steps failed: {execution_result['steps_failed']}
+- Overall success: {execution_result['success']}
+
+Step Results Summary:
+"""
+        
+        for result in execution_result["step_results"]:
+            status = "✓" if result["success"] else "✗"
+            context += f"\n{status} Step {result['step_id']}: {result['description']}"
+            if result["success"]:
+                # Include output preview
+                output_preview = result["output"][:200]
+                if len(result["output"]) > 200:
+                    output_preview += "..."
+                context += f"\n  Output: {output_preview}"
+            else:
+                context += f"\n  Error: {result['error']}"
+        
+        messages = [
+            {"role": "system", "content": get_agent_c_prompt("summarizer")},
+            {"role": "user", "content": context}
+        ]
+        
+        # Call LLM in Agent C role
+        llm_client = LLMClient(
+            config=self.config,
+            role="C",
+            memory=self.memory
         )
+        
+        llm_result = llm_client.call(
+            messages=messages,
+            cycle_id=cycle_id
+        )
+        
+        if llm_result["error"]:
+            # Fallback to raw summary if Agent C fails
+            return f"[Agent C summarizer failed: {llm_result['error']}]\n\n{context}"
+        
+        return llm_result["message"].content or context
     
     def _cache_execution(
         self,
