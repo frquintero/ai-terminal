@@ -30,7 +30,7 @@ def ensure_venv():
         sys.exit(1)
 
 # Metadata / CLI
-VERSION = "1.3"
+VERSION = "2.0"  # Multi-role orchestrator architecture
 
 def _print_help():
     help_text = f"""
@@ -118,7 +118,9 @@ handle_cli_flags(cli_args)
 # Ensure we're running in venv before importing dependencies
 ensure_venv()
 
-from agent import MiniAgent
+from config import load_config
+from orchestrator.orchestrator import Orchestrator
+from memory.api import Memory
 from ui_formatter import ui, console
 from rich.prompt import Prompt
 from tools import WORKING_DIR_PREFIX
@@ -152,7 +154,12 @@ def main():
 
     # Initialize components
     try:
-        agent = MiniAgent()
+        # Load configuration
+        config = load_config()
+        
+        # Initialize memory and orchestrator
+        memory = Memory()
+        orchestrator = Orchestrator(config, memory)
         
         # Link AI shell to UI for dynamic prompt
         from tools import TOOLS, RunCommandTool
@@ -180,15 +187,16 @@ def main():
                     ui.print_goodbye()
                     break
 
-                # Process input through AI agent
-                result = agent.process_input(user_input)
+                # Process input through orchestrator
+                result = orchestrator.handle_query(user_input)
 
                 # Display response
-                if result["error"]:
-                    # Error was already displayed by agent
-                    pass
-                elif result["content"]:
-                    ui.ai_response(result["content"], result.get("elapsed_time"))
+                if result.error:
+                    ui.error(f"Error: {result.error}")
+                elif result.agent_c_response:
+                    # Convert latency from ms to seconds for UI
+                    elapsed_time = result.latency_ms / 1000.0 if result.latency_ms else None
+                    ui.ai_response(result.agent_c_response, elapsed_time)
                 
                 console.print()  # Empty line for readability
 
@@ -203,7 +211,12 @@ def main():
                 console.print("[dim]Please try again.[/dim]\n")
 
     finally:
-        # Cleanup - close the persistent shell in RunCommandTool
+        # Cleanup - close orchestrator and persistent shell
+        try:
+            orchestrator.close()
+        except Exception:
+            pass
+        
         try:
             from tools import TOOLS, RunCommandTool
             run_command = TOOLS.get("run_command")

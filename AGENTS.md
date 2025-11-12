@@ -1,3 +1,25 @@
+## Architecture: v2.0 Multi-Role Orchestrator
+
+**Version 2.0** implements the Triple Agent Architecture from `DOUBLE_AGENT_ARCHITECTURE.md`:
+
+- **ONE LLM** (OpenAI-compatible) called in THREE different roles via system prompts:
+  - **Agent A (Planner)**: Strategic task decomposer (generates high-level plan with tool_name + intent)
+  - **Agent B (Command Engineer)**: Precise tool executor (generates tool_args for each step)
+  - **Agent C (Chat/Narrator/Summarizer)**: Universal narrator for all routes
+
+- **Intelligent Router** with 4-level precedence:
+  1. SHELL - Fast-path for shell commands (130+ regex patterns)
+  2. CACHED - FTS5 intention cache (zero LLM calls)
+  3. CHAT - Simple informational queries
+  4. PLANNER - Complex multi-step tasks
+
+- **Unified Memory System**: Single SQLite database (`logs/orchestrator.db`) with cycle-based tracking
+- **Core Philosophy**: "Shell-First" + "In AI We Trust" (full system access, minimal guardrails)
+
+See `orchestrator/`, `router/`, `memory/` modules and `DOUBLE_AGENT_ARCHITECTURE.md` for details.
+
+---
+
 ## Issue Tracking with bd (beads)
 
 **IMPORTANT**: This project uses **bd (beads)** for ALL issue tracking. Do NOT use markdown TODOs, task lists, or other tracking methods.
