@@ -92,20 +92,28 @@ class Orchestrator:
         self.tool_executor = ToolExecutor(memory=self.memory)
         self.context_builder = SystemContextBuilder(memory=self.memory)
         
+        # Detect system state once at startup (cached for session)
+        self.system_state = self.context_builder.detect_system_state()
+        
         # Session management
         self.session_id = self._initialize_session()
     
     def _initialize_session(self) -> str:
-        """Create or retrieve session"""
+        """Create or retrieve session with detected system state"""
         # For MVP, create new session each time
         # Phase 3+ will support session persistence
         session_id = str(uuid.uuid4())
         
-        system_info = {
-            "os": os.uname().sysname if hasattr(os, 'uname') else "Unknown",
-            "cwd": os.getcwd(),
-            "model": self.config.model
-        }
+        # Use detected system state (already cached in self.system_state)
+        # Fallback to basic info if detection failed
+        if self.system_state:
+            system_info = self.system_state
+        else:
+            system_info = {
+                "os": os.uname().sysname if hasattr(os, 'uname') else "Unknown",
+                "cwd": os.getcwd(),
+                "model": self.config.model
+            }
         
         self.memory.create_session(
             session_id=session_id,
