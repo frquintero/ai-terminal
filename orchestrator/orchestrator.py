@@ -14,7 +14,8 @@ from typing import Any, Dict, List, Optional
 from config import Config
 from llm_client import LLMClient
 from memory.api import Memory
-from orchestrator.prompts import get_agent_a_prompt, get_agent_c_prompt
+from orchestrator.prompts import get_agent_a_prompt, get_agent_b_prompt, get_agent_c_prompt
+from tools import get_tool_schemas
 from orchestrator.plan_validator import PlanValidator, PlanValidationError
 from router.router import Router
 from router.rules import Route
@@ -560,12 +561,12 @@ Success: {success}
         plan: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Execute plan steps sequentially via ToolExecutor.
+        Execute plan steps sequentially via Agent B → ToolExecutor.
         
         Args:
             cycle_id: Cycle ID for logging
             query: User's original query
-            plan: Validated plan dict
+            plan: Validated plan dict (from Agent A with tool_name + intent)
         
         Returns:
             Dict with execution summary:
@@ -576,16 +577,20 @@ Success: {success}
         
         Workflow:
         1. For each step in plan:
-           a. Substitute variables in tool_args ($PREVIOUS_OUTPUT, $STEP_N_OUTPUT)
-           b. Execute via ToolExecutor
-           c. Log to step_outputs table
-           d. Update task_state current_step_id
-           e. On failure: record error, continue or abort based on severity
+           a. Call Agent B (LLM) to generate precise tool_args from intent
+           b. Substitute variables in tool_args ($PREVIOUS_OUTPUT, $STEP_N_OUTPUT)
+           c. Execute via ToolExecutor
+           d. Log to step_outputs table
+           e. Update task_state current_step_id
+           f. On failure: record error, continue
         2. Return execution summary
         """
         step_results = []
         steps_completed = 0
         steps_failed = 0
+        
+        # Get tool schemas for Agent B
+        tool_schemas = get_tool_schemas()
         
         for step_id, step in enumerate(plan["steps"]):
             # Update current step in task_state
@@ -595,9 +600,36 @@ Success: {success}
                 current_step_id=step_id
             )
             
+            # Call Agent B to generate precise tool_args
+            agent_b_result = self._call_agent_b(
+                cycle_id=cycle_id,
+                plan=plan,
+                step_id=step_id,
+                previous_results=step_results,
+                tool_schemas=tool_schemas
+            )
+            
+            if not agent_b_result["success"]:
+                # Agent B failed to generate valid tool_args
+                step_result = {
+                    "step_id": step_id,
+                    "tool_name": step["tool_name"],
+                    "tool_args": {},
+                    "description": step["description"],
+                    "success": False,
+                    "output": "",
+                    "exit_code": None,
+                    "error": agent_b_result["error"]
+                }
+                step_results.append(step_result)
+                steps_failed += 1
+                continue
+            
+            tool_args = agent_b_result["tool_args"]
+            
             # Substitute variables in tool_args
             tool_args = self._substitute_step_variables(
-                step["tool_args"],
+                tool_args,
                 step_results
             )
             
@@ -636,6 +668,141 @@ Success: {success}
             "step_results": step_results,
             "success": steps_failed == 0
         }
+    
+    def _call_agent_b(
+        self,
+        cycle_id: str,
+        plan: Dict[str, Any],
+        step_id: int,
+        previous_results: List[Dict[str, Any]],
+        tool_schemas: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Call Agent B to generate precise tool_args for a step.
+        
+        Args:
+            cycle_id: Cycle ID for logging
+            plan: Complete plan from Agent A
+            step_id: Current step index
+            previous_results: Results from previous steps
+            tool_schemas: Tool schemas for Agent B
+        
+        Returns:
+            Dict with:
+                - success: bool
+                - tool_args: dict (if successful)
+                - error: str (if failed)
+        """
+        import json
+        
+        # Build Agent B prompt
+        system_prompt = get_agent_b_prompt(
+            plan=plan,
+            current_step_id=step_id,
+            previous_outputs=previous_results,
+            tool_schemas=tool_schemas
+        )
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Generate tool_args for step {step_id}"}
+        ]
+        
+        # Call LLM in Agent B role
+        llm_client = LLMClient(
+            config=self.config,
+            role="B",
+            memory=self.memory
+        )
+        
+        llm_result = llm_client.call(
+            messages=messages,
+            cycle_id=cycle_id
+        )
+        
+        if llm_result["error"]:
+            return {
+                "success": False,
+                "tool_args": {},
+                "error": f"Agent B LLM call failed: {llm_result['error']}"
+            }
+        
+        # Parse Agent B response
+        response_text = llm_result["message"].content or ""
+        
+        try:
+            # Try to extract JSON from response
+            response_json = self._parse_agent_b_json(response_text)
+            
+            if "tool_args" not in response_json:
+                return {
+                    "success": False,
+                    "tool_args": {},
+                    "error": "Agent B response missing 'tool_args' field"
+                }
+            
+            return {
+                "success": True,
+                "tool_args": response_json["tool_args"],
+                "error": None
+            }
+        
+        except json.JSONDecodeError as e:
+            return {
+                "success": False,
+                "tool_args": {},
+                "error": f"Agent B returned invalid JSON: {e}"
+            }
+    
+    def _parse_agent_b_json(self, text: str) -> Dict[str, Any]:
+        """
+        Parse JSON from Agent B response (similar to plan validator).
+        
+        Args:
+            text: Raw Agent B response
+        
+        Returns:
+            Parsed JSON dict
+        
+        Raises:
+            json.JSONDecodeError: If JSON cannot be parsed
+        """
+        import json
+        
+        # Strip whitespace
+        text = text.strip()
+        
+        # Try direct parse first
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+        
+        # Try extracting from markdown code block
+        if "```json" in text:
+            start = text.find("```json") + 7
+            end = text.find("```", start)
+            if end != -1:
+                json_text = text[start:end].strip()
+                return json.loads(json_text)
+        
+        # Try extracting from generic code block
+        if "```" in text:
+            start = text.find("```") + 3
+            end = text.find("```", start)
+            if end != -1:
+                json_text = text[start:end].strip()
+                return json.loads(json_text)
+        
+        # Try finding first { and last }
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            json_text = text[start:end+1]
+            return json.loads(json_text)
+        
+        # Give up
+        return json.loads(text)
     
     def _substitute_step_variables(
         self,

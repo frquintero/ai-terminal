@@ -25,15 +25,15 @@ PLAN_SCHEMA = {
             "maxItems": 10,  # Conservative limit - most tasks should be <5 steps
             "items": {
                 "type": "object",
-                "required": ["tool_name", "tool_args", "description"],
+                "required": ["tool_name", "intent", "description"],
                 "properties": {
                     "tool_name": {
                         "type": "string",
                         "description": "Tool to execute (must exist in TOOLS registry)"
                     },
-                    "tool_args": {
-                        "type": "object",
-                        "description": "Arguments to pass to the tool"
+                    "intent": {
+                        "type": "string",
+                        "description": "High-level intent describing what to accomplish with this tool"
                     },
                     "description": {
                         "type": "string",
@@ -92,22 +92,24 @@ def validate_plan_structure(plan: Any) -> Tuple[bool, Optional[str]]:
         # Required fields
         if "tool_name" not in step:
             return False, f"Step {idx} missing required 'tool_name'"
-        if "tool_args" not in step:
-            return False, f"Step {idx} missing required 'tool_args'"
+        if "intent" not in step:
+            return False, f"Step {idx} missing required 'intent'"
         if "description" not in step:
             return False, f"Step {idx} missing required 'description'"
         
         # Type checks
         if not isinstance(step["tool_name"], str):
             return False, f"Step {idx} 'tool_name' must be string"
-        if not isinstance(step["tool_args"], dict):
-            return False, f"Step {idx} 'tool_args' must be object"
+        if not isinstance(step["intent"], str):
+            return False, f"Step {idx} 'intent' must be string"
         if not isinstance(step["description"], str):
             return False, f"Step {idx} 'description' must be string"
         
         # Non-empty checks
         if not step["tool_name"].strip():
             return False, f"Step {idx} 'tool_name' cannot be empty"
+        if not step["intent"].strip():
+            return False, f"Step {idx} 'intent' cannot be empty"
         if not step["description"].strip():
             return False, f"Step {idx} 'description' cannot be empty"
     
@@ -144,7 +146,7 @@ EXAMPLE_PLAN_SIMPLE = {
     "steps": [
         {
             "tool_name": "run_command",
-            "tool_args": {"command": "ls -la /tmp"},
+            "intent": "list all files and directories in /tmp with details",
             "description": "List files in /tmp directory"
         }
     ]
@@ -154,20 +156,17 @@ EXAMPLE_PLAN_MULTI_STEP = {
     "steps": [
         {
             "tool_name": "run_command",
-            "tool_args": {"command": "find . -name '*.py' | head -10"},
+            "intent": "find Python files in current directory, limit to first 10 results",
             "description": "Find first 10 Python files"
         },
         {
             "tool_name": "run_command",
-            "tool_args": {"command": "wc -l *.py"},
+            "intent": "count lines in all Python files",
             "description": "Count lines in Python files"
         },
         {
             "tool_name": "write_file",
-            "tool_args": {
-                "file_path": "report.txt",
-                "content": "Analysis complete"
-            },
+            "intent": "create a file named report.txt with text 'Analysis complete'",
             "description": "Write summary report"
         }
     ]
@@ -185,7 +184,7 @@ EXAMPLE_PLAN_INVALID_MISSING_FIELD = {
     "steps": [
         {
             "tool_name": "run_command",
-            "description": "Missing tool_args field"
+            "description": "Missing intent field"
         }
     ]
 }

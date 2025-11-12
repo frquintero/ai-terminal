@@ -179,7 +179,7 @@ class PlanValidator:
         if "missing required" in error.lower():
             return (
                 f"Plan validation failed: {error}\n\n"
-                "Each step must have: tool_name (string), tool_args (object), description (string)."
+                "Each step must have: tool_name (string), intent (string), description (string)."
             )
         
         if "Unknown tool" in error:
@@ -204,5 +204,5 @@ class PlanValidator:
         return (
             f"Plan validation failed: {error}\n\n"
             "Please generate a valid JSON plan following the schema:\n"
-            '{"steps": [{"tool_name": "...", "tool_args": {...}, "description": "..."}]}'
+            '{"steps": [{"tool_name": "...", "intent": "...", "description": "..."}]}'
         )

@@ -13,9 +13,9 @@ from typing import List
 # Agent A: Planner (for PLANNER route)
 # ============================================================================
 
-AGENT_A_PLANNER_PROMPT = """You are a strategic task planner that decomposes complex requests into executable steps.
+AGENT_A_PLANNER_PROMPT = """You are a strategic task planner that decomposes complex requests into high-level executable steps.
 
-Your role is to analyze the user's request and generate a structured JSON plan with concrete tool calls.
+Your role is to analyze the user's request and generate a structured JSON plan with HIGH-LEVEL intents. You do NOT generate precise tool arguments - that's Agent B's job.
 
 ## Core Principles
 
@@ -30,15 +30,21 @@ Your role is to analyze the user's request and generate a structured JSON plan w
 - Interactive commands (vim, top) work via TTY forwarding
 - Trust the user knows what they want
 
+**Strategic vs Tactical:**
+- You focus on WHAT to do (strategy)
+- Agent B will figure out HOW to do it (tactics/precise arguments)
+- Your job: Break down the goal into logical steps
+- Agent B's job: Generate precise tool arguments for each step
+
 ## Planning Guidelines
 
 1. **Analyze the request**: What is the user trying to achieve?
 2. **Consider shell-first**: Can this be done in one shell command?
 3. **Tool selection**: Choose the most efficient tools
 4. **Keep it simple**: Fewer steps = faster execution
-5. **Description clarity**: Each step must have clear purpose
+5. **Intent clarity**: Describe WHAT to accomplish, not HOW
 
-## Available Tools
+## Available Tools (names only)
 
 {available_tools}
 
@@ -50,7 +56,7 @@ You MUST respond with ONLY valid JSON in this exact structure:
   "steps": [
     {{
       "tool_name": "run_command",
-      "tool_args": {{"command": "ls -la"}},
+      "intent": "list all files in current directory with details",
       "description": "List files in current directory"
     }}
   ]
@@ -59,8 +65,8 @@ You MUST respond with ONLY valid JSON in this exact structure:
 ## Constraints
 
 - Maximum 10 steps (prefer <5)
-- Each step must have: tool_name, tool_args, description
-- tool_args must be an object matching the tool's schema
+- Each step must have: tool_name, intent, description
+- intent: High-level description of what to accomplish (Agent B will generate precise arguments)
 - Use tools from the available list ONLY
 - Descriptions should be brief (1 sentence)
 
@@ -73,7 +79,7 @@ Plan:
   "steps": [
     {{
       "tool_name": "run_command",
-      "tool_args": {{"command": "find . -name '*.py' -exec wc -l {{}} + | tail -1"}},
+      "intent": "find all Python files recursively and count total lines of code",
       "description": "Find all Python files and count total lines"
     }}
   ]
@@ -86,12 +92,12 @@ Plan:
   "steps": [
     {{
       "tool_name": "run_command",
-      "tool_args": {{"command": "grep ERROR /var/log/app.log | tail -100"}},
+      "intent": "extract ERROR lines from /var/log/app.log, limit to last 100 entries",
       "description": "Extract last 100 error lines from log"
     }},
     {{
       "tool_name": "write_file",
-      "tool_args": {{"file_path": "errors.txt", "content": "$PREVIOUS_OUTPUT"}},
+      "intent": "save the extracted errors to a file named errors.txt",
       "description": "Save errors to file"
     }}
   ]
@@ -104,7 +110,7 @@ Plan:
   "steps": [
     {{
       "tool_name": "run_command",
-      "tool_args": {{"command": "curl -s https://api.example.com/data | jq -r '.[].name' | sort | uniq -c"}},
+      "intent": "download JSON from https://api.example.com/data, extract 'name' field, count unique occurrences",
       "description": "Download API data, extract names, count unique values"
     }}
   ]
@@ -123,28 +129,29 @@ Remember: RESPOND WITH JSON ONLY. No explanations, no markdown formatting, just 
 # Agent B: Executor (for PLANNER route - step execution)
 # ============================================================================
 
-AGENT_B_EXECUTOR_PROMPT = """You are a precise tool executor that executes individual steps from a plan.
+AGENT_B_EXECUTOR_PROMPT = """You are a precise command engineer that generates exact tool arguments for plan steps.
 
-Your role is to take ONE step from the plan and execute it accurately using the exact tool specified.
+Your role is to take ONE high-level step from Agent A's plan and generate PRECISE tool arguments to accomplish that step's intent.
 
 ## Core Principles
 
 **Precision and Accuracy:**
-- Execute the CURRENT step exactly as specified
-- Use the tool_name and tool_args from the step
-- Do NOT improvise or add extra steps
-- Trust the plan - follow it precisely
+- Agent A provided WHAT to do (the intent)
+- You generate HOW to do it (precise tool_name and tool_args)
+- Follow tool schemas exactly
+- Generate valid, executable arguments
 
 **Context Awareness:**
 - You have access to outputs from previous steps
-- Variable substitution: $PREVIOUS_OUTPUT contains the last step's result
-- Variable substitution: $STEP_N_OUTPUT contains output from step N (0-indexed)
-- Use these variables in tool_args when the plan specifies them
+- Variable substitution available:
+  * $PREVIOUS_OUTPUT: Output from last step
+  * $STEP_N_OUTPUT: Output from step N (0-indexed)
+- Use these in tool_args when needed to chain steps
 
-**Error Handling:**
-- If a step fails, report the error clearly
-- Do NOT attempt to fix or retry - the orchestrator handles retries
-- Include relevant error details (exit codes, error messages)
+**Tool Schema Compliance:**
+- Each tool has a specific schema defining required/optional arguments
+- Generate tool_args that match the schema exactly
+- Refer to the tool schemas below for correct argument structure
 
 ## Current Execution Context
 
@@ -153,25 +160,32 @@ Your role is to take ONE step from the plan and execute it accurately using the 
 
 **Current Step (Step {current_step_id}):**
 Tool: {tool_name}
-Args: {tool_args}
+Intent: {intent}
 Description: {description}
 
 **Previous Step Outputs:**
 {previous_outputs}
 
-## Available Tools
+## Available Tool Schemas
 
-{available_tools}
+{tool_schemas}
 
 ## Your Task
 
-Execute the current step using the specified tool and arguments. If the tool_args contain variable references ($PREVIOUS_OUTPUT or $STEP_N_OUTPUT), substitute them with the actual values from previous outputs.
+Generate precise tool arguments (tool_args) for the current step based on:
+1. The tool_name specified by Agent A
+2. The high-level intent describing what to accomplish
+3. The tool schema showing required/optional arguments
+4. Previous step outputs (if needed for variable substitution)
 
-Return the execution result including:
-- Success status
-- Tool output
-- Exit code (if applicable)
-- Any errors encountered
+## Output Format
+
+Respond with ONLY valid JSON in this structure:
+
+{{
+  "tool_name": "run_command",
+  "tool_args": {{"command": "ls -la"}}
+}}
 
 Current system context:
 - Operating System: {os_info}
@@ -289,20 +303,22 @@ def get_agent_b_prompt(
     plan: dict,
     current_step_id: int,
     previous_outputs: List[dict],
-    available_tools: List[str]
+    tool_schemas: List[dict]
 ) -> str:
     """
-    Get Agent B (Executor) system prompt for executing a step.
+    Get Agent B (Executor) system prompt for generating tool arguments.
     
     Args:
         plan: Complete plan dict with steps array
         current_step_id: Index of current step to execute
         previous_outputs: List of previous step outputs
-        available_tools: List of available tool names
+        tool_schemas: List of tool schema dicts from get_tool_schemas()
     
     Returns:
-        Formatted system prompt with step context
+        Formatted system prompt with step context and tool schemas
     """
+    import json
+    
     context = get_system_context()
     
     # Get current step
@@ -315,7 +331,7 @@ def get_agent_b_prompt(
     context["plan_summary"] = plan_summary
     context["current_step_id"] = current_step_id
     context["tool_name"] = current_step["tool_name"]
-    context["tool_args"] = str(current_step["tool_args"])
+    context["intent"] = current_step["intent"]
     context["description"] = current_step["description"]
     
     # Format previous outputs
@@ -325,15 +341,14 @@ def get_agent_b_prompt(
             outputs_formatted.append(
                 f"Step {idx}: {output['tool_name']} - "
                 f"{'Success' if output['success'] else 'Failed'}\n"
-                f"Output preview: {output['output_preview'][:200]}..."
+                f"Output preview: {output.get('output', '')[:200]}..."
             )
         context["previous_outputs"] = "\n\n".join(outputs_formatted)
     else:
         context["previous_outputs"] = "(No previous outputs - this is the first step)"
     
-    # Format tools list
-    tools_formatted = "\n".join(f"- {tool}" for tool in sorted(available_tools))
-    context["available_tools"] = tools_formatted
+    # Format tool schemas as JSON
+    context["tool_schemas"] = json.dumps(tool_schemas, indent=2)
     
     return AGENT_B_EXECUTOR_PROMPT.format(**context)
 
