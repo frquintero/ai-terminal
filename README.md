@@ -378,6 +378,7 @@ All architecture and development docs are in the `history/` directory:
 | **[DEBUGGING_V2.md](history/DEBUGGING_V2.md)** | **Developers**: Layer-by-layer debugging strategies, LLM tracing, performance profiling, database forensics |
 | **[ROUTER_CLI_COMPLETE.md](history/ROUTER_CLI_COMPLETE.md)** | Router CLI tool docs: manual testing, batch classification, interactive REPL, JSON output |
 | **[PHASE_5_COMPLETION.md](history/PHASE_5_COMPLETION.md)** | Phase 5 final: telemetry integration, docs complete, 65/65 tests passing, production ready |
+| **[PRODUCTION_READY_FIXES.md](history/PRODUCTION_READY_FIXES.md)** | **Production**: Oracle review fixes - config env names, metrics wiring, safe variable substitution, cross-platform venv, legacy tool gating |
 
 ### Quick Navigation
 
@@ -386,6 +387,7 @@ All architecture and development docs are in the `history/` directory:
 - **Tune Router**: [ROUTER_TUNING_GUIDE.md](history/ROUTER_TUNING_GUIDE.md)
 - **Debug Issues**: [DEBUGGING_V2.md](history/DEBUGGING_V2.md)
 - **Test Router Manually**: [ROUTER_CLI_COMPLETE.md](history/ROUTER_CLI_COMPLETE.md)
+- **Production Deployment**: [PRODUCTION_READY_FIXES.md](history/PRODUCTION_READY_FIXES.md)
 - **Track Progress**: [PHASE_2_SIGN_OFF.md](history/PHASE_2_SIGN_OFF.md), [PHASE_5_COMPLETION.md](history/PHASE_5_COMPLETION.md)
 
 ---
