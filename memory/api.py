@@ -623,3 +623,42 @@ class Memory:
             })
         
         return results
+    
+    def get_recent_completed_plan(
+        self, 
+        session_id: str, 
+        last_n: int = 1
+    ) -> List[Dict[str, Any]]:
+        """
+        Get recently completed plans for Planner→Chat handoff context.
+        
+        Args:
+            session_id: Session ID
+            last_n: Number of recent completed plans to retrieve
+        
+        Returns:
+            List of completed plans with query, status, and timestamp
+        """
+        cursor = self.conn.execute(
+            """
+            SELECT ts.id, rd.query_text, ts.status, ts.created_at, ts.updated_at
+            FROM task_state ts
+            JOIN router_decisions rd ON ts.cycle_id = rd.cycle_id
+            WHERE rd.session_id = ? AND ts.status = 'done'
+            ORDER BY ts.updated_at DESC
+            LIMIT ?
+            """,
+            (session_id, last_n)
+        )
+        
+        results = []
+        for row in cursor.fetchall():
+            results.append({
+                "id": row[0],
+                "query": row[1],
+                "status": row[2],
+                "created_at": row[3],
+                "updated_at": row[4]
+            })
+        
+        return results

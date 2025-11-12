@@ -190,9 +190,10 @@ class Orchestrator:
         
         Workflow:
         1. Retrieve last 10 chat exchanges from Memory
-        2. Call LLM in Agent C (chat mode)
-        3. Log to chat_history
-        4. Return result
+        2. Check for recent task completions (Planner→Chat handoff)
+        3. Call LLM in Agent C (chat mode) with full context
+        4. Log to chat_history
+        5. Return result
         """
         # Get chat history for context
         chat_history = self.memory.get_chat_history(
@@ -204,6 +205,18 @@ class Orchestrator:
         messages = [
             {"role": "system", "content": get_agent_c_prompt("chat")}
         ]
+        
+        # Planner→Chat handoff: Include summary of most recent completed task if available
+        recent_plan = self.memory.get_recent_completed_plan(
+            session_id=self.session_id,
+            last_n=1
+        )
+        
+        if recent_plan and len(recent_plan) > 0:
+            # Add task summary to context
+            task_summary = recent_plan[0]
+            task_context = f"\n[Context: User recently completed a task: {task_summary.get('query', 'task')}']\n"
+            messages[0]["content"] = messages[0]["content"] + task_context
         
         # Add previous chat context
         for exchange in chat_history:
@@ -410,11 +423,12 @@ Success: {success}
         PLANNER route: Multi-step task planning via Agent A
         
         Workflow:
-        1. Call Agent A (Planner) to generate JSON plan
-        2. Validate plan structure and tools
-        3. Retry if validation fails (up to MAX_PLAN_RETRIES)
-        4. Save plan to task_state table
-        5. Return stub result (Phase 4 will implement execution)
+        1. Retrieve Chat→Planner context (last 3 chat interactions)
+        2. Call Agent A (Planner) to generate JSON plan with context
+        3. Validate plan structure and tools
+        4. Retry if validation fails (up to MAX_PLAN_RETRIES)
+        5. Save plan to task_state table
+        6. Return stub result (Phase 4 will implement execution)
         
         Target: <2s plan generation, 95%+ valid JSON on first attempt
         """
@@ -427,10 +441,27 @@ Success: {success}
         # Build Agent A prompt
         system_prompt = get_agent_a_prompt(available_tools)
         
+        # Build context for Agent A: include last 3 chat interactions (Chat→Planner handoff)
+        context_msg = query
+        
+        chat_history = self.memory.get_chat_history(
+            session_id=self.session_id,
+            last_n=3
+        )
+        
+        if chat_history:
+            # Prepend previous chat context to help Agent A understand user intent
+            context_lines = ["Context from previous conversation:"]
+            for exchange in chat_history:
+                context_lines.append(f"User: {exchange['user_query']}")
+                context_lines.append(f"Assistant: {exchange['agent_response']}")
+            context_lines.append(f"\nNow, the user asks: {query}")
+            context_msg = "\n".join(context_lines)
+        
         # Retry loop
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": query}
+            {"role": "user", "content": context_msg}
         ]
         
         plan = None
