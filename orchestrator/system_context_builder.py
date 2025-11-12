@@ -190,8 +190,9 @@ Each tool has a specific purpose - use the right tool for each step."""
         elif role == 'B':
             # Agent B: Include brief descriptions (for execution)
             tools_desc = []
-            for name, schema in tool_registry.items():
-                desc = schema.get('description', 'No description')[:60]  # Truncate
+            for name, tool_obj in tool_registry.items():
+                # Get description from tool object's schema
+                desc = tool_obj.schema.get('description', 'No description')[:60]  # Truncate
                 tools_desc.append(f"- {name}: {desc}")
             
             return f"""**Available Tools ({len(tool_names)}):**

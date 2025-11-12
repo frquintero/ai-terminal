@@ -16,6 +16,7 @@ from llm_client import LLMClient
 from memory.api import Memory
 from orchestrator.prompts import get_agent_a_prompt, get_agent_b_prompt, get_agent_c_prompt
 from orchestrator.metrics import RouteMetrics, StepMetrics, LLMMetrics, get_metrics
+from orchestrator.system_context_builder import SystemContextBuilder
 from tools import get_tool_schemas
 from orchestrator.plan_validator import PlanValidator, PlanValidationError
 from router.router import Router
@@ -89,6 +90,7 @@ class Orchestrator:
         # Initialize components
         self.router = Router(self.memory)
         self.tool_executor = ToolExecutor(memory=self.memory)
+        self.context_builder = SystemContextBuilder(memory=self.memory)
         
         # Session management
         self.session_id = self._initialize_session()
@@ -212,9 +214,17 @@ class Orchestrator:
             last_n=10
         )
         
+        # Build system context for Agent C
+        system_context = self.context_builder.build_for_role(
+            role="C",
+            session_id=self.session_id,
+            tool_registry=TOOLS,
+            shell_cwd=os.getcwd()
+        )
+        
         # Build messages for Agent C
         messages = [
-            {"role": "system", "content": get_agent_c_prompt("chat")}
+            {"role": "system", "content": system_context + "\n\n" + get_agent_c_prompt("chat")}
         ]
         
         # Planner→Chat handoff: Include summary of most recent completed task if available
@@ -414,8 +424,16 @@ Success: {success}
         
         context += f"\nTool Output:\n{tool_output}"
         
+        # Build system context for Agent C
+        system_context = self.context_builder.build_for_role(
+            role="C",
+            session_id=self.session_id,
+            tool_registry=TOOLS,
+            shell_cwd=os.getcwd()
+        )
+        
         messages = [
-            {"role": "system", "content": get_agent_c_prompt("narrator")},
+            {"role": "system", "content": system_context + "\n\n" + get_agent_c_prompt("narrator")},
             {"role": "user", "content": context}
         ]
         
@@ -457,8 +475,16 @@ Success: {success}
         # Create validator
         validator = PlanValidator(available_tools=available_tools)
         
+        # Build system context for Agent A
+        system_context = self.context_builder.build_for_role(
+            role="A",
+            session_id=self.session_id,
+            tool_registry=TOOLS,
+            shell_cwd=os.getcwd()
+        )
+        
         # Build Agent A prompt
-        system_prompt = get_agent_a_prompt(available_tools)
+        system_prompt = system_context + "\n\n" + get_agent_a_prompt(available_tools)
         
         # Build context for Agent A: include last 3 chat interactions (Chat→Planner handoff)
         context_msg = query
@@ -770,8 +796,16 @@ Success: {success}
         """
         import json
         
+        # Build system context for Agent B
+        system_context = self.context_builder.build_for_role(
+            role="B",
+            session_id=self.session_id,
+            tool_registry=TOOLS,
+            shell_cwd=os.getcwd()
+        )
+        
         # Build Agent B prompt
-        system_prompt = get_agent_b_prompt(
+        system_prompt = system_context + "\n\n" + get_agent_b_prompt(
             plan=plan,
             current_step_id=step_id,
             previous_outputs=previous_results,
@@ -978,8 +1012,16 @@ Step Results Summary:
             else:
                 context += f"\n  Error: {result['error']}"
         
+        # Build system context for Agent C
+        system_context = self.context_builder.build_for_role(
+            role="C",
+            session_id=self.session_id,
+            tool_registry=TOOLS,
+            shell_cwd=os.getcwd()
+        )
+        
         messages = [
-            {"role": "system", "content": get_agent_c_prompt("summarizer")},
+            {"role": "system", "content": system_context + "\n\n" + get_agent_c_prompt("summarizer")},
             {"role": "user", "content": context}
         ]
         
