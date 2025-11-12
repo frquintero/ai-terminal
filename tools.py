@@ -3246,6 +3246,278 @@ class FilesystemSnapshotTool(BaseTool):
 
 
 # ============================================================================
+# Search DB Tool (Context v2 - Institutional Memory)
+# ============================================================================
+
+class SearchDBTool(BaseTool):
+    """
+    FAST institutional memory search via FTS5.
+    
+    Searches orchestrator database for:
+    - chat_history: Previous conversations (user queries + agent responses)
+    - step_outputs: Past tool executions (commands, outputs, results)
+    - interactions: LLM interaction logs (all agent roles)
+    - intention_cache: Cached query→tool mappings
+    
+    Performance: <50ms typical, uses SQLite FTS5 indexes.
+    Safety: Enum-based targets, no SQL injection possible.
+    """
+    
+    @property
+    def name(self) -> str:
+        return "search_db"
+    
+    @property
+    def description(self) -> str:
+        return "Search institutional memory (chat history, tool executions, LLM logs) via FTS5. Fast (<50ms), safe enum targets."
+    
+    @property
+    def schema(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "enum": ["chat_history", "step_outputs", "interactions", "intention_cache"],
+                        "description": "Which memory table to search. chat_history=conversations, step_outputs=tool executions, interactions=LLM logs, intention_cache=cached queries"
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Search query (natural language). Use quotes for exact phrases: '\"exact match\"'. Supports wildcards: 'term*', boolean: 'term1 AND term2'"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results to return (default 10, max 50)",
+                        "default": 10,
+                        "minimum": 1,
+                        "maximum": 50
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Optional: Filter results to specific session (default: all sessions)"
+                    },
+                    "tool_filter": {
+                        "type": "string",
+                        "description": "Optional: For step_outputs only - filter by tool name (e.g., 'run_command')"
+                    },
+                    "role_filter": {
+                        "type": "string",
+                        "enum": ["A", "B", "C"],
+                        "description": "Optional: For interactions only - filter by agent role"
+                    },
+                    "success_only": {
+                        "type": "boolean",
+                        "description": "Optional: For step_outputs only - return only successful executions (default false)",
+                        "default": False
+                    }
+                },
+                "required": ["target", "query"]
+            }
+        }
+    
+    def execute(
+        self,
+        target: str,
+        query: str,
+        limit: int = 10,
+        session_id: Optional[str] = None,
+        tool_filter: Optional[str] = None,
+        role_filter: Optional[str] = None,
+        success_only: bool = False
+    ) -> str:
+        """
+        Execute institutional memory search.
+        
+        Returns:
+            Formatted search results with metadata (JSON or human-readable)
+        """
+        # Import Memory here to avoid circular dependencies
+        from memory.api import Memory
+        
+        # Validate inputs
+        valid_targets = ["chat_history", "step_outputs", "interactions", "intention_cache"]
+        if target not in valid_targets:
+            return json.dumps({
+                "success": False,
+                "error": f"Invalid target '{target}'. Must be one of: {', '.join(valid_targets)}"
+            }, indent=2)
+        
+        if not query or not query.strip():
+            return json.dumps({
+                "success": False,
+                "error": "Query cannot be empty"
+            }, indent=2)
+        
+        # Enforce limit bounds
+        limit = max(1, min(50, limit))
+        
+        try:
+            # Initialize memory (reuses existing connection if available)
+            memory = Memory()
+            
+            # Route to appropriate search method
+            start_time = time.time()
+            
+            if target == "chat_history":
+                results = memory.search_chat_history(
+                    query=query,
+                    session_id=session_id,
+                    limit=limit
+                )
+                formatted = self._format_chat_results(results)
+            
+            elif target == "step_outputs":
+                results = memory.search_step_outputs(
+                    query=query,
+                    session_id=session_id,
+                    tool_name=tool_filter,
+                    success_only=success_only,
+                    limit=limit
+                )
+                formatted = self._format_step_results(results)
+            
+            elif target == "interactions":
+                results = memory.search_interactions(
+                    query=query,
+                    role=role_filter,
+                    session_id=session_id,
+                    limit=limit
+                )
+                formatted = self._format_interaction_results(results)
+            
+            elif target == "intention_cache":
+                # Direct FTS5 query for intention cache
+                results = self._search_intention_cache(memory, query, limit)
+                formatted = self._format_intention_results(results)
+            
+            else:
+                return json.dumps({"success": False, "error": f"Unknown target: {target}"}, indent=2)
+            
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            
+            # Return success response
+            return json.dumps({
+                "success": True,
+                "target": target,
+                "query": query,
+                "result_count": len(results),
+                "latency_ms": elapsed_ms,
+                "results": formatted
+            }, indent=2)
+        
+        except Exception as e:
+            return json.dumps({
+                "success": False,
+                "error": f"Search failed: {str(e)}"
+            }, indent=2)
+    
+    def _search_intention_cache(self, memory: Any, query: str, limit: int) -> List[Dict[str, Any]]:
+        """Search intention_cache table using FTS5."""
+        sanitized = memory._sanitize_fts5_query(query)
+        
+        sql = """
+            SELECT 
+                ic.id,
+                ic.user_query_text,
+                ic.normalized_intent,
+                ic.tool_name,
+                ic.tool_args_json,
+                ic.usage_count,
+                ic.last_used_at,
+                fts.rank
+            FROM intention_cache_fts fts
+            JOIN intention_cache ic ON ic.id = fts.rowid
+            WHERE intention_cache_fts MATCH ?
+            ORDER BY fts.rank, ic.usage_count DESC
+            LIMIT ?
+        """
+        
+        cursor = memory.conn.execute(sql, (sanitized, limit))
+        
+        results = []
+        for row in cursor.fetchall():
+            results.append({
+                "id": row[0],
+                "user_query": row[1],
+                "intent": row[2],
+                "tool_name": row[3],
+                "tool_args": json.loads(row[4]) if row[4] else {},
+                "usage_count": row[5],
+                "last_used": row[6],
+                "rank": row[7]
+            })
+        
+        return results
+    
+    def _format_chat_results(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Format chat_history results for agent consumption."""
+        formatted = []
+        for r in results:
+            formatted.append({
+                "id": r["id"],
+                "session_id": r["session_id"],
+                "timestamp": r["timestamp"],
+                "user_query": r["user_query"],
+                "agent_response": r["agent_response"][:200] + "..." if len(r["agent_response"]) > 200 else r["agent_response"],
+                "relevance_rank": r["rank"]
+            })
+        return formatted
+    
+    def _format_step_results(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Format step_outputs results for agent consumption."""
+        formatted = []
+        for r in results:
+            formatted.append({
+                "id": r["id"],
+                "cycle_id": r["cycle_id"],
+                "step_id": r["step_id"],
+                "tool_name": r["tool_name"],
+                "tool_args": r["tool_args"],
+                "success": r["success"],
+                "exit_code": r.get("exit_code"),
+                "output_preview": r["output_preview"][:150] + "..." if r["output_preview"] and len(r["output_preview"]) > 150 else r["output_preview"],
+                "created_at": r["created_at"],
+                "relevance_rank": r["rank"]
+            })
+        return formatted
+    
+    def _format_interaction_results(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Format interactions results for agent consumption."""
+        formatted = []
+        for r in results:
+            formatted.append({
+                "id": r["id"],
+                "cycle_id": r["cycle_id"],
+                "role": r["role"],
+                "prompt_preview": r["prompt_preview"][:100] + "..." if r["prompt_preview"] and len(r["prompt_preview"]) > 100 else r["prompt_preview"],
+                "response_preview": r["response_preview"][:100] + "..." if r["response_preview"] and len(r["response_preview"]) > 100 else r["response_preview"],
+                "latency_ms": r["latency_ms"],
+                "created_at": r["created_at"],
+                "relevance_rank": r["rank"]
+            })
+        return formatted
+    
+    def _format_intention_results(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Format intention_cache results for agent consumption."""
+        formatted = []
+        for r in results:
+            formatted.append({
+                "id": r["id"],
+                "user_query": r["user_query"],
+                "normalized_intent": r["intent"],
+                "tool_name": r["tool_name"],
+                "tool_args": r["tool_args"],
+                "usage_count": r["usage_count"],
+                "last_used": r["last_used"],
+                "relevance_rank": r["rank"]
+            })
+        return formatted
+
+
+# ============================================================================
 # Tool Registry - Automatic Discovery
 # ============================================================================
 
