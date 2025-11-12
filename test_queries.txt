@@ -1,0 +1,35 @@
+# Router CLI Test Queries
+# Format: One query per line
+
+# CHAT queries (informational)
+What is Docker?
+Explain REST APIs
+How does HTTPS work?
+Tell me about Kubernetes
+Define machine learning
+Why do we use containers?
+
+# SHELL queries (direct commands)
+ls -la
+cat README.md
+grep TODO *.py
+find . -name "*.txt" -type f
+git status
+docker ps
+python --version
+npm list
+
+# Interactive commands (should detect as interactive)
+vim main.py
+nano config.py
+less README.md
+top
+htop
+man ls
+
+# PLANNER queries (complex tasks)
+Create a backup script that runs daily
+Find all large files and compress them
+Monitor disk usage and alert when full
+Set up a monitoring dashboard for system metrics
+Extract all JSON from API and save to database
