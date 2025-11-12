@@ -685,3 +685,275 @@ class Memory:
             })
         
         return results
+    
+    # ========== Institutional Memory Search (Context v2) ==========
+    
+    def search_chat_history(
+        self,
+        query: str,
+        session_id: Optional[str] = None,
+        limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """
+        Full-text search across chat history using FTS5.
+        
+        Searches both user queries and agent responses.
+        Use double quotes for exact phrase matches: '"exact phrase"'
+        Use wildcards for partial matches: 'term*'
+        Use boolean operators: 'term1 AND term2', 'term1 OR term2'
+        
+        Args:
+            query: FTS5 search query (natural language or with operators)
+            session_id: Optional session filter (None = search all sessions)
+            limit: Maximum results to return (default 10)
+        
+        Returns:
+            List of matching chat exchanges with metadata
+            
+        Example:
+            results = memory.search_chat_history('Python examples')
+            for r in results:
+                print(f"Q: {r['user_query']}")
+                print(f"A: {r['agent_response']}")
+        """
+        # Sanitize query for FTS5 - wrap in quotes if it contains special chars
+        sanitized_query = self._sanitize_fts5_query(query)
+        
+        sql = """
+            SELECT 
+                ch.id,
+                ch.session_id,
+                ch.cycle_id,
+                ch.user_query,
+                ch.agent_response,
+                ch.timestamp,
+                fts.rank
+            FROM chat_history_fts fts
+            JOIN chat_history ch ON ch.id = fts.rowid
+        """
+        
+        params = []
+        conditions = [f"chat_history_fts MATCH ?"]
+        params.append(sanitized_query)
+        
+        if session_id:
+            conditions.append("ch.session_id = ?")
+            params.append(session_id)
+        
+        sql += " WHERE " + " AND ".join(conditions)
+        sql += " ORDER BY fts.rank, ch.timestamp DESC LIMIT ?"
+        params.append(limit)
+        
+        cursor = self.conn.execute(sql, tuple(params))
+        
+        results = []
+        for row in cursor.fetchall():
+            results.append({
+                "id": row[0],
+                "session_id": row[1],
+                "cycle_id": row[2],
+                "user_query": row[3],
+                "agent_response": row[4],
+                "timestamp": row[5],
+                "rank": row[6]
+            })
+        
+        return results
+    
+    def search_step_outputs(
+        self,
+        query: str,
+        session_id: Optional[str] = None,
+        tool_name: Optional[str] = None,
+        success_only: bool = False,
+        limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """
+        Full-text search across step execution outputs using FTS5.
+        
+        Searches tool names, arguments, and output previews.
+        Useful for finding how similar tasks were solved before.
+        
+        Args:
+            query: FTS5 search query (natural language or with operators)
+            session_id: Optional session filter
+            tool_name: Optional tool filter (e.g., 'run_command')
+            success_only: Only return successful executions (default False)
+            limit: Maximum results to return (default 10)
+        
+        Returns:
+            List of matching step outputs with metadata
+            
+        Example:
+            results = memory.search_step_outputs('list files', success_only=True)
+            for r in results:
+                print(f"Tool: {r['tool_name']}")
+                print(f"Output: {r['output_preview'][:100]}")
+        """
+        sanitized_query = self._sanitize_fts5_query(query)
+        
+        sql = """
+            SELECT 
+                so.id,
+                so.cycle_id,
+                so.step_id,
+                so.tool_name,
+                so.tool_args_json,
+                so.success,
+                so.exit_code,
+                so.output_preview,
+                so.artifact_path,
+                so.created_at,
+                fts.rank,
+                rd.session_id
+            FROM step_outputs_fts fts
+            JOIN step_outputs so ON so.id = fts.rowid
+            JOIN router_decisions rd ON so.cycle_id = rd.cycle_id
+        """
+        
+        params = []
+        conditions = [f"step_outputs_fts MATCH ?"]
+        params.append(sanitized_query)
+        
+        if session_id:
+            conditions.append("rd.session_id = ?")
+            params.append(session_id)
+        
+        if tool_name:
+            conditions.append("so.tool_name = ?")
+            params.append(tool_name)
+        
+        if success_only:
+            conditions.append("so.success = 1")
+        
+        sql += " WHERE " + " AND ".join(conditions)
+        sql += " ORDER BY fts.rank, so.created_at DESC LIMIT ?"
+        params.append(limit)
+        
+        cursor = self.conn.execute(sql, tuple(params))
+        
+        results = []
+        for row in cursor.fetchall():
+            results.append({
+                "id": row[0],
+                "cycle_id": row[1],
+                "step_id": row[2],
+                "tool_name": row[3],
+                "tool_args": json.loads(row[4]) if row[4] else {},
+                "success": bool(row[5]),
+                "exit_code": row[6],
+                "output_preview": row[7],
+                "artifact_path": row[8],
+                "created_at": row[9],
+                "rank": row[10],
+                "session_id": row[11]
+            })
+        
+        return results
+    
+    def search_interactions(
+        self,
+        query: str,
+        role: Optional[str] = None,
+        session_id: Optional[str] = None,
+        limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """
+        Full-text search across LLM interaction logs using FTS5.
+        
+        Searches prompt and response previews across all agent roles.
+        Useful for debugging and understanding agent behavior patterns.
+        
+        Args:
+            query: FTS5 search query
+            role: Optional role filter ('A', 'B', or 'C')
+            session_id: Optional session filter
+            limit: Maximum results to return (default 10)
+        
+        Returns:
+            List of matching interactions with metadata
+        """
+        sanitized_query = self._sanitize_fts5_query(query)
+        
+        sql = """
+            SELECT 
+                i.id,
+                i.cycle_id,
+                i.role,
+                i.system_prompt_checksum,
+                i.prompt_preview,
+                i.response_preview,
+                i.token_usage_json,
+                i.latency_ms,
+                i.created_at,
+                fts.rank,
+                rd.session_id
+            FROM interactions_fts fts
+            JOIN interactions i ON i.id = fts.rowid
+            JOIN router_decisions rd ON i.cycle_id = rd.cycle_id
+        """
+        
+        params = []
+        conditions = [f"interactions_fts MATCH ?"]
+        params.append(sanitized_query)
+        
+        if role:
+            conditions.append("i.role = ?")
+            params.append(role)
+        
+        if session_id:
+            conditions.append("rd.session_id = ?")
+            params.append(session_id)
+        
+        sql += " WHERE " + " AND ".join(conditions)
+        sql += " ORDER BY fts.rank, i.created_at DESC LIMIT ?"
+        params.append(limit)
+        
+        cursor = self.conn.execute(sql, tuple(params))
+        
+        results = []
+        for row in cursor.fetchall():
+            results.append({
+                "id": row[0],
+                "cycle_id": row[1],
+                "role": row[2],
+                "system_prompt_checksum": row[3],
+                "prompt_preview": row[4],
+                "response_preview": row[5],
+                "token_usage": json.loads(row[6]) if row[6] else {},
+                "latency_ms": row[7],
+                "created_at": row[8],
+                "rank": row[9],
+                "session_id": row[10]
+            })
+        
+        return results
+    
+    def _sanitize_fts5_query(self, query: str) -> str:
+        """
+        Sanitize user query for FTS5 MATCH syntax.
+        
+        Handles special characters that have meaning in FTS5:
+        - Wraps queries with special chars in double quotes
+        - Preserves explicit quotes/operators from user
+        
+        Args:
+            query: Raw user search query
+        
+        Returns:
+            Sanitized FTS5 query string
+        """
+        # If user already used quotes or boolean operators, trust them
+        if any(op in query for op in ['"', ' AND ', ' OR ', ' NOT ']):
+            return query
+        
+        # If query contains special FTS5 chars, wrap in quotes
+        special_chars = ['.', ':', '(', ')', '*', '^']
+        if any(char in query for char in special_chars):
+            # Escape any internal quotes first
+            escaped = query.replace('"', '""')
+            return f'"{escaped}"'
+        
+        # Otherwise return as-is (simple term search)
+        return query
+
