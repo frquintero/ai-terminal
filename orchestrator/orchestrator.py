@@ -14,10 +14,12 @@ from typing import Any, Dict, Optional
 from config import Config
 from llm_client import LLMClient
 from memory.api import Memory
-from orchestrator.prompts import get_agent_c_prompt
+from orchestrator.prompts import get_agent_a_prompt, get_agent_c_prompt
+from orchestrator.plan_validator import PlanValidator, PlanValidationError
 from router.router import Router
 from router.rules import Route
 from tool_executor import ToolExecutor
+from tools import TOOLS
 
 
 class OrchestratorResult:
@@ -67,6 +69,9 @@ class Orchestrator:
     4. Agent C narrator (universal final step)
     5. Return OrchestratorResult
     """
+    
+    # Constants
+    MAX_PLAN_RETRIES = 2  # Max attempts for Agent A to generate valid plan
     
     def __init__(self, config: Config, memory: Optional[Memory] = None):
         """
@@ -144,14 +149,7 @@ class Orchestrator:
             elif router_result.route == Route.CACHED:
                 result = self._handle_cached_route(cycle_id, query, router_result)
             elif router_result.route == Route.PLANNER:
-                # Phase 3 implementation
-                result = OrchestratorResult(
-                    cycle_id=cycle_id,
-                    route="PLANNER",
-                    query=query,
-                    agent_c_response="PLANNER route not yet implemented (Phase 3)",
-                    error="PLANNER route requires Phase 3 implementation"
-                )
+                result = self._handle_planner_route(cycle_id, query)
             else:
                 raise ValueError(f"Unknown route: {router_result.route}")
             
@@ -405,6 +403,115 @@ Success: {success}
             return f"[Agent C narrator failed: {llm_result['error']}]\n\n{tool_output}"
         
         return llm_result["message"].content or tool_output
+    
+    def _handle_planner_route(self, cycle_id: str, query: str) -> OrchestratorResult:
+        """
+        PLANNER route: Multi-step task planning via Agent A
+        
+        Workflow:
+        1. Call Agent A (Planner) to generate JSON plan
+        2. Validate plan structure and tools
+        3. Retry if validation fails (up to MAX_PLAN_RETRIES)
+        4. Save plan to task_state table
+        5. Return stub result (Phase 4 will implement execution)
+        
+        Target: <2s plan generation, 95%+ valid JSON on first attempt
+        """
+        # Get available tools for validation
+        available_tools = sorted(TOOLS.keys())
+        
+        # Create validator
+        validator = PlanValidator(available_tools=available_tools)
+        
+        # Build Agent A prompt
+        system_prompt = get_agent_a_prompt(available_tools)
+        
+        # Retry loop
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": query}
+        ]
+        
+        plan = None
+        last_error = None
+        
+        for attempt in range(self.MAX_PLAN_RETRIES + 1):
+            # Call LLM in Agent A role
+            llm_client = LLMClient(
+                config=self.config,
+                role="A",
+                memory=self.memory
+            )
+            
+            llm_result = llm_client.call(
+                messages=messages,
+                cycle_id=cycle_id
+            )
+            
+            if llm_result["error"]:
+                last_error = f"LLM call failed: {llm_result['error']}"
+                break
+            
+            llm_response = llm_result["message"].content or ""
+            
+            # Validate plan
+            plan, error_hint = validator.validate_with_hints(llm_response)
+            
+            if plan:
+                # Success!
+                break
+            
+            # Validation failed
+            last_error = error_hint
+            
+            # If this was the last attempt, give up
+            if attempt >= self.MAX_PLAN_RETRIES:
+                break
+            
+            # Add error feedback and retry
+            messages.append({"role": "assistant", "content": llm_response})
+            messages.append({
+                "role": "user",
+                "content": f"ERROR: {error_hint}\n\nPlease try again with a valid JSON plan."
+            })
+        
+        # Check if we got a valid plan
+        if not plan:
+            # Failed after all retries - fallback to Agent C explanation
+            agent_c_response = self._call_agent_c_narrator(
+                cycle_id=cycle_id,
+                query=query,
+                tool_name="agent_a_planner",
+                tool_output=f"Failed to generate valid plan after {self.MAX_PLAN_RETRIES + 1} attempts.\n\n{last_error}",
+                success=False
+            )
+            
+            return OrchestratorResult(
+                cycle_id=cycle_id,
+                route="PLANNER",
+                query=query,
+                agent_c_response=agent_c_response,
+                error=last_error
+            )
+        
+        # Save plan to task_state
+        self.memory.save_task_plan(
+            cycle_id=cycle_id,
+            plan=plan,
+            status="pending"  # Phase 4 will change to "in_progress" when executing
+        )
+        
+        # Phase 3 MVP: Just return the plan, no execution yet
+        # Phase 4 will implement Agent B step execution loop
+        agent_c_response = f"Plan generated successfully with {len(plan['steps'])} steps. Execution will be implemented in Phase 4."
+        
+        return OrchestratorResult(
+            cycle_id=cycle_id,
+            route="PLANNER",
+            query=query,
+            agent_c_response=agent_c_response,
+            execution_result={"plan": plan, "status": "pending"}
+        )
     
     def _cache_execution(
         self,
