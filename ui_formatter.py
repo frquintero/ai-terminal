@@ -97,7 +97,7 @@ class UIFormatter:
         """Print info message in blue"""
         console.print(f"ℹ {message}", style="bold blue")
     
-    def ai_response(self, message: str, elapsed_time: Optional[float] = None):
+    def ai_response(self, message: str, elapsed_time: Optional[float] = None, cycle_id: Optional[str] = None):
         """Display AI response in a formatted panel"""
         # Render markdown if message contains markdown syntax
         if any(marker in message for marker in ['```', '**', '#', '-', '*', '`']):
@@ -109,6 +109,11 @@ class UIFormatter:
         title = "🤖 AI Assistant"
         if elapsed_time:
             title += f" ({elapsed_time:.2f}s)"
+        
+        # Add cycle ID (short format) if available
+        if cycle_id:
+            short_id = cycle_id[:8] if len(cycle_id) > 8 else cycle_id
+            title += f" │ Cycle: {short_id}"
         
         panel = Panel(
             content,

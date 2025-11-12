@@ -212,7 +212,7 @@ def main():
                 elif result.agent_c_response:
                     # Convert latency from ms to seconds for UI
                     elapsed_time = result.latency_ms / 1000.0 if result.latency_ms else None
-                    ui.ai_response(result.agent_c_response, elapsed_time)
+                    ui.ai_response(result.agent_c_response, elapsed_time, result.cycle_id)
                 
                 console.print()  # Empty line for readability
 
