@@ -98,6 +98,32 @@ CREATE TABLE IF NOT EXISTS interactions (
     FOREIGN KEY (cycle_id) REFERENCES router_decisions(cycle_id)
 );
 
+-- FTS5 virtual table for interactions semantic search
+CREATE VIRTUAL TABLE IF NOT EXISTS interactions_fts USING fts5(
+    prompt_preview,
+    response_preview,
+    content=interactions,
+    content_rowid=id
+);
+
+-- FTS triggers to keep interactions_fts in sync
+CREATE TRIGGER IF NOT EXISTS interactions_ai AFTER INSERT ON interactions BEGIN
+    INSERT INTO interactions_fts(rowid, prompt_preview, response_preview)
+    VALUES (new.id, new.prompt_preview, new.response_preview);
+END;
+
+CREATE TRIGGER IF NOT EXISTS interactions_ad AFTER DELETE ON interactions BEGIN
+    INSERT INTO interactions_fts(interactions_fts, rowid, prompt_preview, response_preview)
+    VALUES ('delete', old.id, old.prompt_preview, old.response_preview);
+END;
+
+CREATE TRIGGER IF NOT EXISTS interactions_au AFTER UPDATE ON interactions BEGIN
+    INSERT INTO interactions_fts(interactions_fts, rowid, prompt_preview, response_preview)
+    VALUES ('delete', old.id, old.prompt_preview, old.response_preview);
+    INSERT INTO interactions_fts(rowid, prompt_preview, response_preview)
+    VALUES (new.id, new.prompt_preview, new.response_preview);
+END;
+
 -- Task state (for PLANNER route - Agent A/B workflows)
 CREATE TABLE IF NOT EXISTS task_state (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -126,6 +152,33 @@ CREATE TABLE IF NOT EXISTS step_outputs (
     FOREIGN KEY (cycle_id) REFERENCES router_decisions(cycle_id)
 );
 
+-- FTS5 virtual table for step_outputs semantic search
+CREATE VIRTUAL TABLE IF NOT EXISTS step_outputs_fts USING fts5(
+    tool_name,
+    tool_args_json,
+    output_preview,
+    content=step_outputs,
+    content_rowid=id
+);
+
+-- FTS triggers to keep step_outputs_fts in sync
+CREATE TRIGGER IF NOT EXISTS step_outputs_ai AFTER INSERT ON step_outputs BEGIN
+    INSERT INTO step_outputs_fts(rowid, tool_name, tool_args_json, output_preview)
+    VALUES (new.id, new.tool_name, new.tool_args_json, new.output_preview);
+END;
+
+CREATE TRIGGER IF NOT EXISTS step_outputs_ad AFTER DELETE ON step_outputs BEGIN
+    INSERT INTO step_outputs_fts(step_outputs_fts, rowid, tool_name, tool_args_json, output_preview)
+    VALUES ('delete', old.id, old.tool_name, old.tool_args_json, old.output_preview);
+END;
+
+CREATE TRIGGER IF NOT EXISTS step_outputs_au AFTER UPDATE ON step_outputs BEGIN
+    INSERT INTO step_outputs_fts(step_outputs_fts, rowid, tool_name, tool_args_json, output_preview)
+    VALUES ('delete', old.id, old.tool_name, old.tool_args_json, old.output_preview);
+    INSERT INTO step_outputs_fts(rowid, tool_name, tool_args_json, output_preview)
+    VALUES (new.id, new.tool_name, new.tool_args_json, new.output_preview);
+END;
+
 -- Chat history (for CHAT route - conversational context)
 CREATE TABLE IF NOT EXISTS chat_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -137,6 +190,32 @@ CREATE TABLE IF NOT EXISTS chat_history (
     FOREIGN KEY (session_id) REFERENCES sessions(session_id),
     FOREIGN KEY (cycle_id) REFERENCES router_decisions(cycle_id)
 );
+
+-- FTS5 virtual table for chat_history semantic search
+CREATE VIRTUAL TABLE IF NOT EXISTS chat_history_fts USING fts5(
+    user_query,
+    agent_response,
+    content=chat_history,
+    content_rowid=id
+);
+
+-- FTS triggers to keep chat_history_fts in sync
+CREATE TRIGGER IF NOT EXISTS chat_history_ai AFTER INSERT ON chat_history BEGIN
+    INSERT INTO chat_history_fts(rowid, user_query, agent_response)
+    VALUES (new.id, new.user_query, new.agent_response);
+END;
+
+CREATE TRIGGER IF NOT EXISTS chat_history_ad AFTER DELETE ON chat_history BEGIN
+    INSERT INTO chat_history_fts(chat_history_fts, rowid, user_query, agent_response)
+    VALUES ('delete', old.id, old.user_query, old.agent_response);
+END;
+
+CREATE TRIGGER IF NOT EXISTS chat_history_au AFTER UPDATE ON chat_history BEGIN
+    INSERT INTO chat_history_fts(chat_history_fts, rowid, user_query, agent_response)
+    VALUES ('delete', old.id, old.user_query, old.agent_response);
+    INSERT INTO chat_history_fts(rowid, user_query, agent_response)
+    VALUES (new.id, new.user_query, new.agent_response);
+END;
 
 -- LLM traces (detailed prompt/response logging for debugging)
 CREATE TABLE IF NOT EXISTS llm_traces (
