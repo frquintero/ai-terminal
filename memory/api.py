@@ -7,6 +7,7 @@ All operations are transactional and thread-safe.
 
 import json
 import sqlite3
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -29,6 +30,8 @@ class Memory:
         """Initialize memory system with database connection."""
         self.db_path = db_path or DEFAULT_DB_PATH
         self.conn = init_db(self.db_path)
+        # Thread lock for concurrent cycle operations
+        self._lock = threading.RLock()
     
     def close(self):
         """Close database connection."""
@@ -533,18 +536,21 @@ class Memory:
     def get_chat_history(
         self, 
         session_id: str, 
-        last_n: int = 10
+        last_n: int = 10,
+        token_budget: int = 2000
     ) -> List[Dict[str, Any]]:
         """
-        Get recent chat history for session.
+        Get recent chat history for session, bounded by token budget.
         
         Args:
             session_id: Session ID
-            last_n: Number of recent exchanges (default: 10 for Agent C context)
+            last_n: Maximum number of exchanges (hard limit, checked first)
+            token_budget: Max tokens to include (default: 2000 for LLM context)
         
         Returns:
-            List of chat exchanges with timestamps
+            List of chat exchanges in chronological order, within budget
         """
+        # Get all recent exchanges (up to last_n)
         cursor = self.conn.execute(
             """
             SELECT id, cycle_id, user_query, agent_response, timestamp
@@ -556,15 +562,32 @@ class Memory:
             (session_id, last_n)
         )
         
+        # Walk backwards, accumulating tokens until budget exceeded
+        all_rows = cursor.fetchall()
         results = []
-        for row in cursor.fetchall():
+        total_tokens = 0
+        
+        for row in all_rows:
+            user_query = row[2]
+            agent_response = row[3]
+            
+            # Rough token estimate: 4 chars = 1 token (OpenAI convention)
+            user_tokens = len(user_query) // 4 if user_query else 0
+            response_tokens = len(agent_response) // 4 if agent_response else 0
+            
+            if total_tokens + user_tokens + response_tokens > token_budget:
+                # Budget would be exceeded, stop here
+                break
+            
             results.append({
                 "id": row[0],
                 "cycle_id": row[1],
-                "user_query": row[2],
-                "agent_response": row[3],
+                "user_query": user_query,
+                "agent_response": agent_response,
                 "timestamp": row[4]
             })
+            
+            total_tokens += user_tokens + response_tokens
         
         return list(reversed(results))  # Return in chronological order
     

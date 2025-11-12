@@ -8,6 +8,11 @@ Handles tool validation, execution, error handling, and logging.
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    import jsonschema
+except ImportError:
+    jsonschema = None
+
 from tools import TOOLS
 
 
@@ -80,6 +85,26 @@ class ToolExecutor:
                 "result": error_msg,
                 "exit_code": None,
                 "error": error_msg
+            }
+        
+        # Validate tool arguments against schema
+        validation_error = self._validate_tool_args(tool, tool_args)
+        if validation_error:
+            if self.memory and cycle_id and step_id is not None:
+                self._log_to_memory(
+                    cycle_id=cycle_id,
+                    step_id=step_id,
+                    tool_name=tool_name,
+                    tool_args=tool_args,
+                    success=False,
+                    result=validation_error,
+                    exit_code=None
+                )
+            return {
+                "success": False,
+                "result": validation_error,
+                "exit_code": None,
+                "error": validation_error
             }
         
         # Execute tool
@@ -188,11 +213,50 @@ class ToolExecutor:
         if not isinstance(tool_args, dict):
             return False, f"Tool arguments must be dict, got {type(tool_args)}"
         
-        # Future enhancement: Schema validation
-        # tool_schema = get_tool_schemas().get(tool_name)
-        # validate args against schema
+        # Schema validation (if jsonschema available)
+        error = self._validate_tool_args(TOOLS[tool_name], tool_args)
+        if error:
+            return False, error
         
         return True, None
+    
+    def _validate_tool_args(self, tool, tool_args: Dict[str, Any]) -> Optional[str]:
+        """
+        Validate tool arguments against tool schema using jsonschema.
+        
+        Args:
+            tool: Tool object with .schema property
+            tool_args: Arguments to validate
+        
+        Returns:
+            Error message if invalid, None if valid
+        """
+        if not jsonschema:
+            # jsonschema not available, skip validation (but allow execution)
+            return None
+        
+        try:
+            # Get tool schema
+            tool_schema = tool.schema
+            if not tool_schema or 'function' not in tool_schema:
+                # No schema available, allow execution
+                return None
+            
+            params_schema = tool_schema.get('function', {}).get('parameters', {})
+            if not params_schema:
+                # No parameters schema, allow execution
+                return None
+            
+            # Validate arguments against schema
+            jsonschema.validate(tool_args, params_schema)
+            return None  # Valid
+        
+        except jsonschema.ValidationError as e:
+            return f"Invalid tool arguments: {e.message}"
+        except Exception as e:
+            # Silently allow execution if validation fails for other reasons
+            # (malformed schema, etc.)
+            return None
     
     def get_available_tools(self) -> List[str]:
         """Get list of available tool names."""
