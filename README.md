@@ -363,6 +363,33 @@ Better to over-plan an ambiguous query than misroute it. PLANNER confidence defa
 
 ---
 
+## v2.0 Documentation Index
+
+All architecture and development docs are in the `history/` directory:
+
+| File | Purpose |
+|------|---------|
+| **[IMPLEMENTATION_PLAN.md](history/IMPLEMENTATION_PLAN.md)** | Complete v2.0 design spec: 6 phases, success criteria, architecture decisions, risk mitigation |
+| **[DOUBLE_AGENT_ARCHITECTURE.md](DOUBLE_AGENT_ARCHITECTURE.md)** | Core architectural vision: triple-agent system, unified memory, router design |
+| **[PHASE_2_SIGN_OFF.md](history/PHASE_2_SIGN_OFF.md)** | Phase 2 final verification: 58 tests passing, all acceptance criteria met |
+| **[PHASE_2_COMPLETION.md](history/PHASE_2_COMPLETION.md)** | Phase 2 detailed completion: cross-route integration, context handoff, step persistence |
+| **[PHASE_2_ACCEPTANCE_CRITERIA.md](history/PHASE_2_ACCEPTANCE_CRITERIA.md)** | Phase 2 acceptance tests: specific test commands and success metrics |
+| **[ROUTER_TUNING_GUIDE.md](history/ROUTER_TUNING_GUIDE.md)** | **Operators**: How to customize router patterns, adjust cache thresholds, debug routing decisions |
+| **[DEBUGGING_V2.md](history/DEBUGGING_V2.md)** | **Developers**: Layer-by-layer debugging strategies, LLM tracing, performance profiling, database forensics |
+| **[ROUTER_CLI_COMPLETE.md](history/ROUTER_CLI_COMPLETE.md)** | Router CLI tool docs: manual testing, batch classification, interactive REPL, JSON output |
+| **[PHASE_5_COMPLETION.md](history/PHASE_5_COMPLETION.md)** | Phase 5 final: telemetry integration, docs complete, 65/65 tests passing, production ready |
+
+### Quick Navigation
+
+- **Getting Started**: README.md (this file) + [IMPLEMENTATION_PLAN.md](history/IMPLEMENTATION_PLAN.md) overview
+- **Understand Architecture**: [DOUBLE_AGENT_ARCHITECTURE.md](DOUBLE_AGENT_ARCHITECTURE.md) + [IMPLEMENTATION_PLAN.md](history/IMPLEMENTATION_PLAN.md) sections 3-5
+- **Tune Router**: [ROUTER_TUNING_GUIDE.md](history/ROUTER_TUNING_GUIDE.md)
+- **Debug Issues**: [DEBUGGING_V2.md](history/DEBUGGING_V2.md)
+- **Test Router Manually**: [ROUTER_CLI_COMPLETE.md](history/ROUTER_CLI_COMPLETE.md)
+- **Track Progress**: [PHASE_2_SIGN_OFF.md](history/PHASE_2_SIGN_OFF.md), [PHASE_5_COMPLETION.md](history/PHASE_5_COMPLETION.md)
+
+---
+
 ## Contributing
 
 1. **Check ready work**: `bd ready --json` to see unblocked issues
@@ -388,7 +415,7 @@ For questions, file a new bead:
 bd create "Question: How do I...?" -t task -p 2 --json
 ```
 
-Detailed docs are in `history/` and `docs/` directories.
+For debugging, see [DEBUGGING_V2.md](history/DEBUGGING_V2.md). For router customization, see [ROUTER_TUNING_GUIDE.md](history/ROUTER_TUNING_GUIDE.md).
 
 ---
 
