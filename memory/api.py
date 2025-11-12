@@ -231,6 +231,15 @@ class Memory:
         Returns:
             List of cache hits with scores
         """
+        # Sanitize query for FTS5 MATCH
+        # Empty or whitespace-only queries return empty results
+        query_stripped = query.strip()
+        if not query_stripped:
+            return []
+        
+        # Quote query for FTS5 (escape double quotes)
+        fts_query = f'"{query_stripped.replace('"', '""')}"'
+        
         success_clause = "AND ic.success_flag = 1" if min_success else ""
         
         cursor = self.conn.execute(
@@ -245,20 +254,20 @@ class Memory:
             ORDER BY fts.rank
             LIMIT ?
             """,
-            (query, limit)
+            (fts_query, limit)
         )
         
         results = []
         for row in cursor.fetchall():
             results.append({
                 "id": row[0],
-                "user_query": row[1],
+                "user_query_text": row[1],
                 "normalized_intent": row[2],
                 "tool_name": row[3],
                 "tool_args": json.loads(row[4]),
                 "usage_count": row[5],
                 "last_used_at": row[6],
-                "score": row[7]
+                "rank": row[7]
             })
         
         return results
