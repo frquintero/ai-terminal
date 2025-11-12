@@ -123,10 +123,38 @@ SHELL_COMMAND_PATTERNS = [
     r'^bzip2\b',
     r'^xz\b',
     
-    # Editors (non-interactive, e.g., via -c flag)
-    r'^vim\s+-c\b',
-    r'^nvim\s+-c\b',
-    r'^emacs\s+--batch\b',
+    # Editors (both interactive and non-interactive batch modes)
+    r'^vim\b',              # vim (interactive and batch)
+    r'^vi\b',               # vi
+    r'^nano\b',             # nano
+    r'^nvim\b',             # neovim
+    r'^emacs\b',            # emacs (will be detected as interactive unless with --batch flag)
+    
+    # File viewers (interactive paging)
+    # Note: less/more are already in the list above
+    
+    # Database/shell REPLs (interactive)
+    r'^python\b',           # Python REPL
+    r'^python3\b',          # Python 3 REPL
+    r'^node\b',             # Node.js REPL
+    r'^irb\b',              # Ruby IRB
+    r'^ruby\b',             # Ruby interactive
+    r'^mysql\b',            # MySQL interactive
+    r'^psql\b',             # PostgreSQL interactive
+    r'^mongo\b',            # MongoDB interactive
+    
+    # Shells (interactive)
+    r'^bash\b',             # Bash interactive
+    r'^zsh\b',              # Zsh interactive
+    r'^sh\b',               # Shell interactive
+    
+    # Terminal multiplexers
+    r'^tmux\b',             # Tmux
+    r'^screen\b',           # Screen
+    
+    # SSH/Remote (interactive)
+    r'^ssh\b',              # SSH with terminal
+    r'^man\b',              # Man pages
     
     # Common shell builtins/utilities
     r'^echo\b',
@@ -152,10 +180,55 @@ SHELL_COMMAND_PATTERNS = [
     r'^export\b',
     r'^alias\b',
     r'^history\b',
-]
+    ]
 
 # Compile patterns once at module load
 _SHELL_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in SHELL_COMMAND_PATTERNS]
+
+
+# Interactive command patterns (require TTY - vim, nano, top, etc.)
+# These commands need full terminal control and should use run_interactive tool
+INTERACTIVE_COMMAND_PATTERNS = [
+    # Text editors (interactive)
+    r'^vim\b(?!\s+-c)',        # vim (but not vim -c)
+    r'^vi\b',                   # vi
+    r'^nano\b',                 # nano
+    r'^emacs\b(?!\s+--batch)',  # emacs (but not emacs --batch)
+    r'^nvim\b(?!\s+-c)',        # neovim (but not nvim -c)
+    
+    # File viewers (interactive - paging)
+    r'^less\b',                 # less (interactive pager)
+    r'^more\b',                 # more (interactive pager)
+    r'^man\b',                  # man pages
+    
+    # System monitoring (interactive)
+    r'^top\b',                  # top
+    r'^htop\b',                 # htop
+    
+    # Database/shell REPLs (interactive)
+    r'^python\b',               # Python REPL
+    r'^python3\b',              # Python 3 REPL
+    r'^node\b',                 # Node.js REPL
+    r'^irb\b',                  # Ruby IRB
+    r'^ruby\b',                 # Ruby interactive
+    r'^mysql\b',                # MySQL interactive
+    r'^psql\b',                 # PostgreSQL interactive
+    r'^mongo\b',                # MongoDB interactive
+    
+    # Shells (interactive)
+    r'^bash\b',                 # Bash interactive
+    r'^zsh\b',                  # Zsh interactive
+    r'^sh\b',                   # Shell interactive
+    
+    # Terminal multiplexers
+    r'^tmux\b',                 # Tmux
+    r'^screen\b',               # Screen
+    
+    # SSH/Remote (interactive)
+    r'^ssh\b',                  # SSH with terminal
+]
+
+_INTERACTIVE_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in INTERACTIVE_COMMAND_PATTERNS]
 
 
 # Chat query patterns (simple informational questions)
@@ -193,6 +266,7 @@ class RuleEngine:
         """Initialize rule engine with compiled patterns"""
         self.shell_patterns = _SHELL_PATTERNS_COMPILED
         self.chat_patterns = _CHAT_PATTERNS_COMPILED
+        self.interactive_patterns = _INTERACTIVE_PATTERNS_COMPILED
     
     def classify(self, query: str) -> Tuple[Optional[Route], Optional[str]]:
         """
@@ -226,9 +300,26 @@ class RuleEngine:
         # No match - return None (caller falls back to PLANNER)
         return None, None
     
+    def is_interactive_command(self, query: str) -> bool:
+        """
+        Detect if query is an interactive command that requires TTY.
+        
+        Args:
+            query: User query text
+        
+        Returns:
+            True if matches interactive command pattern
+        """
+        query_stripped = query.strip()
+        for pattern in self.interactive_patterns:
+            if pattern.match(query_stripped):
+                return True
+        return False
+    
     def get_stats(self) -> Dict[str, int]:
         """Get rule statistics for debugging"""
         return {
             "shell_patterns": len(self.shell_patterns),
             "chat_patterns": len(self.chat_patterns),
+            "interactive_patterns": len(self.interactive_patterns),
         }

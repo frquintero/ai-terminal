@@ -264,36 +264,44 @@ class Orchestrator:
         SHELL route: Direct shell command execution → Agent C narrator
         
         Workflow:
-        1. Execute command via ToolExecutor (run_command)
-        2. Call Agent C narrator to present results
-        3. Cache successful execution for future CACHED hits
-        4. Return result
+        1. Detect if interactive command (vim, top, etc.) or regular command
+        2. Execute via appropriate tool (run_interactive for TTY commands, run_command for regular)
+        3. Call Agent C narrator to present results
+        4. Cache successful execution for future CACHED hits
+        5. Return result
         
-        Target: <500ms end-to-end
+        Target: <500ms end-to-end for non-interactive commands
         """
-        # Execute shell command directly
+        # Detect if this is an interactive command requiring TTY
+        is_interactive = self.router.rule_engine.is_interactive_command(query)
+        tool_name = "run_interactive" if is_interactive else "run_command"
+        
+        # Execute command directly
         exec_result = self.tool_executor.execute(
-            tool_name="run_command",
+            tool_name=tool_name,
             tool_args={"command": query},
             cycle_id=cycle_id,
             step_id=0  # Single-step execution
         )
         
         # Call Agent C narrator
+        # For interactive commands, the output is minimal (exit status message)
+        # since the user was controlling the program directly
         agent_c_response = self._call_agent_c_narrator(
             cycle_id=cycle_id,
             query=query,
-            tool_name="run_command",
+            tool_name=tool_name,
             tool_output=exec_result["result"],
             success=exec_result["success"],
             exit_code=exec_result.get("exit_code")
         )
         
-        # Cache successful execution for future hits
-        if exec_result["success"]:
+        # Cache successful execution for future hits (only for non-interactive commands)
+        # Interactive commands are typically user-controlled and may not be repeatable
+        if exec_result["success"] and not is_interactive:
             self._cache_execution(
                 query=query,
-                tool_name="run_command",
+                tool_name=tool_name,
                 tool_args={"command": query}
             )
         
