@@ -1,176 +1,395 @@
-# AI-Powered Linux Shell Terminal
+# AI-Powered Linux Shell Terminal — v2.0
 
-**Version:** 1.3
+**Version:** 2.0 (Multi-Role Orchestrator Architecture)
 
 ## Overview
 
-This is an **AI-powered Linux terminal** built with MiniMax M2 (or Kimi-2/custom LLM). Here's the structure:
+This is an **AI-powered Linux terminal** using the **v2.0 Triple-Agent Orchestration Architecture**. A lightweight router classifies queries into four routes (SHELL/CACHED/CHAT/PLANNER), then dispatches to specialized LLM agents with fine-tuned roles:
 
-**Purpose**: Intelligent CLI combining natural language processing with shell execution—users type requests in plain English, the AI interprets and executes via tools.
+- **Agent A (Planner)**: Decomposes complex tasks into high-level steps  
+- **Agent B (Command Engineer)**: Generates precise tool arguments for each step  
+- **Agent C (Narrator)**: Converts raw outputs into natural language for all routes
 
-**Architecture**:
-- **agent.py**: ReAct loop engine (max 15 steps) with tool calling, history trimming, session state tracking, and multi-step planning
-- **tools.py**: Auto-registered tool suite (run/read/write commands, filesystem snapshotting, Python sandbox with pandas/numpy/matplotlib, context queries, history_sql memory access, HTTP client)
-- **config.py**: Multi-backend support (MiniMax/Kimi-2/custom OpenAI-compatible APIs) with env-based configuration
-- **shell_integration.py**: Persistent bash/zsh wrapper, working directory isolation (`ai-terminal-wd/`)
-- **db_logger.py**: SQLite session logging with telemetry
-- **filesystem_context.py**: Persists shell-derived cwd snapshots plus read/write events to SQLite + JSONL so agents always know the real workspace layout
-
-**Key Features**:
-- Shell-first philosophy (prefer `awk/sed/jq` over Python for text/math)
-- Resource-limited Python sandbox with write protection, network isolation
-- Optional namespace isolation via bubblewrap (reproducible rootfs)
-- Persistent filesystem awareness (auto-logged cwd, recent file events, absolute/relative path hints surfaced via the `filesystem_snapshot` tool and prompt injections)
-- Short working memory (3-turn live history + history_sql-first permanent recall, recent errors, session stats) that aggressively trims tool call dialogs from the prompt because every completed tool interaction is summarized in the Agent Memory block (tool name, args preview, call_id, outcome) while `history_sql` remains the single on-demand memory tool.
-- Structured history DB access via `history_schema` + `history_sql` so the agent can inspect tables, then run parameterized SELECT/INSERT/UPDATE statements (DELETE/DROP blocked) for precise recall and memory writing
-- Smart HTTP tooling: templated requests, jq selectors, TLS certificate telemetry, session-aware curl profiles
-- Raw output mode toggle for debugging
-
-**Extended Memory & Filesystem Context:** High-signal events stream into JSONL (`logs/events/<session>.jsonl`) and are mirrored into `logs/history/history.db`, powering the `history_sql` tool for authoritative SELECT/INSERT/UPDATE access. Tool interactions are summarized (tool name, args preview, call_id, outcomes) and inserted into the Agent Memory block so the short working memory window can remain at 3 turns without losing context. In parallel, shell executions and file reads/writes are captured by `filesystem_context.py` (SQLite + JSONL) so agents always know the true cwd, sandbox roots, and recent file mutations without rerunning `pwd/ls`. See `docs/HISTORY_TOOL.md` and `filesystem_context.py` for implementation notes.
-
-_Always run `history_schema` before your first `history_sql` query so you know the tables/columns you’re targeting._
-
-**State**: v1.3, 88 closed beads (all issues completed), production-ready with comprehensive docs and test coverage.
+**Core Philosophy**: 
+- **In AI We Trust**: Minimal guardrails, full system access
+- **Shell-First**: Shell commands execute immediately (50%+ of interactions), not through planning layers  
+- **Speed Through Intelligence**: Router uses fast regex rules + intention cache; only ambiguous queries hit the planner
 
 ---
 
-This project implements an AI-powered Linux shell terminal using MiniMax M2 AI. It combines natural language processing, shell command execution, and tool-based operations to create an intelligent CLI interface.
+## Architecture Overview
 
-## 🎯 Vibe Coded with Amp
+### v2.0 Routes (4-Level Precedence)
 
-This project was built using [Amp](https://ampcode.com) - Sourcegraph's AI coding agent. Amp combines the power of Claude 3.5 Sonnet for execution with GPT-5 (Oracle) for expert planning and review. The entire v1.3 enhanced context system, including the comprehensive `get_context` tool with session tracking, tool history, and intelligent prompt optimization, was designed and implemented through iterative collaboration with Amp's dual-model architecture. Amp's ability to consult the Oracle for architectural decisions, maintain context across complex implementations, and execute with precision made this level of sophisticated agent-to-agent development possible.
-
-**Development highlights:**
-- Oracle-reviewed architecture (3+ consultations for design validation)
-- Comprehensive session state tracking (20 tool calls, 3 errors, bounded memory)
-- Zero-regression implementation (backward compatible, all tests passing)
-- Prompt engineering with explicit usage triggers and shell-first philosophy
-- 18 feature commits across 8 files (+1,486 lines) shipped in a single session
-
-Learn more about Amp at [ampcode.com](https://ampcode.com).
-
-## Features
-
-- **AI-First Processing**: All user inputs go through MiniMax M2 AI for intelligent interpretation
-- **Multi-Step Task Execution**: AI can break down complex requests into sequences of tool calls
-- **Automatic Tool Discovery**: Tools are auto-registered from class definitions - add/remove tools without manual registry updates
-- **Intelligent Output Display**: Clean agent summaries by default, with optional raw output mode for debugging
-- **Tool-Based Execution**: AI translates natural language to shell commands and executes via shell integration
-- **Content Processing**: Combine file operations, shell commands, and AI generation for complex workflows
-- **Shell Integration**: Wrap around bash/zsh for efficient command execution and output capture
-- **Namespace Isolation (Optional)**: Run commands inside isolated Linux namespace with deterministic rootfs for reproducible execution
-- **Traceable AI Calls**: Every OpenAI request is tagged with a short trace ID and stored under `logs/openai_traces/<trace>.json` for debugging
-- **Event-Driven Memory**: High-signal events (tool calls/results/errors) stream into `logs/events/<session>.jsonl`, letting the agent recall past work without resending the entire conversation
-
-## Available Agent Tools
-
-The system currently auto-registers these tools (direct mirror of `tools.py` and `get_context.available_tools`):
-- `run_command` – Execute non-interactive shell commands (ls, grep, pipelines, etc.)
-- `run_interactive` – Launch TTY programs such as vim, nano, top
-- `run_python_sandbox` – Run Python snippets inside the resource-limited sandbox for data/plotting tasks
-- `read_file` – Output a file’s contents
-- `write_file` – Create or overwrite files in the working directory
-- `get_context` – Return session metadata, tool history, and recent errors for debugging
-- `filesystem_snapshot` – Fetch the latest persisted cwd snapshot plus recent read/write telemetry so path decisions are accurate without extra shell probes
-- `http_request` – Structured curl wrapper with profiles, session persistence, templating variables, jq JSON selectors, certificate-chain reporting, retries, metrics, and diagnostics (preferred for any HTTP/API work)
-- `history_schema` – List history tables or describe specific columns so you know the schema before querying
-- `history_sql` – Run parameterized SELECT/INSERT/UPDATE statements against `logs/history/history.db` (DELETE/DROP blocked) to retrieve or append durable memories with precise filters
-
-Detailed knobs for `http_request` live in `docs/HTTP_REQUEST.md`.
-
-## Workflow & Issue Tracking
-
-This repo uses **bd (beads)** for all work tracking. Never add Markdown TODO lists—open or update beads instead:
-
-```bash
-bd ready --json                  # see unblocked work
-bd create "Title" -t feature -p 1 --json
-bd update bd-123 --status in_progress --json
-bd close bd-123 --reason "Done" --json
+```
+Query
+  ↓
+[SHELL] (160+ command patterns) → run_command/run_interactive immediately
+  ↓ (if no match)
+[CACHED] (FTS5 intention cache) → Cached tool args + Agent C narrator
+  ↓ (if no cache hit)
+[CHAT] (12 Q&A patterns) → Direct Agent C chat mode (no tools)
+  ↓ (if ambiguous)
+[PLANNER] (fallback) → Agent A→B loop for complex tasks
 ```
 
-AI-generated plans/design docs must live under `history/` (e.g., `history/PLAN.md`). Keep the repository root focused on durable assets.
+### Unified Memory System
 
-## Installation
+**Single Database**: `logs/orchestrator.db` (120KB SQLite)
 
-1. Clone the repository
-2. Create virtual environment:
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-4. Copy `.env.example` to `.env` and configure:
-   ```bash
-   MINIMAX_M2_API_KEY=your_api_key_here
-   MINIMAX_MODEL=MiniMax-M2
-   SHOW_RAW_OUTPUT=false  # Set to true for debugging
-   ```
-5. (Optional) Set up Python sandbox environment:
-   ```bash
-   ./setup_sandbox.sh
-   ```
-   Then add to `.env`:
-   ```bash
-   SANDBOX_PYTHON=./sandbox_venv/bin/python
-   ```
-6. Run the terminal: `python main.py`
+Tables:
+- `sessions`: Session metadata and LLM model info
+- `router_decisions`: Route classification with confidence scores
+- `intention_cache`: FTS5-indexed cache of successful executions
+- `task_state`: PLANNER route plans and status
+- `step_outputs`: Individual step results with output previews
+- `chat_history`: Conversation history for context injection
+- `llm_traces`: Full prompt/response logs for debugging
+- `route_metrics`, `step_metrics`, `llm_metrics`: Telemetry
 
-## Configuration
+All state is **transactional** with `session_id` + `cycle_id` tracking per orchestration cycle.
 
-Key settings in `.env`:
-- `SHOW_RAW_OUTPUT` (default: `false`) - Show raw command outputs. Set to `true` for debugging or verification workflows.
-- `RAW_OUTPUT_MAX_CHARS` (default: `4000`) - Maximum characters to display when raw output is enabled.
-- `HIDE_THINKING` (default: `true`) - Hide AI reasoning in responses.
-- `MAX_STEPS` (default: `15`) - Maximum tool execution steps per request.
-- `USE_EVENT_MEMORY` (default: `true`) - Enable the event-driven memory builder (JSONL logs + selective prompt injection).
-- `EVENT_LOG_RETENTION_DAYS` (default: `7`) - Auto-delete event logs older than N days.
-- `EVENT_MEMORY_MAX_EVENTS` / `EVENT_MEMORY_MAX_CHARS` - Upper bounds for the Agent Memory block sent to the LLM.
-- `EVENT_MEMORY_ARTIFACT_THRESHOLD` (default: `8192`) - Tool outputs larger than this many bytes are persisted as artifacts under `ai-terminal-wd/artifacts/`.
-- `SESSION_TOOL_HISTORY_LIMIT` (default: `10`) - Live `tool_history` length. Lower values reduce prompt cost; rely on `history_sql` (with concise SELECTs) for older context.
+### Three-Role LLM System
 
-### Python Sandbox Configuration
-- `SANDBOX_PATH` (default: `./sandbox_runs`) - Directory for sandbox execution environments
-- `SANDBOX_PYTHON` (optional) - Path to dedicated sandbox Python interpreter with pre-installed data science libraries
-- `SANDBOX_TIMEOUT` (default: `30`) - Default timeout in seconds for sandbox execution
-- `SANDBOX_MAX_CPU_SEC` (default: `20`) - Maximum CPU time in seconds
-- `SANDBOX_MAX_MEM_MB` (default: `1024`) - Maximum memory in MB
-- `SANDBOX_MAX_FSIZE_MB` (default: `50`) - Maximum file size in MB
-- `SANDBOX_DISABLE_NETWORK` (default: `1`) - Disable network access in sandbox
+| Role | Prompt | Input | Output | Example |
+|------|--------|-------|--------|---------|
+| **Agent A (Planner)** | Strategic task decomposer | User query + available tools | JSON plan: `{steps: [{id, tool_name, intent, description}]}` | "Create script → Design → Deploy" |
+| **Agent B (Command Engineer)** | Precise tool executor | Plan step + tool schemas + previous outputs | JSON args: `{tool_name, tool_args}` | `{"command": "ls -lah | grep .py"}` |
+| **Agent C (Narrator)** | Universal narrator | Raw outputs + context | Natural language response | "Found 3 Python files (42 KB total)" |
 
-### Namespace Isolation (Optional)
-Deterministic rootfs-based isolation for reproducible command execution:
-- `SANDBOX_ENABLE_ISOLATION` (default: `0`) - Enable namespace isolation (requires Linux + bubblewrap)
-- `SANDBOX_ROOTFS_SHA256` (optional) - Specific rootfs image SHA256 to use
+---
 
-**To enable:**
-1. Build rootfs (one-time, ~6 min, ~234MB):
-   ```bash
-   sudo ./build_rootfs.sh
-   ```
-   This caches the rootfs in `~/.cache/agent_sandbox/images/` (auto-detects your user even with sudo)
-2. Run agent with isolation:
-   ```bash
-   SANDBOX_ENABLE_ISOLATION=1 python main.py
-   ```
+## Project Structure
 
-See [history/NAMESPACE_ISOLATION.md](history/NAMESPACE_ISOLATION.md) for full documentation.
+### Core Modules
 
-## Usage
+```
+orchestrator/
+├── orchestrator.py         # Main Orchestrator class, handle_query() entry point
+├── prompts.py              # Agent A/B/C system prompts with context injection
+├── metrics.py              # Telemetry collection (route distribution, latency, cache hits)
+├── plan_validator.py       # JSON schema validation with retry logic
 
-- Enter natural language commands
-- The AI will interpret and execute them appropriately
-- Supports file operations, shell commands, Wikipedia searches, and conversation
-- By default, see clean AI summaries; enable raw output for detailed command results
-- Need deeper debugging guidance? See [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md) for trace logs, session telemetry, and beads workflow tips.
+router/
+├── router.py               # Main Router class, 4-level classification
+├── rules.py                # RuleEngine with regex patterns + interactive detection
+├── cli.py                  # Manual testing/debugging tool
 
-## Development
+memory/
+├── api.py                  # Unified Memory API (CRUD for all tables)
+├── schema.py               # Database schema and initialization
 
-See `plan.md` for detailed implementation plan and `starting_point.md` for technical guide.
+tools.py                     # Tool registry (run_command, run_interactive, write_file, http_request, etc.)
+shell_integration.py         # Bash/zsh wrapper with cwd isolation
+config.py                    # Multi-backend LLM configuration (OpenAI, MiniMax, Kimi, custom)
+llm_client.py               # LLM client with role-specific prompts
+tool_executor.py            # Tool invocation and validation
+main.py                      # CLI entry point (REPL)
+```
+
+### Deprecated v1.3 Code
+
+The following are **deprecated and not used in v2.0**. They are kept for historical reference:
+
+- `agent.py` – Old ReAct single-agent (replaced by Orchestrator + 3-role LLM)
+- `db_logger.py` – Old fragmented session logger (replaced by unified Memory)
+- `history_store.py`, `history_sql.py` – Old fragmented memory stores (replaced by orchestrator.db)
+- `filesystem_context.py` – Old filesystem tracking (replaced by tool outputs + session state)
+- `event_memory.py` – Old event journal (replaced by llm_traces + metrics tables)
+
+Tests that reference v1.3 code will be skipped. **New development should only use v2.0 modules.**
+
+---
+
+## Running the Terminal
+
+### Quick Start
+
+```bash
+# Activate venv
+python3 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+pip install -r requirements.txt
+
+# Run interactive terminal
+python main.py
+```
+
+### Configuration
+
+Set via `.env`, environment variables, or CLI flags (in order of precedence):
+
+```bash
+# .env file
+AGENT_TYPE=custom                    # minimax, kimi2, custom
+OPENAI_API_KEY=sk-...
+OPENAI_BASE_URL=https://api.openai.com/v1
+MODEL=gpt-4-turbo
+MAX_TOKENS=2048
+TEMPERATURE=0.7
+
+# CLI override
+python main.py --agent kimi2 --max-tokens 4096 --temperature 0.9
+```
+
+### Manual Router Testing
+
+Use the Router CLI tool for debugging classification:
+
+```bash
+# Single query
+python -m router.cli "What is Docker?"
+# Output: CHAT route with confidence 0.95
+
+# Batch test
+python -m router.cli --test-file queries.txt
+
+# Interactive REPL
+python -m router.cli --interactive
+```
+
+---
+
+## Telemetry & Metrics
+
+Metrics are automatically collected and persisted to `orchestrator.db`.
+
+### View Metrics
+
+```python
+from orchestrator.metrics import get_metrics
+
+metrics = get_metrics()
+
+# Route distribution (last 24h)
+print(metrics.get_route_distribution())
+# Output: {'SHELL': 45, 'CHAT': 28, 'CACHED': 12, 'PLANNER': 5}
+
+# Latency stats
+print(metrics.get_latency_stats())
+# Output: {avg: 250ms, p95: 450ms, ...}
+
+# Cache hit rate
+print(metrics.get_cache_hit_rate())
+# Output: {hits: 12, total: 100, hit_rate_percent: 12.0}
+
+# Full report
+report = metrics.get_summary_report()
+print(f"SHELL avg latency: {report['latency_stats']['shell']['avg_ms']}ms")
+```
+
+### Metrics Dashboard (Future)
+
+Telemetry can be exported for visualization:
+
+```bash
+# Export to CSV for charting
+python -c "
+from orchestrator.metrics import get_metrics
+import json
+metrics = get_metrics()
+print(json.dumps(metrics.get_summary_report(), indent=2))
+" > metrics.json
+```
+
+---
+
+## Development Guide
+
+### Adding a New Tool
+
+1. Create a class in `tools.py` inheriting from `BaseTool`
+2. Implement `name`, `description`, `schema`, `execute()` properties
+3. Register in `TOOLS` dict
+4. Test with a simple query
+
+Example:
+
+```python
+class MyTool(BaseTool):
+    @property
+    def name(self) -> str:
+        return "my_tool"
+    
+    @property
+    def description(self) -> str:
+        return "Does something useful"
+    
+    @property
+    def schema(self) -> Dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": "my_tool",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "arg1": {"type": "string"}
+                    },
+                    "required": ["arg1"]
+                }
+            }
+        }
+    
+    def execute(self, arg1: str) -> str:
+        return f"Executed with {arg1}"
+```
+
+### Tuning the Router
+
+Router classification is controlled by regex patterns in `router/rules.py`:
+
+- **SHELL_COMMAND_PATTERNS** (160+ patterns): File ops, package managers, build tools, etc.
+- **CHAT_QUERY_PATTERNS** (12 patterns): "What is...", "Explain...", etc.
+- **INTERACTIVE_COMMAND_PATTERNS** (20+ patterns): vim, nano, top, htop, etc.
+
+To add a new SHELL command pattern:
+
+```python
+# In router/rules.py, add to SHELL_COMMAND_PATTERNS:
+r'^mycommand\b',  # Matches: mycommand, mycommand -flags
+```
+
+Then test:
+
+```bash
+python -m router.cli "mycommand arg1 arg2"
+# Should output: SHELL route
+```
+
+### Adjusting Cache Thresholds
+
+Intention cache matching uses FTS5 BM25 scoring. Tuning:
+
+```python
+# In router/router.py, adjust threshold:
+CACHE_THRESHOLD = 0.85  # Default: 85% similarity
+```
+
+Lower threshold → more cache hits but risk false positives  
+Higher threshold → fewer cache hits but higher precision
+
+### Debugging a Query
+
+Enable verbose output:
+
+```bash
+python -m router.cli "complex query" --verbose --show-patterns
+```
+
+Output includes:
+- Route classification
+- Matched rules
+- Confidence scores
+- Pattern statistics
+- Interactive command detection
+
+### LLM Tracing
+
+All LLM calls are logged to `orchestrator.db` for debugging:
+
+```python
+from memory.api import Memory
+
+mem = Memory()
+traces = mem.get_llm_traces(limit=5)
+
+for trace in traces:
+    print(f"Role: {trace['role']}")
+    print(f"Prompt (first 200 chars): {trace['full_prompt'][:200]}")
+    print(f"Response (first 200 chars): {trace['full_response'][:200]}")
+```
+
+---
+
+## Testing
+
+Phase 2 has 92 comprehensive tests across 4 test suites:
+
+```bash
+pytest tests/ -v
+
+# Run specific test suite
+pytest tests/test_e2e_chat_cached.py -v          # CHAT, CACHED, routing
+pytest tests/test_e2e_planner.py -v              # PLANNER, Agent A/B
+pytest tests/test_context_handoff.py -v          # Chat↔Planner context
+pytest tests/test_interactive_commands.py -v     # Interactive command detection
+pytest tests/test_router_cli.py -v               # Router CLI tool
+```
+
+All tests pass. **v1.3 tests are skipped** (old agent.py references).
+
+---
+
+## Architecture Decisions
+
+### Why Unified Memory?
+
+v1.3 had fragmented memory stores (5+ files, multiple databases). v2.0 uses **one orchestrator.db** for:
+- Single source of truth
+- Transactional consistency
+- Easier debugging and metrics
+- No data sync issues
+
+### Why Shell-First?
+
+Shell commands are ~50% of real interactions. Executing them immediately (not through planner) preserves the feel of a real terminal. Interactive commands (vim, top) must have TTY access anyway.
+
+### Why FTS5 for Cache?
+
+SQLite FTS5 is zero-dependency, fast enough for MVP, and improves naturally with data. ML classifier deferred to Phase 6.
+
+### Why Conservative Fallback?
+
+Better to over-plan an ambiguous query than misroute it. PLANNER confidence defaults to 0.6; user can always interrupt.
+
+---
+
+## Known Limitations
+
+### Phase 2 (Current)
+
+- ⏭️ **Streaming**: Long-running commands not yet streamed (full output returned)
+- ⏭️ **Session Persistence**: Each orchestrator instance creates a new session (no resumption)
+- ⏭️ **Artifact Storage**: Large outputs (>1000 chars) stored as preview only
+- ⏭️ **ML Router**: Regex+cache only; ML classifier deferred to Phase 6
+
+### Not in Scope
+
+- Multi-user or tenant support
+- Distributed execution
+- Background/scheduled tasks
+- Custom agent roles beyond A/B/C
+
+---
+
+## Contributing
+
+1. **Check ready work**: `bd ready --json` to see unblocked issues
+2. **Claim your task**: `bd update bd-XXX --status in_progress`
+3. **Make changes**: New code in v2.0 modules (orchestrator/, router/, memory/)
+4. **Test**: Run `pytest` to ensure all tests pass
+5. **Commit**: Always commit `.beads/issues.jsonl` with code changes
+6. **Close issue**: `bd close bd-XXX --reason "Done"` when complete
+
+---
 
 ## License
 
-[Add license information]
+(Add your license here)
+
+---
+
+## Support
+
+For questions, file a new bead:
+
+```bash
+bd create "Question: How do I...?" -t task -p 2 --json
+```
+
+Detailed docs are in `history/` and `docs/` directories.
+
+---
+
+**Built with [Amp](https://ampcode.com) using GPT-4 Turbo + Oracle reasoning.**

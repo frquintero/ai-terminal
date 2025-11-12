@@ -15,6 +15,7 @@ from config import Config
 from llm_client import LLMClient
 from memory.api import Memory
 from orchestrator.prompts import get_agent_a_prompt, get_agent_b_prompt, get_agent_c_prompt
+from orchestrator.metrics import RouteMetrics, StepMetrics, LLMMetrics, get_metrics
 from tools import get_tool_schemas
 from orchestrator.plan_validator import PlanValidator, PlanValidationError
 from router.router import Router
@@ -156,6 +157,16 @@ class Orchestrator:
             
             # Calculate total latency
             result.latency_ms = int((time.time() - start_time) * 1000)
+            
+            # Record metrics
+            metrics = get_metrics()
+            metrics.record_route_metric(RouteMetrics(
+                route=router_result.route.value,
+                confidence=router_result.confidence,
+                latency_ms=result.latency_ms,
+                cache_hit=hasattr(router_result, 'cache_hit') and router_result.cache_hit is not None,
+                interactive=self.router.rule_engine.is_interactive_command(query)
+            ))
             
             # Update session activity
             self.memory.update_session_activity(self.session_id)
