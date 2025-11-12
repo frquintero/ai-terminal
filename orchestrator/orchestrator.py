@@ -717,6 +717,18 @@ Success: {success}
                 artifact_path=None  # TODO: Implement artifact storage for large outputs
             )
             
+            # Record step metrics
+            output_size = len(exec_result["result"]) if exec_result["result"] else 0
+            step_latency = exec_result.get("latency_ms", 0)
+            metrics = get_metrics()
+            metrics.record_step_metric(StepMetrics(
+                step_id=step_id,
+                tool_name=step["tool_name"],
+                success=exec_result["success"],
+                latency_ms=step_latency,
+                output_size_bytes=output_size
+            ))
+            
             if exec_result["success"]:
                 steps_completed += 1
             else:
@@ -873,7 +885,7 @@ Success: {success}
         previous_results: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """
-        Substitute variables in tool arguments.
+        Substitute variables in tool arguments using safe recursive dict walk.
         
         Supports:
         - $PREVIOUS_OUTPUT: Output from last step
@@ -886,26 +898,43 @@ Success: {success}
         Returns:
             Tool arguments with variables substituted
         """
-        import json
         import re
+        import copy
         
-        # Convert to JSON string for easy substitution
-        args_str = json.dumps(tool_args)
+        def substitute_in_value(value: Any) -> Any:
+            """Recursively substitute variables in a value (str, dict, list, or primitive)"""
+            if isinstance(value, str):
+                # Substitute $PREVIOUS_OUTPUT
+                if previous_results and "$PREVIOUS_OUTPUT" in value:
+                    last_output = previous_results[-1]["output"]
+                    value = value.replace("$PREVIOUS_OUTPUT", last_output)
+                
+                # Substitute $STEP_N_OUTPUT
+                for match in re.finditer(r'\$STEP_(\d+)_OUTPUT', value):
+                    step_num = int(match.group(1))
+                    if step_num < len(previous_results):
+                        step_output = previous_results[step_num]["output"]
+                        value = value.replace(match.group(0), step_output)
+                
+                return value
+            
+            elif isinstance(value, dict):
+                # Recursively process dict
+                return {k: substitute_in_value(v) for k, v in value.items()}
+            
+            elif isinstance(value, list):
+                # Recursively process list
+                return [substitute_in_value(item) for item in value]
+            
+            else:
+                # Primitive type (int, float, bool, None) - return as-is
+                return value
         
-        # Substitute $PREVIOUS_OUTPUT
-        if previous_results:
-            last_output = previous_results[-1]["output"]
-            args_str = args_str.replace("$PREVIOUS_OUTPUT", last_output)
+        # Deep copy to avoid mutating original
+        result = copy.deepcopy(tool_args)
         
-        # Substitute $STEP_N_OUTPUT
-        for match in re.finditer(r'\$STEP_(\d+)_OUTPUT', args_str):
-            step_num = int(match.group(1))
-            if step_num < len(previous_results):
-                step_output = previous_results[step_num]["output"]
-                args_str = args_str.replace(match.group(0), step_output)
-        
-        # Parse back to dict
-        return json.loads(args_str)
+        # Recursively substitute variables
+        return substitute_in_value(result)
     
     def _call_agent_c_summarizer(
         self,

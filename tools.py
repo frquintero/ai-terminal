@@ -28,10 +28,37 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse, quote_plus
 
 from shell_integration import ShellIntegration
 from command_parser import parse_command
-from event_memory import summarize_event_log
-from history_store import get_history_store, HistoryStoreError
-from history_sql import get_history_sql_executor, HistorySQLExecutionError
-from filesystem_context import get_fs_context_store
+
+# v1.3 legacy imports (deprecated in v2.0, gated behind USE_EVENT_MEMORY flag)
+# These modules are kept for historical reference only
+# v2.0 uses unified Memory API (orchestrator.db) instead
+_USE_EVENT_MEMORY = os.getenv('USE_EVENT_MEMORY', '0').lower() in ('1', 'true', 'yes')
+
+if _USE_EVENT_MEMORY:
+    # Only import if explicitly enabled
+    from event_memory import summarize_event_log
+    from history_store import get_history_store, HistoryStoreError
+    from history_sql import get_history_sql_executor, HistorySQLExecutionError
+    from filesystem_context import get_fs_context_store
+else:
+    # Stub implementations to prevent import errors
+    def summarize_event_log(*args, **kwargs):
+        return "Event memory disabled (set USE_EVENT_MEMORY=1 to enable legacy v1.3 tools)"
+    
+    def get_history_store():
+        raise RuntimeError("History store disabled (v1.3 legacy - use Memory API)")
+    
+    def get_history_sql_executor():
+        raise RuntimeError("History SQL disabled (v1.3 legacy - use Memory API)")
+    
+    def get_fs_context_store():
+        raise RuntimeError("Filesystem context disabled (v1.3 legacy - use get_context tool)")
+    
+    class HistoryStoreError(Exception):
+        pass
+    
+    class HistorySQLExecutionError(Exception):
+        pass
 
 
 # ============================================================================
@@ -2808,6 +2835,8 @@ except Exception as _e:
 # ============================================================================
 
 class HistorySQLTool(BaseTool):
+    # v1.3 legacy tool - only register if USE_EVENT_MEMORY=1
+    AUTO_REGISTER = _USE_EVENT_MEMORY
     """
     Run guarded SELECT/INSERT/UPDATE statements against the history DB.
     """
@@ -2895,6 +2924,8 @@ class HistorySQLTool(BaseTool):
 
 
 class HistorySchemaTool(BaseTool):
+    # v1.3 legacy tool - only register if USE_EVENT_MEMORY=1
+    AUTO_REGISTER = _USE_EVENT_MEMORY
     """Expose history DB schema metadata (tables + columns)."""
 
     def __init__(self):
@@ -3151,6 +3182,8 @@ class GetContextTool(BaseTool):
 # ============================================================================
 
 class FilesystemSnapshotTool(BaseTool):
+    # v1.3 legacy tool - only register if USE_EVENT_MEMORY=1
+    AUTO_REGISTER = _USE_EVENT_MEMORY
     """
     Fetch the latest persisted filesystem snapshot plus recent file events.
     """

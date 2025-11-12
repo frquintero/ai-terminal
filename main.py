@@ -12,22 +12,38 @@ import argparse
 
 # Check if running in virtual environment, if not, restart with venv
 def ensure_venv():
-    venv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'venv')
-    venv_python = os.path.join(venv_path, 'bin', 'python3')
-    
-    # Check if we're already in a venv or if venv python doesn't exist
+    """Cross-platform venv detection and activation (tries .venv, venv, Windows paths)"""
+    # Check if we're already in a venv
     if hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix):
         # Already in a virtual environment
         return
     
-    # Check if venv exists
-    if os.path.exists(venv_python):
-        # Restart with venv python
-        os.execv(venv_python, [venv_python] + sys.argv)
-    else:
-        print(f"Warning: Virtual environment not found at {venv_path}")
-        print("Run: python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt")
-        sys.exit(1)
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Try multiple venv locations and Python paths (cross-platform)
+    venv_candidates = [
+        # Linux/Mac: .venv/bin/python3, .venv/bin/python
+        (os.path.join(app_dir, '.venv'), 'bin', ['python3', 'python']),
+        # Linux/Mac: venv/bin/python3, venv/bin/python
+        (os.path.join(app_dir, 'venv'), 'bin', ['python3', 'python']),
+        # Windows: .venv\Scripts\python.exe
+        (os.path.join(app_dir, '.venv'), 'Scripts', ['python.exe', 'python']),
+        # Windows: venv\Scripts\python.exe
+        (os.path.join(app_dir, 'venv'), 'Scripts', ['python.exe', 'python']),
+    ]
+    
+    for venv_base, bin_dir, python_names in venv_candidates:
+        for python_name in python_names:
+            venv_python = os.path.join(venv_base, bin_dir, python_name)
+            if os.path.exists(venv_python):
+                # Found a valid venv python - restart with it
+                os.execv(venv_python, [venv_python] + sys.argv)
+    
+    # No venv found
+    print("Warning: Virtual environment not found")
+    print("Run: python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt")
+    print("(On Windows: python -m venv .venv && .venv\\Scripts\\activate && pip install -r requirements.txt)")
+    sys.exit(1)
 
 # Metadata / CLI
 VERSION = "2.0"  # Multi-role orchestrator architecture

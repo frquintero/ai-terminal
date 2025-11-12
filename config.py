@@ -59,15 +59,16 @@ def load_config() -> Config:
         base_url = 'https://api.minimax.io/v1'
     elif agent_type == 'custom':
         # Custom OpenAI-compatible endpoint
-        api_key = os.getenv('CUSTOM_API_KEY')
+        # Accept both CUSTOM_* and OPENAI_* prefixes (prefer CUSTOM)
+        api_key = os.getenv('CUSTOM_API_KEY') or os.getenv('OPENAI_API_KEY')
         if not api_key:
-            raise ValueError("CUSTOM_API_KEY is required when AGENT_TYPE=custom")
-        model = os.getenv('CUSTOM_MODEL')
+            raise ValueError("CUSTOM_API_KEY or OPENAI_API_KEY is required when AGENT_TYPE=custom")
+        model = os.getenv('CUSTOM_MODEL') or os.getenv('OPENAI_MODEL') or os.getenv('MODEL')
         if not model:
-            raise ValueError("CUSTOM_MODEL is required when AGENT_TYPE=custom")
-        base_url = os.getenv('CUSTOM_BASE_URL')
+            raise ValueError("CUSTOM_MODEL, OPENAI_MODEL, or MODEL is required when AGENT_TYPE=custom")
+        base_url = os.getenv('CUSTOM_BASE_URL') or os.getenv('OPENAI_BASE_URL')
         if not base_url:
-            raise ValueError("CUSTOM_BASE_URL is required when AGENT_TYPE=custom")
+            raise ValueError("CUSTOM_BASE_URL or OPENAI_BASE_URL is required when AGENT_TYPE=custom")
     else:
         raise ValueError(f"Invalid AGENT_TYPE: {agent_type}. Must be 'minimax', 'kimi2', or 'custom'")
 

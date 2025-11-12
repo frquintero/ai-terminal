@@ -132,6 +132,18 @@ class LLMClient:
                     latency_ms=latency_ms
                 )
             
+            # Record LLM metrics
+            if self.role and usage_dict:
+                from orchestrator.metrics import get_metrics, LLMMetrics
+                metrics = get_metrics()
+                metrics.record_llm_metric(LLMMetrics(
+                    role=self.role,
+                    model=self.config.model,
+                    prompt_tokens=usage_dict["prompt_tokens"],
+                    completion_tokens=usage_dict["completion_tokens"],
+                    latency_ms=latency_ms
+                ))
+            
             return {
                 "message": assistant_message,
                 "usage": usage_dict,
