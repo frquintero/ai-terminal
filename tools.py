@@ -2092,6 +2092,22 @@ class RunCommandTool(BaseTool):
             "ps aux | grep python",
             "df -h"
         ]
+    
+    def get_effective_cwd(self) -> str:
+        """
+        Get the effective current working directory for the shell.
+        
+        Returns the sandbox working directory (ai-terminal-wd) that the shell executes in,
+        NOT the host process cwd. This is used by the orchestrator to build accurate
+        system prompts for agents.
+        
+        - If isolation enabled: returns "/workspace" (mount point inside rootfs)
+        - If isolation disabled: returns self.working_dir (host sandbox path)
+        """
+        if self.shell.isolation_enabled:
+            return "/workspace"
+        else:
+            return self.working_dir
 
     def execute(self, command: str) -> str:
         """
@@ -2143,7 +2159,12 @@ class RunCommandTool(BaseTool):
             
             # Execute command via shell integration
             # Force reset to working directory before each command (stateless cwd)
-            wrapped = f"cd {shlex.quote(self.working_dir)}; {command}"
+            # If isolation is enabled, shell mounts working_dir to /workspace, so use that
+            if self.shell.isolation_enabled:
+                cwd_prefix = "cd /workspace"
+            else:
+                cwd_prefix = f"cd {shlex.quote(self.working_dir)}"
+            wrapped = f"{cwd_prefix}; {command}"
             result = self.shell.run_command(wrapped, reset_dir=self.working_dir)
             try:
                 _record_shell_snapshot(

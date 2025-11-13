@@ -124,6 +124,19 @@ class Orchestrator:
         
         return session_id
     
+    def _get_effective_shell_cwd(self) -> str:
+        """
+        Get the effective shell working directory for system prompts.
+        
+        Returns the actual sandbox/container cwd where commands execute,
+        not the host process cwd. This ensures agents receive accurate
+        context about where their commands will run.
+        
+        - If isolation enabled: returns "/workspace" (rootfs mount point)
+        - If isolation disabled: returns TOOLS['run_command'].working_dir (sandbox path)
+        """
+        return TOOLS['run_command'].get_effective_cwd()
+    
     def handle_query(self, query: str) -> OrchestratorResult:
         """
         Main entry point - orchestrate query through full pipeline.
@@ -228,7 +241,7 @@ class Orchestrator:
             role="C",
             session_id=self.session_id,
             tool_registry=TOOLS,
-            shell_cwd=os.getcwd()
+            shell_cwd=self._get_effective_shell_cwd()
         )
         
         # Build messages for Agent C
@@ -438,7 +451,7 @@ Success: {success}
             role="C",
             session_id=self.session_id,
             tool_registry=TOOLS,
-            shell_cwd=os.getcwd()
+            shell_cwd=self._get_effective_shell_cwd()
         )
         
         messages = [
@@ -488,7 +501,7 @@ Success: {success}
             role="C",
             session_id=self.session_id,
             tool_registry=TOOLS,
-            shell_cwd=os.getcwd()
+            shell_cwd=self._get_effective_shell_cwd()
         )
         
         # Build messages for Agent C
@@ -561,7 +574,7 @@ Success: {success}
             role="A",
             session_id=self.session_id,
             tool_registry=TOOLS,
-            shell_cwd=os.getcwd()
+            shell_cwd=self._get_effective_shell_cwd()
         )
         
         # Build Agent A prompt
@@ -938,7 +951,7 @@ Success: {success}
             role="B",
             session_id=self.session_id,
             tool_registry=TOOLS,
-            shell_cwd=os.getcwd()
+            shell_cwd=self._get_effective_shell_cwd()
         )
         
         # Build Agent B prompt with only current tool's schema
@@ -1148,21 +1161,21 @@ Step Results Summary:
                 context += f"\n  Output: {output_preview}"
             else:
                 context += f"\n  Error: {result['error']}"
-        
-        # Build system context for Agent C
-        system_context = self.context_builder.build_for_role(
-            role="C",
-            session_id=self.session_id,
-            tool_registry=TOOLS,
-            shell_cwd=os.getcwd()
-        )
-        
-        messages = [
-            {"role": "system", "content": system_context + "\n\n" + get_agent_c_prompt("summarizer")},
-            {"role": "user", "content": context}
-        ]
-        
-        # Call LLM in Agent C role
+                
+                # Build system context for Agent C
+                system_context = self.context_builder.build_for_role(
+                role="C",
+                session_id=self.session_id,
+                tool_registry=TOOLS,
+                shell_cwd=self._get_effective_shell_cwd()
+                )
+                
+                messages = [
+                {"role": "system", "content": system_context + "\n\n" + get_agent_c_prompt("summarizer")},
+                {"role": "user", "content": context}
+                ]
+                
+                # Call LLM in Agent C role
         llm_client = LLMClient(
             config=self.config,
             role="C",
