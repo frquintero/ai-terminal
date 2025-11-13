@@ -9,6 +9,7 @@ PLANNER route implemented in Phase 3
 import os
 import time
 import uuid
+from string import Formatter
 from typing import Any, Dict, List, Optional
 
 from config import Config
@@ -805,19 +806,32 @@ Success: {success}
                 current_step_id=len(plan["steps"]) - 1
             )
             
-            # Call Agent A summarizer to generate final response
-            agent_c_response = self._call_agent_a_summarizer(
-                cycle_id=cycle_id,
-                query=query,
-                plan=plan,
-                execution_result=execution_result
-            )
+            if execution_result["success"]:
+                try:
+                    final_response = self._render_narration_template(
+                        template=plan["narration_template"],
+                        output_values=execution_result.get("output_values", {})
+                    )
+                except KeyError as e:
+                    final_response = (
+                        "[Template rendering failed: "
+                        f"missing value for '{e.args[0]}']\n\n"
+                        "Raw outputs:\n"
+                        f"{execution_result.get('output_values', {})}"
+                    )
+            else:
+                final_response = self._call_agent_a_summarizer(
+                    cycle_id=cycle_id,
+                    query=query,
+                    plan=plan,
+                    execution_result=execution_result
+                )
             
             return OrchestratorResult(
                 cycle_id=cycle_id,
                 route="PLANNER",
                 query=query,
-                agent_c_response=agent_c_response,
+                agent_c_response=final_response,
                 execution_result=execution_result
             )
         
@@ -880,6 +894,7 @@ Success: {success}
         step_results = []
         steps_completed = 0
         steps_failed = 0
+        output_values: Dict[str, str] = {}
         
         for step_id, step in enumerate(plan["steps"]):
             # Update current step in task_state
@@ -943,11 +958,12 @@ Success: {success}
             )
             
             # Record result
+            description = step.get("description", "")
             step_result = {
                 "step_id": step_id,
                 "tool_name": step["tool_name"],
                 "tool_args": tool_args,
-                "description": step["description"],
+                "description": description,
                 "success": exec_result["success"],
                 "output": exec_result["result"],
                 "exit_code": exec_result.get("exit_code"),
@@ -982,6 +998,7 @@ Success: {success}
             
             if exec_result["success"]:
                 steps_completed += 1
+                self._record_step_outputs(step, exec_result["result"], output_values)
             else:
                 steps_failed += 1
                 # For now, continue execution even on failure
@@ -992,7 +1009,8 @@ Success: {success}
             "steps_failed": steps_failed,
             "total_steps": len(plan["steps"]),
             "step_results": step_results,
-            "success": steps_failed == 0
+            "success": steps_failed == 0,
+            "output_values": output_values
         }
     
     def _call_agent_b(
@@ -1279,6 +1297,37 @@ Step Results Summary:
             return f"[Agent A summarizer failed: {llm_result['error']}]\n\n{context}"
         
         return llm_result["message"].content or context
+
+    def _render_narration_template(
+        self,
+        template: str,
+        output_values: Dict[str, str]
+    ) -> str:
+        """Fill narration template with collected output values."""
+        formatter = Formatter()
+        required_keys = {
+            field_name
+            for _, field_name, _, _ in formatter.parse(template)
+            if field_name
+        }
+        missing = [key for key in required_keys if key not in output_values]
+        if missing:
+            raise KeyError(missing[0])
+        return template.format(**output_values)
+
+    def _record_step_outputs(
+        self,
+        step: Dict[str, Any],
+        raw_output: Optional[str],
+        output_values: Dict[str, str]
+    ) -> None:
+        """Map each output key from the step to the raw output."""
+        output_text = raw_output or ""
+        for key in step.get("output_keys", []):
+            normalized = key.strip()
+            if not normalized:
+                continue
+            output_values[normalized] = output_text
     
     def _cache_execution(
         self,
