@@ -17,12 +17,13 @@ from memory.api import Memory
 from orchestrator.prompts import get_agent_a_prompt, get_agent_b_prompt, get_agent_c_prompt
 from orchestrator.metrics import RouteMetrics, StepMetrics, LLMMetrics, get_metrics
 from orchestrator.system_context_builder import SystemContextBuilder
-from orchestrator.command_classifier import is_interactive_command
+from orchestrator.command_classifier import classify_query, QueryRoute, is_interactive_command
 from tools import get_tool_schemas
 from orchestrator.plan_validator import PlanValidator, PlanValidationError
 from orchestrator.plan_schema import detect_response_type
-from router.router import Router
+from router.router import RouterResult
 from router.rules import Route
+from router.cache import IntentionCache
 from tool_executor import ToolExecutor
 from tools import TOOLS
 
@@ -61,6 +62,32 @@ class OrchestratorResult:
         }
 
 
+class _RuleEngineShim:
+    """Compatibility shim exposing is_interactive_command."""
+    
+    @staticmethod
+    def is_interactive_command(query: str) -> bool:
+        return is_interactive_command(query)
+
+
+class _RouterShim:
+    """
+    Lightweight adapter so legacy tests/code that reference orchestrator.router
+    continue to work while the real Router component is removed.
+    """
+    
+    def __init__(self, orchestrator: "Orchestrator"):
+        self._orchestrator = orchestrator
+        self.intention_cache = orchestrator.intention_cache
+        self.rule_engine = _RuleEngineShim()
+    
+    def classify(self, query: str) -> RouterResult:
+        return self._orchestrator._classify_query(query)
+    
+    def log_decision(self, cycle_id: str, query: str, result: RouterResult):
+        self._orchestrator._log_route_decision(cycle_id, query, result)
+
+
 class Orchestrator:
     """
     Main orchestrator for v2.0 multi-role architecture.
@@ -77,6 +104,10 @@ class Orchestrator:
     
     # Constants
     MAX_PLAN_RETRIES = 2  # Max attempts for Agent A to generate valid plan
+    SHELL_CONFIDENCE = 0.95
+    CACHED_CONFIDENCE = 0.90
+    CHAT_CONFIDENCE = 0.85
+    PLANNER_CONFIDENCE = 0.50
     
     def __init__(self, config: Config, memory: Optional[Memory] = None):
         """
@@ -90,7 +121,8 @@ class Orchestrator:
         self.memory = memory or Memory()
         
         # Initialize components
-        self.router = Router(self.memory)
+        self.intention_cache = IntentionCache(self.memory)
+        self.router = _RouterShim(self)  # Legacy compatibility shim
         self.tool_executor = ToolExecutor()  # ToolExecutor does NOT access memory directly
         self.context_builder = SystemContextBuilder(memory=self.memory)
         
@@ -137,6 +169,73 @@ class Orchestrator:
         - If isolation disabled: returns TOOLS['run_command'].working_dir (sandbox path)
         """
         return TOOLS['run_command'].get_effective_cwd()
+
+    def _classify_query(self, query: str) -> RouterResult:
+        """
+        Classify the query using local heuristics (shell/chat/cache/planner).
+        
+        Replaces the legacy Router component while preserving RouterResult
+        semantics for downstream logging/tests.
+        """
+        start_time = time.time()
+        classification = classify_query(query)
+        latency_ms = lambda: int((time.time() - start_time) * 1000)
+        
+        if classification.route == QueryRoute.SHELL:
+            return RouterResult(
+                route=Route.SHELL,
+                confidence=self.SHELL_CONFIDENCE,
+                latency_ms=latency_ms(),
+                matched_rule=classification.matched_pattern
+            )
+        
+        cache_hit = self.intention_cache.lookup(query)
+        if cache_hit:
+            return RouterResult(
+                route=Route.CACHED,
+                confidence=self.CACHED_CONFIDENCE,
+                latency_ms=latency_ms(),
+                cache_hit=cache_hit
+            )
+        
+        if classification.route == QueryRoute.CHAT:
+            return RouterResult(
+                route=Route.CHAT,
+                confidence=self.CHAT_CONFIDENCE,
+                latency_ms=latency_ms(),
+                matched_rule=classification.matched_pattern
+            )
+        
+        return RouterResult(
+            route=Route.PLANNER,
+            confidence=self.PLANNER_CONFIDENCE,
+            latency_ms=latency_ms()
+        )
+
+    def _log_route_decision(self, cycle_id: str, query: str, result: RouterResult):
+        """Persist route decision metadata to Memory."""
+        cache_hit_tool = None
+        cache_hit_args = None
+        
+        if result.cache_hit:
+            cache_hit_tool = result.cache_hit.tool_name
+            cache_hit_args = result.cache_hit.tool_args
+        
+        rules = {}
+        if result.matched_rule:
+            rules["pattern"] = result.matched_rule
+        if result.cache_hit:
+            rules["cache_id"] = result.cache_hit.cache_id
+            rules["cache_score"] = result.cache_hit.score
+        
+        self.memory.save_router_decision(
+            cycle_id=cycle_id,
+            route=result.route.value,
+            confidence=result.confidence,
+            rules=rules if rules else None,
+            cache_hit_tool=cache_hit_tool,
+            cache_hit_args=cache_hit_args
+        )
     
     def handle_query(self, query: str) -> OrchestratorResult:
         """
@@ -163,9 +262,9 @@ class Orchestrator:
             query=query
         )
         
-        # Step 2: Router classification
-        router_result = self.router.classify(query)
-        self.router.log_decision(cycle_id, query, router_result)
+        # Step 2: Query classification (routerless)
+        router_result = self._classify_query(query)
+        self._log_route_decision(cycle_id, query, router_result)
         
         # Step 3: Route-specific execution
         try:
