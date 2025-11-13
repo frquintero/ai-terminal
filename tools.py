@@ -2161,11 +2161,13 @@ class RunCommandTool(BaseTool):
             # Force reset to working directory before each command (stateless cwd)
             # If isolation is enabled, shell mounts working_dir to /workspace, so use that
             if self.shell.isolation_enabled:
+                reset_dir = "/workspace"
                 cwd_prefix = "cd /workspace"
             else:
+                reset_dir = self.working_dir
                 cwd_prefix = f"cd {shlex.quote(self.working_dir)}"
             wrapped = f"{cwd_prefix}; {command}"
-            result = self.shell.run_command(wrapped, reset_dir=self.working_dir)
+            result = self.shell.run_command(wrapped, reset_dir=reset_dir)
             try:
                 _record_shell_snapshot(
                     command=command,
