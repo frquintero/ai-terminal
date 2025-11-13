@@ -70,52 +70,6 @@ You MUST respond with ONLY valid JSON in this exact structure:
 - Use tools from the available list ONLY
 - Descriptions should be brief (1 sentence)
 
-## Examples
-
-**Example 1: Simple query (shell-first)**
-User: "Find all Python files and count lines"
-Plan:
-{{
-  "steps": [
-    {{
-      "tool_name": "run_command",
-      "intent": "find all Python files recursively and count total lines of code",
-      "description": "Find all Python files and count total lines"
-    }}
-  ]
-}}
-
-**Example 2: Multi-step task**
-User: "Analyze logs, extract errors, save to file"
-Plan:
-{{
-  "steps": [
-    {{
-      "tool_name": "run_command",
-      "intent": "extract ERROR lines from /var/log/app.log, limit to last 100 entries",
-      "description": "Extract last 100 error lines from log"
-    }},
-    {{
-      "tool_name": "write_file",
-      "intent": "save the extracted errors to a file named errors.txt",
-      "description": "Save errors to file"
-    }}
-  ]
-}}
-
-**Example 3: Data analysis**
-User: "Download JSON API, extract names field, count unique values"
-Plan:
-{{
-  "steps": [
-    {{
-      "tool_name": "run_command",
-      "intent": "download JSON from https://api.example.com/data, extract 'name' field, count unique occurrences",
-      "description": "Download API data, extract names, count unique values"
-    }}
-  ]
-}}
-
 ## Current System Context
 
 - Operating System: {os_info}
@@ -329,7 +283,7 @@ def get_agent_b_prompt(
     
     # Format current step info
     context["plan_summary"] = plan_summary
-    context["current_step_id"] = current_step_id
+    context["current_step_id"] = str(current_step_id)  # Convert to string for template
     context["tool_name"] = current_step["tool_name"]
     context["intent"] = current_step["intent"]
     context["description"] = current_step["description"]

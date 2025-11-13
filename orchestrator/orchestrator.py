@@ -673,9 +673,6 @@ Success: {success}
         steps_completed = 0
         steps_failed = 0
         
-        # Get tool schemas for Agent B
-        tool_schemas = get_tool_schemas()
-        
         for step_id, step in enumerate(plan["steps"]):
             # Update current step in task_state
             self.memory.update_task_status(
@@ -689,8 +686,7 @@ Success: {success}
                 cycle_id=cycle_id,
                 plan=plan,
                 step_id=step_id,
-                previous_results=step_results,
-                tool_schemas=tool_schemas
+                previous_results=step_results
             )
             
             if not agent_b_result["success"]:
@@ -783,8 +779,7 @@ Success: {success}
         cycle_id: str,
         plan: Dict[str, Any],
         step_id: int,
-        previous_results: List[Dict[str, Any]],
-        tool_schemas: List[Dict[str, Any]]
+        previous_results: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """
         Call Agent B to generate precise tool_args for a step.
@@ -794,7 +789,6 @@ Success: {success}
             plan: Complete plan from Agent A
             step_id: Current step index
             previous_results: Results from previous steps
-            tool_schemas: Tool schemas for Agent B
         
         Returns:
             Dict with:
@@ -804,6 +798,20 @@ Success: {success}
         """
         import json
         
+        # Get current step's tool name and schema
+        current_step = plan["steps"][step_id]
+        tool_name = current_step["tool_name"]
+        
+        # Get only the current tool's schema (not all tools)
+        tool = TOOLS.get(tool_name)
+        if not tool:
+            return {
+                "success": False,
+                "error": f"Tool '{tool_name}' not found in registry"
+            }
+        
+        current_tool_schema = [tool.schema]  # Single-item list for consistency with prompt format
+        
         # Build system context for Agent B
         system_context = self.context_builder.build_for_role(
             role="B",
@@ -812,12 +820,12 @@ Success: {success}
             shell_cwd=os.getcwd()
         )
         
-        # Build Agent B prompt
+        # Build Agent B prompt with only current tool's schema
         system_prompt = system_context + "\n\n" + get_agent_b_prompt(
             plan=plan,
             current_step_id=step_id,
             previous_outputs=previous_results,
-            tool_schemas=tool_schemas
+            tool_schemas=current_tool_schema
         )
         
         messages = [
