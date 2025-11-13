@@ -17,6 +17,7 @@ from memory.api import Memory
 from orchestrator.prompts import get_agent_a_prompt, get_agent_b_prompt, get_agent_c_prompt
 from orchestrator.metrics import RouteMetrics, StepMetrics, LLMMetrics, get_metrics
 from orchestrator.system_context_builder import SystemContextBuilder
+from orchestrator.command_classifier import is_interactive_command
 from tools import get_tool_schemas
 from orchestrator.plan_validator import PlanValidator, PlanValidationError
 from orchestrator.plan_schema import detect_response_type
@@ -189,7 +190,7 @@ class Orchestrator:
                 confidence=router_result.confidence,
                 latency_ms=result.latency_ms,
                 cache_hit=hasattr(router_result, 'cache_hit') and router_result.cache_hit is not None,
-                interactive=self.router.rule_engine.is_interactive_command(query)
+                interactive=is_interactive_command(query)
             ))
             
             # Update session activity
@@ -316,7 +317,7 @@ class Orchestrator:
         Target: <500ms end-to-end for non-interactive commands
         """
         # Detect if this is an interactive command requiring TTY
-        is_interactive = self.router.rule_engine.is_interactive_command(query)
+        is_interactive = is_interactive_command(query)
         tool_name = "run_interactive" if is_interactive else "run_command"
         
         # Execute command directly
