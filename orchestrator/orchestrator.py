@@ -1174,8 +1174,8 @@ Step Results Summary:
                 {"role": "system", "content": system_context + "\n\n" + get_agent_c_prompt("summarizer")},
                 {"role": "user", "content": context}
                 ]
-                
-                # Call LLM in Agent C role
+
+        # Call LLM in Agent C role
         llm_client = LLMClient(
             config=self.config,
             role="C",

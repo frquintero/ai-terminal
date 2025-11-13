@@ -6,121 +6,150 @@
 
 For complete project details, setup instructions, and architecture overview, see **[README.md](README.md)**.
 
-## Architecture Overview
+## Architecture Overview (v3.0)
+
+**UPGRADED**: Router removed. Agent A is now the single decision-maker.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                         USER QUERY                               │
 └─────────────────────────┬───────────────────────────────────────┘
-                          │
-                          ▼
+                           │
+                           ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  ROUTER: Classify query intent                                   │
-│  Routes: SHELL (130+ patterns) | CACHED | CHAT | PLANNER        │
-└─────────────────────────┬───────────────────────────────────────┘
-                          │
-        ┌─────────────────┼─────────────────┬──────────────────┐
-        │                 │                 │                  │
-        ▼                 ▼                 ▼                  ▼
-    ┌───────┐      ┌──────────┐      ┌──────────┐      ┌──────────┐
-    │ SHELL │      │  CACHED  │      │   CHAT   │      │ PLANNER  │
-    │ Fast  │      │ FTS5 DB  │      │ Agent C  │      │  Multi-  │
-    │ Exec  │      │  Lookup  │      │  Direct  │      │  Agent   │
-    └───┬───┘      └────┬─────┘      └────┬─────┘      └────┬─────┘
-        │               │                  │                 │
-        │               │                  │                 ▼
-        │               │                  │          ┌──────────────┐
-        │               │                  │          │  AGENT A     │
-        │               │                  │          │  (Planner)   │
-        │               │                  │          │  Strategic   │
-        │               │                  │          └──────┬───────┘
-        │               │                  │                 │
-        │               │                  │                 ▼
-        │               │                  │          ┌──────────────┐
-        │               │                  │          │  AGENT B     │
-        │               │                  │          │  (Command    │
-        │               │                  │          │   Engineer)  │
-        │               │                  │          └──────┬───────┘
-        │               │                  │                 │
-        │               │                  │                 ▼
-        │               │                  │          ┌──────────────┐
-        │               │                  │          │  TOOLS       │
-        │               │                  │          │  Execution   │
-        │               │                  │          └──────┬───────┘
-        │               │                  │                 │
-        └───────────────┴──────────────────┴─────────────────┘
-                                    │
-                                    ▼
-                          ┌──────────────────┐
-                          │    AGENT C       │
-                          │   (Narrator/     │
-                          │   Chat/Summary)  │
-                          └─────────┬────────┘
-                                    │
-                                    ▼
-                          ┌──────────────────┐
-                          │  USER RESPONSE   │
-                          └──────────────────┘
+│               AGENT A: Decision-Maker                            │
+│   Returns: direct_answer | clarify | steps (with template)      │
+└──────────────┬───────────────────────────────┬───────────────────┘
+               │                               │
+          (answer)                        (execute)
+               │                               │
+               ▼                               ▼
+        ┌────────────┐              ┌──────────────────┐
+        │ Direct     │              │  AGENT B         │
+        │ Answer     │              │  (Command        │
+        │ (2-3 sen)  │              │   Engineer)      │
+        └─────┬──────┘              │  Generates       │
+              │                     │  tool_args       │
+              │                     └──────┬───────────┘
+              │                            │
+              │                            ▼
+              │                    ┌──────────────────┐
+              │                    │  TOOLS           │
+              │                    │  Execution +     │
+              │                    │  Exports         │
+              │                    └──────┬───────────┘
+              │                            │
+              │                            ▼
+              │                    ┌──────────────────┐
+              │                    │  Variables       │
+              │                    │  Binding &       │
+              │                    │  Placeholder     │
+              │                    │  Substitution    │
+              │                    └──────┬───────────┘
+              │                            │
+              └────────────┬───────────────┘
+                           │
+                           ▼
+                  ┌─────────────────────┐
+                  │  Final Response     │
+                  │  (Template or       │
+                  │   Summary)          │
+                  └────────┬────────────┘
+                           │
+                           ▼
+                  ┌─────────────────────┐
+                  │  USER RESPONSE      │
+                  └─────────────────────┘
 ```
 
-### Key Components
+### Key Components (v3.0)
 
-1. **Router**: Classifies user queries into 4 routes
-   - **SHELL**: Direct execution (130+ regex patterns)
-   - **CACHED**: Previously executed commands (FTS5 lookup)
-   - **CHAT**: Simple informational queries → Agent C directly
-   - **PLANNER**: Complex multi-step tasks → Agent A → Agent B loop
+1. **Agent A (Decision-Maker)**: Single entry point for all queries
+   - Three response types:
+     - `{"direct_answer": "..."}` — For no-tool questions
+     - `{"clarify": "..."}` — For ambiguous queries
+     - `{"steps": [...], "final_response_template": "..."}` — For execution plans
+   - Replaces Router entirely
 
-2. **Agent A (Planner)**: Strategic task decomposer
-   - Generates high-level execution plans
-   - Three response types: execution plan, clarification request, delegation
-   - Does NOT generate precise arguments (that's Agent B's job)
-
-3. **Agent B (Command Engineer)**: Tactical executor
+2. **Agent B (Command Engineer)**: Tactical executor
    - Converts Agent A's intent into precise tool arguments
-   - Generates exact shell commands, file paths, parameters
+   - Returns JSON: `{"tool_name": "...", "tool_args": {...}}`
+   - Uses exported variables via `${var}` placeholders
 
-4. **Agent C (Narrator/Chat/Summarizer)**: Universal narrator
-   - **Chat mode**: Direct conversational responses (CHAT route)
-   - **Narrator mode**: Translates tool outputs into natural language (PLANNER route)
-   - **Summarizer mode**: Provides final summary of multi-step tasks
+3. **Exports & Placeholders**: Deterministic variable extraction
+   - Step can export: `{"name": "count", "method": "regex", "pattern": "^(\\d+)\\s*$"}`
+   - Later steps reference: `${count}` in tool_args
+   - Final response uses: `{count}` in template
+   - Stored in `variable_bindings` table for auditability
+
+4. **Repair Loop**: On extract failure
+   - Call Agent A with structured repair request
+   - Agent A patches the step or suggests remediation
+   - Max 1 repair per step; then fail with clarity
 
 5. **Memory (SQLite Database)**: `logs/orchestrator.db`
-   - Stores all cycles, agent interactions, step outputs
-   - Enables context retrieval and intention caching
-   - Powers FTS5 full-text search
+   - Original tables: `router_decisions`, `step_outputs`, `chat_history`, `interactions`, `llm_traces`
+   - New tables: `variable_bindings`, `step_commands`, `direct_answers` (cache)
+   - Enables full audit trail of variable extraction and placeholder resolution
 
-## Database Schema
+## Database Schema (v3.0)
 
-### Key Tables
+### Original Tables (preserved for backward compatibility)
 
-1. **`router_decisions`**: Route classification per cycle
+1. **`router_decisions`**: Cycle metadata
    - `cycle_id`: Unique identifier (UUID)
-   - `route`: SHELL | CACHED | CHAT | PLANNER
+   - `route`: ANSWER | CLARIFY | EXECUTE (new); old: SHELL | CACHED | CHAT | PLANNER
    - `query_text`: User's original query
-   - `confidence`: Router confidence score (0.0-1.0)
+   - `confidence`: Agent A confidence score (0.0-1.0)
 
-2. **`interactions`**: LLM agent calls (A, B, or C)
+2. **`interactions`**: LLM agent calls (A or B; no more C)
    - `cycle_id`: Links to router_decisions
-   - `role`: 'A' | 'B' | 'C'
+   - `role`: 'A' | 'B'
    - `prompt_preview`: First 500 chars of prompt
    - `response_preview`: First 500 chars of response
    - `token_usage_json`: Token counts
    - `latency_ms`: LLM call latency
 
-3. **`step_outputs`**: Tool execution results (PLANNER route only)
+3. **`step_outputs`**: Tool execution results
    - `cycle_id`: Links to router_decisions
    - `step_id`: Step number in plan (0-indexed)
    - `tool_name`: Tool executed (e.g., "run_command")
    - `tool_args_json`: Precise arguments from Agent B
    - `success`: Boolean success flag
    - `output_preview`: Tool output (truncated to 10KB)
+   - `exit_code`: Exit code (for shell commands)
 
-4. **`chat_history`**: Conversational exchanges (CHAT route)
+4. **`chat_history`**: Conversational exchanges (ANSWER route with interaction)
    - `session_id`: Session identifier
    - `cycle_id`: Links to router_decisions
    - `user_query`: User's question
-   - `agent_response`: Agent C's response
+   - `agent_response`: Agent A's answer
+
+### New Tables (v3.0)
+
+5. **`variable_bindings`**: Extracted variables from step outputs
+   - `cycle_id`: Links to router_decisions
+   - `step_id`: Which step exported this variable
+   - `var_name`: Variable name (e.g., "py_count")
+   - `var_value`: Extracted value (e.g., "42")
+   - `extraction_method`: "regex" | "json" | "lines" | "all"
+   - `extractor_spec`: Full ExportSpec as JSON (includes pattern, transform, etc.)
+   - `created_at`: When extracted
+
+6. **`step_commands`**: Resolved tool arguments (for audit trail)
+   - `cycle_id`: Links to router_decisions
+   - `step_id`: Which step
+   - `tool_name`: Tool executed
+   - `command_template`: Step description (original intent)
+   - `resolved_command`: Fully resolved tool_args JSON (after ${var} substitution)
+   - `substitution_log`: JSON log of {var_name: original_value} for audit
+   - `created_at`: When executed
+
+7. **`direct_answers`** (optional cache): Direct answers to exact queries
+   - `normalized_query`: Lowercased, stripped query (unique key)
+   - `answer`: Agent A's cached answer
+   - `created_at`: When cached
+   - `expires_at`: TTL for freshness
 
 ## How to Debug a Cycle
 
@@ -259,23 +288,209 @@ If the cycle isn't found, it displays the 5 most recent cycles to help you find 
   2. `{"clarify": "..."}` - Ask user
   3. `{"delegate_to_chat": "..."}` - Route to Agent C
 
+## Query Audit Examples (v3.0)
+
+### Query 1: Trace variable extraction across a multi-step cycle
+
+**Scenario**: User runs a multi-step task. Want to see what variables were extracted and how they were used.
+
+```bash
+# Find the cycle ID
+CYCLE_ID="abc12345-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+# 1. Show the plan and Agent A decision
+sqlite3 logs/orchestrator.db "\
+  SELECT cycle_id, route, query_text 
+  FROM router_decisions 
+  WHERE cycle_id LIKE '${CYCLE_ID}%';"
+
+# 2. Show all variables extracted in this cycle
+sqlite3 logs/orchestrator.db "\
+  SELECT step_id, var_name, var_value, extraction_method 
+  FROM variable_bindings 
+  WHERE cycle_id LIKE '${CYCLE_ID}%' 
+  ORDER BY step_id, var_name;"
+
+# 3. Show how variables were used in tool_args (audit trail)
+sqlite3 logs/orchestrator.db "\
+  SELECT step_id, tool_name, resolved_command, substitution_log 
+  FROM step_commands 
+  WHERE cycle_id LIKE '${CYCLE_ID}%' 
+  ORDER BY step_id;"
+
+# 4. Show actual step execution results
+sqlite3 logs/orchestrator.db "\
+  SELECT step_id, tool_name, success, exit_code, output_preview 
+  FROM step_outputs 
+  WHERE cycle_id LIKE '${CYCLE_ID}%' 
+  ORDER BY step_id;"
+```
+
+**Example output**:
+```
+step_id | var_name  | var_value | extraction_method
+--------|-----------|-----------|------------------
+0       | py_count  | 42        | regex
+1       | lines_sum | 1523      | regex
+
+step_id | tool_name  | resolved_command              | substitution_log
+--------|------------|-------------------------------|------------------
+0       | run_command| {"command":"ls -1 *.py..."} | {}
+1       | run_command| {"command":"wc -l ${py_count}..."} | {"py_count": "42"}
+```
+
+### Query 2: Check for export failures and repair loop triggers
+
+**Scenario**: A step's export failed. Did Agent A repair it?
+
+```bash
+# Find cycles with failed exports
+sqlite3 logs/orchestrator.db "\
+  SELECT DISTINCT rd.cycle_id, rd.query_text 
+  FROM router_decisions rd 
+  JOIN step_outputs so ON rd.cycle_id = so.cycle_id 
+  WHERE so.success = 0 
+  ORDER BY rd.created_at DESC 
+  LIMIT 10;"
+
+# For a specific cycle, check if repair loop was called
+sqlite3 logs/orchestrator.db "\
+  SELECT COUNT(*) as agent_a_calls 
+  FROM interactions 
+  WHERE cycle_id = 'abc12345...' AND role = 'A';"
+
+# Expected: 2 Agent A calls (first plan + repair) or 1 (no repair needed)
+```
+
+### Query 3: Audit placeholder substitution in tool_args
+
+**Scenario**: User suspects incorrect variable substitution. Verify what was actually executed.
+
+```bash
+# Show exact substitution before execution
+sqlite3 logs/orchestrator.db "\
+  SELECT 
+    step_id, 
+    tool_name, 
+    resolved_command as actual_tool_args,
+    json_extract(substitution_log, '$.py_count') as resolved_py_count_value
+  FROM step_commands 
+  WHERE cycle_id = 'abc12345...' 
+  ORDER BY step_id;"
+
+# Cross-check with variable_bindings
+sqlite3 logs/orchestrator.db "\
+  SELECT var_name, var_value 
+  FROM variable_bindings 
+  WHERE cycle_id = 'abc12345...' 
+  ORDER BY step_id;"
+```
+
+### Query 4: Trace direct_answer caching
+
+**Scenario**: A user asked the same question twice. Did we cache the answer?
+
+```bash
+# Find all ANSWER-type cycles
+sqlite3 logs/orchestrator.db "\
+  SELECT cycle_id, route, query_text, created_at 
+  FROM router_decisions 
+  WHERE route = 'ANSWER' 
+  ORDER BY created_at DESC 
+  LIMIT 20;"
+
+# Check if an answer is cached
+sqlite3 logs/orchestrator.db "\
+  SELECT normalized_query, answer, expires_at 
+  FROM direct_answers 
+  WHERE normalized_query LIKE '%python%' 
+  LIMIT 5;"
+
+# See how many times a cached answer was used
+sqlite3 logs/orchestrator.db "\
+  SELECT 
+    da.normalized_query, 
+    COUNT(rd.cycle_id) as uses, 
+    MAX(rd.created_at) as last_used
+  FROM direct_answers da 
+  LEFT JOIN router_decisions rd ON rd.query_text LIKE '%' || da.normalized_query || '%'
+  GROUP BY da.normalized_query 
+  ORDER BY uses DESC;"
+```
+
+### Query 5: Find steps that needed repair
+
+**Scenario**: Which steps are fragile and require repair loop?
+
+```bash
+# Count how many cycles triggered repair logic
+sqlite3 logs/orchestrator.db "\
+  SELECT 
+    SUBSTR(cycle_id, 1, 8) as cycle_prefix,
+    COUNT(DISTINCT i.cycle_id) as total_agent_a_calls
+  FROM interactions i 
+  WHERE i.role = 'A' 
+  GROUP BY cycle_prefix 
+  HAVING COUNT(*) > 1
+  ORDER BY total_agent_a_calls DESC;"
+
+# For each repair, see what failed
+sqlite3 logs/orchestrator.db "\
+  SELECT 
+    vb.cycle_id, 
+    vb.step_id, 
+    vb.var_name, 
+    COUNT(*) as extract_attempts
+  FROM variable_bindings vb 
+  GROUP BY vb.cycle_id, vb.step_id, vb.var_name 
+  HAVING COUNT(*) > 1;"
+```
+
+### Query 6: Full cycle audit (all-in-one)
+
+**Scenario**: Get complete audit of a cycle for debugging.
+
+```bash
+# Use debug_cycle.py (see next section)
+python3 debug_cycle.py abc12345
+
+# Or manually query:
+echo "=== Cycle Metadata ==="
+sqlite3 logs/orchestrator.db "SELECT cycle_id, route, query_text, confidence, created_at FROM router_decisions WHERE cycle_id LIKE 'abc12345%';"
+
+echo "=== Agent Calls ==="
+sqlite3 logs/orchestrator.db "SELECT role, prompt_preview, response_preview, latency_ms FROM interactions WHERE cycle_id LIKE 'abc12345%';"
+
+echo "=== Variable Bindings ==="
+sqlite3 logs/orchestrator.db "SELECT step_id, var_name, var_value FROM variable_bindings WHERE cycle_id LIKE 'abc12345%';"
+
+echo "=== Step Outputs ==="
+sqlite3 logs/orchestrator.db "SELECT step_id, tool_name, success, exit_code FROM step_outputs WHERE cycle_id LIKE 'abc12345%';"
+```
+
 ## Quick Reference Commands
 
 ```bash
 # List recent cycles
 sqlite3 logs/orchestrator.db "SELECT cycle_id, route, query_text, created_at FROM router_decisions ORDER BY created_at DESC LIMIT 10;"
 
-# Count cycles by route
+# Count cycles by route (v3.0 routes)
 sqlite3 logs/orchestrator.db "SELECT route, COUNT(*) FROM router_decisions GROUP BY route;"
 
 # Find cycles with specific query text
 sqlite3 logs/orchestrator.db "SELECT cycle_id, route, query_text FROM router_decisions WHERE query_text LIKE '%search term%';"
 
-# Get Agent C responses
-sqlite3 logs/orchestrator.db "SELECT cycle_id, response_preview FROM interactions WHERE role = 'C' ORDER BY id DESC LIMIT 5;"
+# Get Agent A responses (replaces Agent C)
+sqlite3 logs/orchestrator.db "SELECT cycle_id, response_preview FROM interactions WHERE role = 'A' ORDER BY id DESC LIMIT 5;"
 
 # Check for failed steps
 sqlite3 logs/orchestrator.db "SELECT cycle_id, step_id, tool_name, exit_code FROM step_outputs WHERE success = 0;"
+
+# Show all variables exported in a cycle
+sqlite3 logs/orchestrator.db "SELECT step_id, var_name, var_value FROM variable_bindings WHERE cycle_id = '<cycle_id>';"
+
+# List cycles that needed repair (>1 Agent A call)
+sqlite3 logs/orchestrator.db "SELECT cycle_id, COUNT(*) as repairs FROM interactions WHERE role='A' GROUP BY cycle_id HAVING COUNT(*)>1;"
 ```
 
 ## Tips for Effective Debugging
