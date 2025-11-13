@@ -19,6 +19,7 @@ from orchestrator.metrics import RouteMetrics, StepMetrics, LLMMetrics, get_metr
 from orchestrator.system_context_builder import SystemContextBuilder
 from tools import get_tool_schemas
 from orchestrator.plan_validator import PlanValidator, PlanValidationError
+from orchestrator.plan_schema import detect_response_type
 from router.router import Router
 from router.rules import Route
 from tool_executor import ToolExecutor
@@ -463,19 +464,91 @@ Success: {success}
         
         return llm_result["message"].content or tool_output
     
+    def _call_agent_c_chat(self, cycle_id: str, query: str) -> str:
+        """
+        Call Agent C in chat mode for simple informational responses.
+        
+        This is used when Agent A delegates to Agent C or for CHAT route.
+        
+        Args:
+            cycle_id: Cycle ID for logging
+            query: User's original query
+        
+        Returns:
+            Conversational response from Agent C
+        """
+        # Get chat history for context
+        chat_history = self.memory.get_chat_history(
+            session_id=self.session_id,
+            last_n=10
+        )
+        
+        # Build system context for Agent C
+        system_context = self.context_builder.build_for_role(
+            role="C",
+            session_id=self.session_id,
+            tool_registry=TOOLS,
+            shell_cwd=os.getcwd()
+        )
+        
+        # Build messages for Agent C
+        messages = [
+            {"role": "system", "content": system_context + "\n\n" + get_agent_c_prompt("chat")}
+        ]
+        
+        # Add previous chat context
+        for exchange in chat_history:
+            messages.append({"role": "user", "content": exchange["user_query"]})
+            messages.append({"role": "assistant", "content": exchange["agent_response"]})
+        
+        # Add current query
+        messages.append({"role": "user", "content": query})
+        
+        # Call LLM in Agent C role
+        llm_client = LLMClient(
+            config=self.config,
+            role="C",
+            memory=self.memory
+        )
+        
+        llm_result = llm_client.call(
+            messages=messages,
+            cycle_id=cycle_id
+        )
+        
+        if llm_result["error"]:
+            return f"[Agent C chat failed: {llm_result['error']}]"
+        
+        agent_c_response = llm_result["message"].content or "No response"
+        
+        # Save to chat_history
+        self.memory.save_chat_exchange(
+            session_id=self.session_id,
+            cycle_id=cycle_id,
+            user_query=query,
+            agent_response=agent_c_response
+        )
+        
+        return agent_c_response
+
+    
     def _handle_planner_route(self, cycle_id: str, query: str) -> OrchestratorResult:
         """
         PLANNER route: Multi-step task planning via Agent A
         
+        Agent A can respond with THREE types:
+        1. Execution plan (steps) - Execute via Agent B loop
+        2. Clarification request - Present to user for clarification
+        3. Delegation to Agent C - Route to Agent C for direct answer
+        
         Workflow:
         1. Retrieve Chat→Planner context (last 3 chat interactions)
-        2. Call Agent A (Planner) to generate JSON plan with context
-        3. Validate plan structure and tools
+        2. Call Agent A (Planner) to generate JSON response with context
+        3. Validate response structure
         4. Retry if validation fails (up to MAX_PLAN_RETRIES)
-        5. Save plan to task_state table
-        6. Return stub result (Phase 4 will implement execution)
+        5. Handle based on response type
         
-        Target: <2s plan generation, 95%+ valid JSON on first attempt
+        Target: <2s response generation, 95%+ valid JSON on first attempt
         """
         # Get available tools for validation
         available_tools = sorted(TOOLS.keys())
@@ -517,7 +590,7 @@ Success: {success}
             {"role": "user", "content": context_msg}
         ]
         
-        plan = None
+        response = None
         last_error = None
         
         for attempt in range(self.MAX_PLAN_RETRIES + 1):
@@ -539,10 +612,10 @@ Success: {success}
             
             llm_response = llm_result["message"].content or ""
             
-            # Validate plan
-            plan, error_hint = validator.validate_with_hints(llm_response)
+            # Validate response
+            response, error_hint = validator.validate_with_hints(llm_response)
             
-            if plan:
+            if response:
                 # Success!
                 break
             
@@ -557,17 +630,17 @@ Success: {success}
             messages.append({"role": "assistant", "content": llm_response})
             messages.append({
                 "role": "user",
-                "content": f"ERROR: {error_hint}\n\nPlease try again with a valid JSON plan."
+                "content": f"ERROR: {error_hint}\n\nPlease try again with a valid JSON response."
             })
         
-        # Check if we got a valid plan
-        if not plan:
+        # Check if we got a valid response
+        if not response:
             # Failed after all retries - fallback to Agent C explanation
             agent_c_response = self._call_agent_c_narrator(
                 cycle_id=cycle_id,
                 query=query,
                 tool_name="agent_a_planner",
-                tool_output=f"Failed to generate valid plan after {self.MAX_PLAN_RETRIES + 1} attempts.\n\n{last_error}",
+                tool_output=f"Failed to generate valid response after {self.MAX_PLAN_RETRIES + 1} attempts.\n\n{last_error}",
                 success=False
             )
             
@@ -579,7 +652,42 @@ Success: {success}
                 error=last_error
             )
         
+        # Detect response type and handle accordingly
+        response_type = detect_response_type(response)
+        
+        if response_type == "clarification":
+            # Agent A is asking for clarification - present to user
+            clarification_text = response["clarify"]
+            
+            return OrchestratorResult(
+                cycle_id=cycle_id,
+                route="PLANNER",
+                query=query,
+                agent_c_response=f"[CLARIFICATION NEEDED]\n\n{clarification_text}",
+                error=None
+            )
+        
+        elif response_type == "delegation":
+            # Agent A is delegating to Agent C - call Agent C directly
+            delegation_reason = response["delegate_to_chat"]
+            
+            # Call Agent C directly with original query
+            agent_c_response = self._call_agent_c_chat(
+                cycle_id=cycle_id,
+                query=query
+            )
+            
+            return OrchestratorResult(
+                cycle_id=cycle_id,
+                route="CHAT",  # Delegated to CHAT route
+                query=query,
+                agent_c_response=agent_c_response,
+                error=None
+            )
+        
+        # response_type == "execution_plan"
         # Save plan to task_state
+        plan = response
         self.memory.save_plan(
             cycle_id=cycle_id,
             plan=plan,

@@ -2,9 +2,14 @@
 Plan validation for Agent A output
 
 Validates JSON structure and tool availability before execution.
+Supports three response types:
+1. Execution plan (steps) - requires tool validation
+2. Clarification request - no tool validation needed
+3. Delegation to Agent C - no tool validation needed
+
 Two-phase validation:
 1. JSON parsing + structure validation
-2. Tool availability check
+2. Tool availability check (execution plans only)
 """
 
 import json
@@ -12,7 +17,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from orchestrator.plan_schema import (
     validate_plan_structure,
-    validate_tool_availability
+    validate_tool_availability,
+    detect_response_type
 )
 
 
@@ -41,25 +47,25 @@ class PlanValidator:
     
     def validate(self, llm_response: str) -> Dict[str, Any]:
         """
-        Validate LLM response and extract plan.
+        Validate LLM response and extract plan/clarification/delegation.
         
         Args:
             llm_response: Raw text response from Agent A
         
         Returns:
-            Validated plan dict
+            Validated response dict (one of: execution_plan, clarification, delegation)
         
         Raises:
             PlanValidationError: If validation fails
         
         Process:
         1. Parse JSON from response
-        2. Validate structure
-        3. Validate tool availability
+        2. Validate structure (three-way contract)
+        3. Validate tool availability (execution plans only)
         """
         # Phase 1: Parse JSON
         try:
-            plan = self._parse_json(llm_response)
+            response = self._parse_json(llm_response)
         except json.JSONDecodeError as e:
             raise PlanValidationError(
                 f"Invalid JSON from Agent A: {e}\n\n"
@@ -67,22 +73,24 @@ class PlanValidator:
             )
         
         # Phase 2: Validate structure
-        valid, error = validate_plan_structure(plan)
+        valid, error = validate_plan_structure(response)
         if not valid:
             raise PlanValidationError(
-                f"Plan structure validation failed: {error}\n\n"
-                f"Plan was:\n{json.dumps(plan, indent=2)[:500]}"
+                f"Response structure validation failed: {error}\n\n"
+                f"Response was:\n{json.dumps(response, indent=2)[:500]}"
             )
         
-        # Phase 3: Validate tools
-        valid, error = validate_tool_availability(plan, self.available_tools)
-        if not valid:
-            raise PlanValidationError(
-                f"Tool availability validation failed: {error}\n\n"
-                f"Plan was:\n{json.dumps(plan, indent=2)[:500]}"
-            )
+        # Phase 3: Validate tools (execution plans only)
+        response_type = detect_response_type(response)
+        if response_type == "execution_plan":
+            valid, error = validate_tool_availability(response, self.available_tools)
+            if not valid:
+                raise PlanValidationError(
+                    f"Tool availability validation failed: {error}\n\n"
+                    f"Plan was:\n{json.dumps(response, indent=2)[:500]}"
+                )
         
-        return plan
+        return response
     
     def _parse_json(self, text: str) -> Any:
         """
@@ -138,21 +146,21 @@ class PlanValidator:
     
     def validate_with_hints(self, llm_response: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         """
-        Validate plan and return hints for retry if validation fails.
+        Validate response and return hints for retry if validation fails.
         
         Args:
             llm_response: Raw text response from Agent A
         
         Returns:
-            (plan, error_hint) tuple
-            - If valid: (plan_dict, None)
+            (response, error_hint) tuple
+            - If valid: (response_dict, None)
             - If invalid: (None, error_hint_for_retry)
         
         This is used for retry logic - the error_hint is sent back to Agent A.
         """
         try:
-            plan = self.validate(llm_response)
-            return plan, None
+            response = self.validate(llm_response)
+            return response, None
         except PlanValidationError as e:
             # Generate helpful error hint for retry
             error_hint = self._generate_retry_hint(str(e))
@@ -160,7 +168,7 @@ class PlanValidator:
     
     def _generate_retry_hint(self, error: str) -> str:
         """
-        Generate helpful hint for Agent A to fix the plan.
+        Generate helpful hint for Agent A to fix the response.
         
         Args:
             error: Error message from validation
@@ -172,25 +180,34 @@ class PlanValidator:
         if "Invalid JSON" in error:
             return (
                 "Your response was not valid JSON. "
-                "Remember: respond with ONLY the JSON plan, no markdown formatting, "
+                "Remember: respond with ONLY the JSON, no markdown formatting, "
                 "no explanations. Just the JSON object starting with { and ending with }."
+            )
+        
+        if "Response must be one of" in error:
+            return (
+                f"Response validation failed: {error}\n\n"
+                "Choose ONE of the three response types:\n"
+                '1. Execution plan: {"steps": [...]}\n'
+                '2. Clarification: {"clarify": "question"}\n'
+                '3. Delegation: {"delegate_to_chat": "reason"}'
             )
         
         if "missing required" in error.lower():
             return (
-                f"Plan validation failed: {error}\n\n"
+                f"Response validation failed: {error}\n\n"
                 "Each step must have: tool_name (string), intent (string), description (string)."
             )
         
         if "Unknown tool" in error:
             return (
-                f"Plan validation failed: {error}\n\n"
+                f"Tool validation failed: {error}\n\n"
                 "Use only tools from the available tools list. Check the tool name spelling."
             )
         
         if "must have at least 1 step" in error:
             return (
-                "Plan must have at least one step. "
+                "Execution plan must have at least one step. "
                 "Create a plan with steps array containing at least one step."
             )
         
@@ -200,9 +217,17 @@ class PlanValidator:
                 "Simplify the plan or use shell pipelines to combine steps."
             )
         
+        if "cannot be empty" in error:
+            return (
+                f"Validation failed: {error}\n\n"
+                "All fields must have non-empty values."
+            )
+        
         # Generic hint
         return (
-            f"Plan validation failed: {error}\n\n"
-            "Please generate a valid JSON plan following the schema:\n"
-            '{"steps": [{"tool_name": "...", "intent": "...", "description": "..."}]}'
+            f"Response validation failed: {error}\n\n"
+            "Please generate a valid JSON response following one of the schemas:\n"
+            '1. {"steps": [{"tool_name": "...", "intent": "...", "description": "..."}]}\n'
+            '2. {"clarify": "question for user"}\n'
+            '3. {"delegate_to_chat": "reason for delegation"}'
         )
