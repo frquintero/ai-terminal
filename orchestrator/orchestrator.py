@@ -21,8 +21,7 @@ from orchestrator.command_classifier import classify_query, QueryRoute, is_inter
 from tools import get_tool_schemas
 from orchestrator.plan_validator import PlanValidator, PlanValidationError
 from orchestrator.plan_schema import detect_response_type
-from router.router import RouterResult
-from router.rules import Route
+from orchestrator.routes import RouterResult, Route
 from router.cache import IntentionCache
 from tool_executor import ToolExecutor
 from tools import TOOLS

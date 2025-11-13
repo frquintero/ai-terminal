@@ -16,8 +16,7 @@ from memory.api import Memory
 from orchestrator.orchestrator import Orchestrator, OrchestratorResult
 from orchestrator.prompts import get_agent_c_prompt
 from router.cache import CacheHit
-from router.router import RouterResult
-from router.rules import Route
+from orchestrator.routes import RouterResult, Route
 
 
 class TestOrchestratorPrompts(unittest.TestCase):
