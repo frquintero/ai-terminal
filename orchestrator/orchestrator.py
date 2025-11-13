@@ -90,7 +90,7 @@ class Orchestrator:
         
         # Initialize components
         self.router = Router(self.memory)
-        self.tool_executor = ToolExecutor(memory=self.memory)
+        self.tool_executor = ToolExecutor()  # ToolExecutor does NOT access memory directly
         self.context_builder = SystemContextBuilder(memory=self.memory)
         
         # Detect system state once at startup (cached for session)
@@ -811,6 +811,19 @@ Success: {success}
                 }
                 step_results.append(step_result)
                 steps_failed += 1
+                
+                # CRITICAL: Persist Agent B failure to step_outputs so it's visible in debugging
+                # (Previously these failures were never saved, causing them to "disappear" from step_outputs)
+                self.memory.save_step_output(
+                    cycle_id=cycle_id,
+                    step_id=step_id,
+                    tool_name=step["tool_name"],
+                    tool_args={},
+                    success=False,
+                    exit_code=None,
+                    output_preview=agent_b_result.get("error", "Agent B failed to generate tool_args")[:1000],
+                    artifact_path=None
+                )
                 continue
             
             tool_args = agent_b_result["tool_args"]

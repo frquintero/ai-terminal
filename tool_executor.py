@@ -34,14 +34,15 @@ class ToolExecutor:
     
     MAX_OUTPUT_PREVIEW = 1000  # Characters to store in step_outputs
     
-    def __init__(self, memory=None):
+    def __init__(self):
         """
         Initialize tool executor.
         
-        Args:
-            memory: Optional Memory instance for logging
+        Note: ToolExecutor does NOT access memory directly.
+        The orchestrator is responsible for persisting all execution results.
+        ToolExecutor only returns structured data.
         """
-        self.memory = memory
+        pass
     
     def execute(
         self,
@@ -70,16 +71,6 @@ class ToolExecutor:
         tool = TOOLS.get(tool_name)
         if not tool:
             error_msg = f"Unknown tool: {tool_name}"
-            if self.memory and cycle_id and step_id is not None:
-                self._log_to_memory(
-                    cycle_id=cycle_id,
-                    step_id=step_id,
-                    tool_name=tool_name,
-                    tool_args=tool_args,
-                    success=False,
-                    result=error_msg,
-                    exit_code=None
-                )
             return {
                 "success": False,
                 "result": error_msg,
@@ -90,16 +81,6 @@ class ToolExecutor:
         # Validate tool arguments against schema
         validation_error = self._validate_tool_args(tool, tool_args)
         if validation_error:
-            if self.memory and cycle_id and step_id is not None:
-                self._log_to_memory(
-                    cycle_id=cycle_id,
-                    step_id=step_id,
-                    tool_name=tool_name,
-                    tool_args=tool_args,
-                    success=False,
-                    result=validation_error,
-                    exit_code=None
-                )
             return {
                 "success": False,
                 "result": validation_error,
@@ -116,18 +97,6 @@ class ToolExecutor:
             # Note: Some tools set exit code in _SESSION_STATE, but we'll track it separately
             exit_code = self._extract_exit_code(tool_name, result)
             
-            # Log to memory
-            if self.memory and cycle_id and step_id is not None:
-                self._log_to_memory(
-                    cycle_id=cycle_id,
-                    step_id=step_id,
-                    tool_name=tool_name,
-                    tool_args=tool_args,
-                    success=True,
-                    result=result_str,
-                    exit_code=exit_code
-                )
-            
             return {
                 "success": True,
                 "result": result_str,
@@ -137,19 +106,6 @@ class ToolExecutor:
         
         except Exception as e:
             error_msg = f"Tool '{tool_name}' raised error: {e}"
-            
-            # Log error to memory
-            if self.memory and cycle_id and step_id is not None:
-                self._log_to_memory(
-                    cycle_id=cycle_id,
-                    step_id=step_id,
-                    tool_name=tool_name,
-                    tool_args=tool_args,
-                    success=False,
-                    result=error_msg,
-                    exit_code=None
-                )
-            
             return {
                 "success": False,
                 "result": error_msg,
@@ -281,45 +237,6 @@ class ToolExecutor:
         
         return None
     
-    def _log_to_memory(
-        self,
-        cycle_id: str,
-        step_id: int,
-        tool_name: str,
-        tool_args: Dict[str, Any],
-        success: bool,
-        result: str,
-        exit_code: Optional[int]
-    ):
-        """
-        Log tool execution to Memory.
-        
-        Args:
-            cycle_id: Cycle ID
-            step_id: Step number
-            tool_name: Tool executed
-            tool_args: Tool arguments
-            success: Whether execution succeeded
-            result: Tool output
-            exit_code: Exit code (if available)
-        """
-        # Truncate output for storage
-        output_preview = result[:self.MAX_OUTPUT_PREVIEW]
-        if len(result) > self.MAX_OUTPUT_PREVIEW:
-            output_preview += f"... [{len(result) - self.MAX_OUTPUT_PREVIEW} more chars]"
-        
-        # Save to step_outputs
-        self.memory.save_step_output(
-            cycle_id=cycle_id,
-            step_id=step_id,
-            tool_name=tool_name,
-            tool_args=tool_args,
-            success=success,
-            exit_code=exit_code,
-            output_preview=output_preview,
-            artifact_path=None  # Future enhancement: Save large outputs to files
-        )
-
 
 def format_observation_content(
     tool_name: str,

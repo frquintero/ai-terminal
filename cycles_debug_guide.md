@@ -4,6 +4,8 @@
 
 **ai-terminal** is an intelligent command-line assistant that uses multiple LLM agents working together to understand user queries and execute system commands. It combines strategic planning (Agent A), precise execution (Agent B), and conversational narration (Agent C) to deliver natural language interaction with the terminal.
 
+For complete project details, setup instructions, and architecture overview, see **[README.md](README.md)**.
+
 ## Architecture Overview
 
 ```
@@ -294,9 +296,9 @@ sqlite3 logs/orchestrator.db "SELECT cycle_id, step_id, tool_name, exit_code FRO
 
 ## Further Reading
 
+- **[README.md](README.md)** - Project overview, setup guide, configuration, testing, and complete documentation index
 - `DOUBLE_AGENT_ARCHITECTURE.md` - Complete architecture specification
 - `AGENTS.md` - Agent system overview and bd issue tracking
-- `README.md` - Project setup and usage
 - `orchestrator/prompts.py` - Agent system prompts
 
 ---

@@ -406,6 +406,7 @@ All architecture and development docs are in the `history/` directory:
 | **[PHASE_2_ACCEPTANCE_CRITERIA.md](history/PHASE_2_ACCEPTANCE_CRITERIA.md)** | Phase 2 acceptance tests: specific test commands and success metrics |
 | **[ROUTER_TUNING_GUIDE.md](history/ROUTER_TUNING_GUIDE.md)** | **Operators**: How to customize router patterns, adjust cache thresholds, debug routing decisions |
 | **[DEBUGGING_V2.md](history/DEBUGGING_V2.md)** | **Developers**: Layer-by-layer debugging strategies, LLM tracing, performance profiling, database forensics |
+| **[cycles_debug_guide.md](cycles_debug_guide.md)** | **Cycle Analysis**: Step-by-step guide to debug any execution cycle using database forensics and debug_cycle.py tool |
 | **[ROUTER_CLI_COMPLETE.md](history/ROUTER_CLI_COMPLETE.md)** | Router CLI tool docs: manual testing, batch classification, interactive REPL, JSON output |
 | **[PHASE_5_COMPLETION.md](history/PHASE_5_COMPLETION.md)** | Phase 5 final: telemetry integration, docs complete, 65/65 tests passing, production ready |
 | **[PRODUCTION_READY_FIXES.md](history/PRODUCTION_READY_FIXES.md)** | **Production**: Oracle review fixes - config env names, metrics wiring, safe variable substitution, cross-platform venv, legacy tool gating |
@@ -416,6 +417,7 @@ All architecture and development docs are in the `history/` directory:
 - **Understand Architecture**: [DOUBLE_AGENT_ARCHITECTURE.md](DOUBLE_AGENT_ARCHITECTURE.md) + [IMPLEMENTATION_PLAN.md](history/IMPLEMENTATION_PLAN.md) sections 3-5
 - **Tune Router**: [ROUTER_TUNING_GUIDE.md](history/ROUTER_TUNING_GUIDE.md)
 - **Debug Issues**: [DEBUGGING_V2.md](history/DEBUGGING_V2.md)
+- **Debug Execution Cycles**: [cycles_debug_guide.md](cycles_debug_guide.md) - analyze any cycle with database queries and debug_cycle.py
 - **Test Router Manually**: [ROUTER_CLI_COMPLETE.md](history/ROUTER_CLI_COMPLETE.md)
 - **Production Deployment**: [PRODUCTION_READY_FIXES.md](history/PRODUCTION_READY_FIXES.md)
 - **Track Progress**: [PHASE_2_SIGN_OFF.md](history/PHASE_2_SIGN_OFF.md), [PHASE_5_COMPLETION.md](history/PHASE_5_COMPLETION.md)
@@ -447,7 +449,7 @@ For questions, file a new bead:
 bd create "Question: How do I...?" -t task -p 2 --json
 ```
 
-For debugging, see [DEBUGGING_V2.md](history/DEBUGGING_V2.md). For router customization, see [ROUTER_TUNING_GUIDE.md](history/ROUTER_TUNING_GUIDE.md).
+For debugging issues, see [DEBUGGING_V2.md](history/DEBUGGING_V2.md). For analyzing execution cycles, see [cycles_debug_guide.md](cycles_debug_guide.md). For router customization, see [ROUTER_TUNING_GUIDE.md](history/ROUTER_TUNING_GUIDE.md).
 
 ---
 
