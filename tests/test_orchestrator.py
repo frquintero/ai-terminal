@@ -77,18 +77,15 @@ class TestOrchestratorChatRoute(unittest.TestCase):
         self.orchestrator.close()
         os.unlink(self.temp_db.name)
     
-    @patch("orchestrator.orchestrator.Router")
+    @patch.object(Orchestrator, "_classify_query")
     @patch("orchestrator.orchestrator.LLMClient")
-    def test_chat_route_calls_agent_c(self, mock_llm_client_class, mock_router_class):
-        """CHAT route calls Agent C with chat history"""
-        # Mock router to return CHAT
-        mock_router = Mock()
-        mock_router.classify.return_value = RouterResult(
+    def test_chat_route_calls_agent_a(self, mock_llm_client_class, mock_classify):
+        """CHAT route calls Agent A with chat history"""
+        mock_classify.return_value = RouterResult(
             route=Route.CHAT,
             confidence=0.85,
             latency_ms=10
         )
-        mock_router_class.return_value = mock_router
         
         # Mock LLM response
         mock_llm_client = Mock()
@@ -103,12 +100,8 @@ class TestOrchestratorChatRoute(unittest.TestCase):
         }
         mock_llm_client_class.return_value = mock_llm_client
         
-        # Recreate orchestrator with mocked router
-        orchestrator = Orchestrator(self.config, self.memory)
-        orchestrator.router = mock_router
-        
         # Execute query
-        result = orchestrator.handle_query("What is the capital of France?")
+        result = self.orchestrator.handle_query("What is the capital of France?")
         
         # Verify
         self.assertEqual(result.route, "CHAT")
@@ -125,18 +118,15 @@ class TestOrchestratorChatRoute(unittest.TestCase):
         self.assertEqual(messages[-1]["role"], "user")
         self.assertEqual(messages[-1]["content"], "What is the capital of France?")
     
-    @patch("orchestrator.orchestrator.Router")
+    @patch.object(Orchestrator, "_classify_query")
     @patch("orchestrator.orchestrator.LLMClient")
-    def test_chat_route_preserves_context(self, mock_llm_client_class, mock_router_class):
+    def test_chat_route_preserves_context(self, mock_llm_client_class, mock_classify):
         """CHAT route includes previous chat history in context"""
-        # Setup mocks
-        mock_router = Mock()
-        mock_router.classify.return_value = RouterResult(
+        mock_classify.return_value = RouterResult(
             route=Route.CHAT,
             confidence=0.85,
             latency_ms=10
         )
-        mock_router_class.return_value = mock_router
         
         mock_llm_client = Mock()
         mock_message = Mock()
@@ -150,14 +140,11 @@ class TestOrchestratorChatRoute(unittest.TestCase):
         }
         mock_llm_client_class.return_value = mock_llm_client
         
-        orchestrator = Orchestrator(self.config, self.memory)
-        orchestrator.router = mock_router
-        
         # First query
-        result1 = orchestrator.handle_query("What is Python?")
+        self.orchestrator.handle_query("What is Python?")
         
         # Second query - should include first in context
-        result2 = orchestrator.handle_query("What about Ruby?")
+        self.orchestrator.handle_query("What about Ruby?")
         
         # Check second call included first exchange
         second_call_args = mock_llm_client.call.call_args_list[1]
@@ -190,25 +177,20 @@ class TestOrchestratorShellRoute(unittest.TestCase):
         self.orchestrator.close()
         os.unlink(self.temp_db.name)
     
-    @patch("orchestrator.orchestrator.Router")
-    @patch("orchestrator.orchestrator.ToolExecutor")
+    @patch.object(Orchestrator, "_classify_query")
     @patch("orchestrator.orchestrator.LLMClient")
     def test_shell_route_executes_command(
         self,
         mock_llm_client_class,
-        mock_tool_executor_class,
-        mock_router_class
+        mock_classify
     ):
-        """SHELL route executes command and calls Agent C narrator"""
-        # Mock router
-        mock_router = Mock()
-        mock_router.classify.return_value = RouterResult(
+        """SHELL route executes command and calls Agent A narrator"""
+        mock_classify.return_value = RouterResult(
             route=Route.SHELL,
             confidence=0.95,
             latency_ms=5,
             matched_rule=r"^ls\b"
         )
-        mock_router_class.return_value = mock_router
         
         # Mock tool execution
         mock_tool_executor = Mock()
@@ -218,9 +200,9 @@ class TestOrchestratorShellRoute(unittest.TestCase):
             "exit_code": 0,
             "error": None
         }
-        mock_tool_executor_class.return_value = mock_tool_executor
+        self.orchestrator.tool_executor = mock_tool_executor
         
-        # Mock Agent C narrator
+        # Mock Agent A narrator
         mock_llm_client = Mock()
         mock_message = Mock()
         mock_message.content = "I found 2 files: file1.txt and file2.txt"
@@ -233,13 +215,8 @@ class TestOrchestratorShellRoute(unittest.TestCase):
         }
         mock_llm_client_class.return_value = mock_llm_client
         
-        # Recreate orchestrator with mocks
-        orchestrator = Orchestrator(self.config, self.memory)
-        orchestrator.router = mock_router
-        orchestrator.tool_executor = mock_tool_executor
-        
         # Execute
-        result = orchestrator.handle_query("ls")
+        result = self.orchestrator.handle_query("ls")
         
         # Verify execution
         self.assertEqual(result.route, "SHELL")
@@ -257,24 +234,19 @@ class TestOrchestratorShellRoute(unittest.TestCase):
         narrator_messages = mock_llm_client.call.call_args[1]["messages"]
         self.assertIn("narrator", narrator_messages[0]["content"].lower())
     
-    @patch("orchestrator.orchestrator.Router")
-    @patch("orchestrator.orchestrator.ToolExecutor")
+    @patch.object(Orchestrator, "_classify_query")
     @patch("orchestrator.orchestrator.LLMClient")
     def test_shell_route_caches_success(
         self,
         mock_llm_client_class,
-        mock_tool_executor_class,
-        mock_router_class
+        mock_classify
     ):
         """SHELL route caches successful executions"""
-        # Setup mocks (similar to above)
-        mock_router = Mock()
-        mock_router.classify.return_value = RouterResult(
+        mock_classify.return_value = RouterResult(
             route=Route.SHELL,
             confidence=0.95,
             latency_ms=5
         )
-        mock_router_class.return_value = mock_router
         
         mock_tool_executor = Mock()
         mock_tool_executor.execute.return_value = {
@@ -283,7 +255,7 @@ class TestOrchestratorShellRoute(unittest.TestCase):
             "exit_code": 0,
             "error": None
         }
-        mock_tool_executor_class.return_value = mock_tool_executor
+        self.orchestrator.tool_executor = mock_tool_executor
         
         mock_llm_client = Mock()
         mock_message = Mock()
@@ -297,12 +269,8 @@ class TestOrchestratorShellRoute(unittest.TestCase):
         }
         mock_llm_client_class.return_value = mock_llm_client
         
-        orchestrator = Orchestrator(self.config, self.memory)
-        orchestrator.router = mock_router
-        orchestrator.tool_executor = mock_tool_executor
-        
         # Execute
-        result = orchestrator.handle_query("pwd")
+        self.orchestrator.handle_query("pwd")
         
         # Verify cache entry was created
         cache_results = self.memory.search_intention_cache("pwd", limit=1)
@@ -329,14 +297,12 @@ class TestOrchestratorCachedRoute(unittest.TestCase):
         self.orchestrator.close()
         os.unlink(self.temp_db.name)
     
-    @patch("orchestrator.orchestrator.Router")
-    @patch("orchestrator.orchestrator.ToolExecutor")
+    @patch.object(Orchestrator, "_classify_query")
     @patch("orchestrator.orchestrator.LLMClient")
     def test_cached_route_reuses_execution(
         self,
         mock_llm_client_class,
-        mock_tool_executor_class,
-        mock_router_class
+        mock_classify
     ):
         """CACHED route retrieves and executes cached tool"""
         # Pre-populate cache
@@ -358,14 +324,12 @@ class TestOrchestratorCachedRoute(unittest.TestCase):
             usage_count=1
         )
         
-        mock_router = Mock()
-        mock_router.classify.return_value = RouterResult(
+        mock_classify.return_value = RouterResult(
             route=Route.CACHED,
             confidence=0.90,
             latency_ms=8,
             cache_hit=cache_hit
         )
-        mock_router_class.return_value = mock_router
         
         # Mock tool execution
         mock_tool_executor = Mock()
@@ -375,7 +339,7 @@ class TestOrchestratorCachedRoute(unittest.TestCase):
             "exit_code": 0,
             "error": None
         }
-        mock_tool_executor_class.return_value = mock_tool_executor
+        self.orchestrator.tool_executor = mock_tool_executor
         
         # Mock Agent C narrator
         mock_llm_client = Mock()
@@ -391,12 +355,8 @@ class TestOrchestratorCachedRoute(unittest.TestCase):
         mock_llm_client_class.return_value = mock_llm_client
         
         # Recreate orchestrator with mocks
-        orchestrator = Orchestrator(self.config, self.memory)
-        orchestrator.router = mock_router
-        orchestrator.tool_executor = mock_tool_executor
-        
         # Execute
-        result = orchestrator.handle_query("list files")
+        result = self.orchestrator.handle_query("list files")
         
         # Verify route
         self.assertEqual(result.route, "CACHED")
@@ -440,9 +400,9 @@ class TestOrchestratorIntegration(unittest.TestCase):
     
     def test_cycle_id_generated(self):
         """Each query generates unique cycle_id"""
-        with patch.object(self.orchestrator.router, "classify") as mock_classify:
+        with patch.object(Orchestrator, "_classify_query") as mock_classify:
             mock_classify.return_value = RouterResult(
-                route=Route.PLANNER,  # Not implemented, will return error
+                route=Route.PLANNER,
                 confidence=0.5,
                 latency_ms=10
             )
