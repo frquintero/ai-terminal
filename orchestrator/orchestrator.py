@@ -648,10 +648,9 @@ Success: {success}
         """
         PLANNER route: Multi-step task planning via Agent A
         
-        Agent A can respond with THREE types:
-        1. Execution plan (steps) - Execute via Agent B loop
-        2. Clarification request - Present to user for clarification
-        3. Delegation to chat mode - Route to a direct answer
+        Agent A can respond with TWO types:
+        1. Execution plan (steps + narration template)
+        2. Direct response (no tool usage)
         
         Workflow:
         1. Retrieve Chat→Planner context (last 3 chat interactions)
@@ -767,37 +766,26 @@ Success: {success}
         # Detect response type and handle accordingly
         response_type = detect_response_type(response)
         
-        if response_type == "clarification":
-            # Agent A is asking for clarification - present to user
-            clarification_text = response["clarify"]
-            
+        if response_type == "response":
+            agent_response = response["response"]
+            # Treat as final answer without tool execution
+            self.memory.save_chat_exchange(
+                session_id=self.session_id,
+                cycle_id=cycle_id,
+                user_query=query,
+                agent_response=agent_response
+            )
             return OrchestratorResult(
                 cycle_id=cycle_id,
                 route="PLANNER",
                 query=query,
-                agent_c_response=f"[CLARIFICATION NEEDED]\n\n{clarification_text}",
-                error=None
+                agent_c_response=agent_response,
+                execution_result=None
             )
         
-        elif response_type == "delegation":
-            # Agent A is delegating to a chat-style response
-            delegation_reason = response["delegate_to_chat"]
-            
-            # Call Agent A chat mode directly with original query
-            agent_c_response = self._call_agent_a_chat(
-                cycle_id=cycle_id,
-                query=query
-            )
-            
-            return OrchestratorResult(
-                cycle_id=cycle_id,
-                route="CHAT",  # Delegated to CHAT route
-                query=query,
-                agent_c_response=agent_c_response,
-                error=None
-            )
+        if response_type != "execution_plan":
+            raise PlanValidationError("Agent A produced an unknown response type")
         
-        # response_type == "execution_plan"
         # Save plan to task_state
         plan = response
         self.memory.save_plan(

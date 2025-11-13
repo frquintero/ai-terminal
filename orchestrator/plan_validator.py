@@ -2,14 +2,9 @@
 Plan validation for Agent A output
 
 Validates JSON structure and tool availability before execution.
-Supports three response types:
-1. Execution plan (steps) - requires tool validation
-2. Clarification request - no tool validation needed
-3. Delegation to Agent C - no tool validation needed
-
-Two-phase validation:
-1. JSON parsing + structure validation
-2. Tool availability check (execution plans only)
+Supports two response types:
+1. Execution plan with narration template
+2. Direct response (no tools)
 """
 
 import json
@@ -47,21 +42,7 @@ class PlanValidator:
     
     def validate(self, llm_response: str) -> Dict[str, Any]:
         """
-        Validate LLM response and extract plan/clarification/delegation.
-        
-        Args:
-            llm_response: Raw text response from Agent A
-        
-        Returns:
-            Validated response dict (one of: execution_plan, clarification, delegation)
-        
-        Raises:
-            PlanValidationError: If validation fails
-        
-        Process:
-        1. Parse JSON from response
-        2. Validate structure (three-way contract)
-        3. Validate tool availability (execution plans only)
+        Validate LLM response and extract execution plan or direct response.
         """
         # Phase 1: Parse JSON
         try:
@@ -89,6 +70,8 @@ class PlanValidator:
                     f"Tool availability validation failed: {error}\n\n"
                     f"Plan was:\n{json.dumps(response, indent=2)[:500]}"
                 )
+        elif response_type != "response":
+            raise PlanValidationError("Unknown response type from Agent A")
         
         return response
     
@@ -187,16 +170,15 @@ class PlanValidator:
         if "Response must be one of" in error:
             return (
                 f"Response validation failed: {error}\n\n"
-                "Choose ONE of the three response types:\n"
-                '1. Execution plan: {"steps": [...]}\n'
-                '2. Clarification: {"clarify": "question"}\n'
-                '3. Delegation: {"delegate_to_chat": "reason"}'
+                "Choose ONE of the supported response types:\n"
+                '1. Execution plan: {"steps": [...], "narration_template": "..."}\n'
+                '2. Direct response: {"response": "..."}'
             )
         
         if "missing required" in error.lower():
             return (
                 f"Response validation failed: {error}\n\n"
-                "Each step must have: tool_name (string), intent (string), description (string)."
+                "Each step must have: tool_name (string), intent (string), output_keys (array of unique strings)."
             )
         
         if "Unknown tool" in error:
@@ -228,6 +210,5 @@ class PlanValidator:
             f"Response validation failed: {error}\n\n"
             "Please generate a valid JSON response following one of the schemas:\n"
             '1. {"steps": [{"tool_name": "...", "intent": "...", "description": "..."}]}\n'
-            '2. {"clarify": "question for user"}\n'
-            '3. {"delegate_to_chat": "reason for delegation"}'
-        )
+                '2. {"response": "final message"}'
+            )

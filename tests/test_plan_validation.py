@@ -51,22 +51,49 @@ class TestPlanStructureValidation(unittest.TestCase):
         self.assertIn("must be array", error)
     
     def test_invalid_missing_field(self):
-        """Step missing required tool_args fails"""
+        """Step missing output_keys fails"""
         valid, error = validate_plan_structure(EXAMPLE_PLAN_INVALID_MISSING_FIELD)
         self.assertFalse(valid)
-        self.assertIn("missing required 'tool_args'", error)
+        self.assertIn("missing required 'output_keys'", error)
     
     def test_invalid_not_dict(self):
         """Plan as list fails"""
         valid, error = validate_plan_structure(["not", "a", "dict"])
         self.assertFalse(valid)
-        self.assertIn("Plan must be object", error)
+        self.assertIn("Response must be object", error)
     
     def test_invalid_missing_steps_key(self):
         """Plan without 'steps' key fails"""
         valid, error = validate_plan_structure({"wrong": "key"})
         self.assertFalse(valid)
-        self.assertIn("missing required 'steps'", error)
+        self.assertIn("Response must be one of", error)
+    
+    def test_invalid_missing_template(self):
+        """Execution plan must include narration_template"""
+        plan = {
+            "steps": [{
+                "tool_name": "run_command",
+                "intent": "List",
+                "output_keys": ["files"]
+            }]
+        }
+        valid, error = validate_plan_structure(plan)
+        self.assertFalse(valid)
+        self.assertIn("narration_template", error)
+    
+    def test_valid_direct_response(self):
+        """Direct response structure is valid"""
+        plan = {"response": "All good!"}
+        valid, error = validate_plan_structure(plan)
+        self.assertTrue(valid)
+        self.assertIsNone(error)
+    
+    def test_invalid_response_empty(self):
+        """Response cannot be empty"""
+        plan = {"response": "   "}
+        valid, error = validate_plan_structure(plan)
+        self.assertFalse(valid)
+        self.assertIn("cannot be empty", error)
     
     def test_invalid_too_many_steps(self):
         """Plan with >10 steps fails"""
@@ -74,11 +101,12 @@ class TestPlanStructureValidation(unittest.TestCase):
             "steps": [
                 {
                     "tool_name": "run_command",
-                    "tool_args": {"command": f"echo step{i}"},
-                    "description": f"Step {i}"
+                    "intent": f"Step {i}",
+                    "output_keys": [f"out_{i}"]
                 }
                 for i in range(11)
-            ]
+            ],
+            "narration_template": "Summary"
         }
         valid, error = validate_plan_structure(many_steps)
         self.assertFalse(valid)
@@ -89,26 +117,28 @@ class TestPlanStructureValidation(unittest.TestCase):
         plan = {
             "steps": [{
                 "tool_name": "",
-                "tool_args": {},
-                "description": "Test"
-            }]
+                "intent": "Test",
+                "output_keys": ["value"]
+            }],
+            "narration_template": "Result {value}"
         }
         valid, error = validate_plan_structure(plan)
         self.assertFalse(valid)
         self.assertIn("cannot be empty", error)
     
-    def test_invalid_tool_args_not_object(self):
-        """tool_args as string fails"""
+    def test_invalid_output_keys_not_array(self):
+        """output_keys must be array"""
         plan = {
             "steps": [{
                 "tool_name": "test",
-                "tool_args": "not an object",
-                "description": "Test"
-            }]
+                "intent": "Test",
+                "output_keys": "not an array"
+            }],
+            "narration_template": "Value {value}"
         }
         valid, error = validate_plan_structure(plan)
         self.assertFalse(valid)
-        self.assertIn("'tool_args' must be object", error)
+        self.assertIn("'output_keys' must be array", error)
 
 
 class TestToolAvailabilityValidation(unittest.TestCase):
@@ -127,9 +157,10 @@ class TestToolAvailabilityValidation(unittest.TestCase):
         plan = {
             "steps": [{
                 "tool_name": "unknown_tool",
-                "tool_args": {},
-                "description": "Test"
-            }]
+                "intent": "Test intent",
+                "output_keys": ["result"]
+            }],
+            "narration_template": "Value: {result}"
         }
         available = ["run_command", "write_file"]
         valid, error = validate_tool_availability(plan, available)
@@ -204,9 +235,10 @@ class TestPlanValidatorFullValidation(unittest.TestCase):
         json_str = json.dumps({
             "steps": [{
                 "tool_name": "run_command",
-                "tool_args": {"command": "ls"},
-                "description": "List files"
-            }]
+                "intent": "List files",
+                "output_keys": ["files"]
+            }],
+            "narration_template": "Files:\n{files}"
         })
         plan = self.validator.validate(json_str)
         self.assertIsInstance(plan, dict)
@@ -230,9 +262,10 @@ class TestPlanValidatorFullValidation(unittest.TestCase):
         json_str = json.dumps({
             "steps": [{
                 "tool_name": "unknown_tool",
-                "tool_args": {},
-                "description": "Test"
-            }]
+                "intent": "Test",
+                "output_keys": ["value"]
+            }],
+            "narration_template": "Value {value}"
         })
         with self.assertRaises(PlanValidationError) as ctx:
             self.validator.validate(json_str)
@@ -257,8 +290,9 @@ class TestPlanValidatorRetryHints(unittest.TestCase):
         json_str = json.dumps({
             "steps": [{
                 "tool_name": "run_command",
-                "description": "Missing tool_args"
-            }]
+                "intent": "Missing outputs"
+            }],
+            "narration_template": "Result {value}"
         })
         plan, hint = self.validator.validate_with_hints(json_str)
         self.assertIsNone(plan)
@@ -269,9 +303,10 @@ class TestPlanValidatorRetryHints(unittest.TestCase):
         json_str = json.dumps({
             "steps": [{
                 "tool_name": "fake_tool",
-                "tool_args": {},
-                "description": "Test"
-            }]
+                "intent": "Test",
+                "output_keys": ["value"]
+            }],
+            "narration_template": "Value {value}"
         })
         plan, hint = self.validator.validate_with_hints(json_str)
         self.assertIsNone(plan)
@@ -282,15 +317,16 @@ class TestPlanValidatorRetryHints(unittest.TestCase):
         json_str = json.dumps({"steps": []})
         plan, hint = self.validator.validate_with_hints(json_str)
         self.assertIsNone(plan)
-        self.assertIn("at least one step", hint)
+        self.assertIn("must have at least one step", hint)
     
     def test_hints_for_too_many_steps(self):
         """Too many steps returns helpful hint"""
         json_str = json.dumps({
             "steps": [
-                {"tool_name": "run_command", "tool_args": {}, "description": f"Step {i}"}
+                {"tool_name": "run_command", "intent": f"Step {i}", "output_keys": [f"value_{i}"]}
                 for i in range(11)
-            ]
+            ],
+            "narration_template": "Combined"
         })
         plan, hint = self.validator.validate_with_hints(json_str)
         self.assertIsNone(plan)
@@ -301,9 +337,10 @@ class TestPlanValidatorRetryHints(unittest.TestCase):
         json_str = json.dumps({
             "steps": [{
                 "tool_name": "run_command",
-                "tool_args": {"command": "ls"},
-                "description": "List files"
-            }]
+                "intent": "List files",
+                "output_keys": ["files"]
+            }],
+            "narration_template": "Files:\n{files}"
         })
         plan, hint = self.validator.validate_with_hints(json_str)
         self.assertIsNotNone(plan)
