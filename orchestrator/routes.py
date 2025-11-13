@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
-from router.cache import CacheHit
+from orchestrator.intention_cache import CacheHit
 
 
 class Route(str, Enum):

@@ -22,7 +22,7 @@ from tools import get_tool_schemas
 from orchestrator.plan_validator import PlanValidator, PlanValidationError
 from orchestrator.plan_schema import detect_response_type
 from orchestrator.routes import RouterResult, Route
-from router.cache import IntentionCache
+from orchestrator.intention_cache import IntentionCache
 from tool_executor import ToolExecutor
 from tools import TOOLS
 

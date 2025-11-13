@@ -15,7 +15,7 @@ from config import Config
 from memory.api import Memory
 from orchestrator.orchestrator import Orchestrator, OrchestratorResult
 from orchestrator.prompts import get_agent_c_prompt
-from router.cache import CacheHit
+from orchestrator.intention_cache import CacheHit
 from orchestrator.routes import RouterResult, Route
 
 
