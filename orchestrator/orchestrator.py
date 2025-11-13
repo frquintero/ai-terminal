@@ -1,7 +1,7 @@
 """
 Orchestrator - Main controller for v2.0 multi-role architecture
 
-Coordinates: Router → Execution → Agent C narrator
+Coordinates: Router → Execution → Agent A narrator
 Implements CHAT, SHELL, and CACHED routes (Phase 2)
 PLANNER route implemented in Phase 3
 """
@@ -98,7 +98,7 @@ class Orchestrator:
     1. Create cycle_id and log to Memory
     2. Router.classify(query) → route decision
     3. Route-specific handler (CHAT/SHELL/CACHED/PLANNER)
-    4. Agent C narrator (universal final step)
+    4. Agent A narrator (universal final step)
     5. Return OrchestratorResult
     """
     
@@ -251,7 +251,7 @@ class Orchestrator:
         1. Create cycle_id
         2. Router classification
         3. Route-specific execution
-        4. Agent C narrator
+        4. Agent A narrator
         5. Update Memory and return result
         """
         start_time = time.time()
@@ -298,11 +298,11 @@ class Orchestrator:
             return result
         
         except Exception as e:
-            # Error handling - still call Agent C to explain
+            # Error handling - still call Agent A to explain
             latency_ms = int((time.time() - start_time) * 1000)
             
             error_msg = f"Error during orchestration: {str(e)}"
-            agent_c_response = self._call_agent_c_narrator(
+            agent_c_response = self._call_agent_a_narrator(
                 cycle_id=cycle_id,
                 query=query,
                 tool_name="orchestrator",
@@ -321,12 +321,12 @@ class Orchestrator:
     
     def _handle_chat_route(self, cycle_id: str, query: str) -> OrchestratorResult:
         """
-        CHAT route: Simple informational query → Agent C
+        CHAT route: Simple informational query handled directly by Agent A.
         
         Workflow:
         1. Retrieve last 10 chat exchanges from Memory
         2. Check for recent task completions (Planner→Chat handoff)
-        3. Call LLM in Agent C (chat mode) with full context
+        3. Call LLM in Agent A (chat mode) with full context
         4. Log to chat_history
         5. Return result
         """
@@ -336,15 +336,15 @@ class Orchestrator:
             last_n=10
         )
         
-        # Build system context for Agent C
+        # Build system context for Agent A (chat mode)
         system_context = self.context_builder.build_for_role(
-            role="C",
+            role="A",
             session_id=self.session_id,
             tool_registry=TOOLS,
             shell_cwd=self._get_effective_shell_cwd()
         )
         
-        # Build messages for Agent C
+        # Build messages for Agent A
         messages = [
             {"role": "system", "content": system_context + "\n\n" + get_agent_c_prompt("chat")}
         ]
@@ -369,10 +369,10 @@ class Orchestrator:
         # Add current query
         messages.append({"role": "user", "content": query})
         
-        # Call LLM in Agent C role
+        # Call LLM in Agent A role (chat mode)
         llm_client = LLMClient(
             config=self.config,
-            role="C",
+            role="A",
             memory=self.memory
         )
         
@@ -404,12 +404,12 @@ class Orchestrator:
     
     def _handle_shell_route(self, cycle_id: str, query: str) -> OrchestratorResult:
         """
-        SHELL route: Direct shell command execution → Agent C narrator
+        SHELL route: Direct shell command execution with Agent A narration.
         
         Workflow:
         1. Detect if interactive command (vim, top, etc.) or regular command
         2. Execute via appropriate tool (run_interactive for TTY commands, run_command for regular)
-        3. Call Agent C narrator to present results
+        3. Call Agent A narrator to present results
         4. Cache successful execution for future CACHED hits
         5. Return result
         
@@ -427,10 +427,10 @@ class Orchestrator:
             step_id=0  # Single-step execution
         )
         
-        # Call Agent C narrator
+        # Call Agent A narrator
         # For interactive commands, the output is minimal (exit status message)
         # since the user was controlling the program directly
-        agent_c_response = self._call_agent_c_narrator(
+        agent_c_response = self._call_agent_a_narrator(
             cycle_id=cycle_id,
             query=query,
             tool_name=tool_name,
@@ -463,12 +463,12 @@ class Orchestrator:
         router_result
     ) -> OrchestratorResult:
         """
-        CACHED route: Retrieve cached tool + Execute → Agent C narrator
+        CACHED route: Retrieve cached tool + Execute → Agent A narrator
         
         Workflow:
         1. Retrieve cached tool/args from router_result
         2. Execute via ToolExecutor
-        3. Call Agent C narrator
+        3. Call Agent A narrator
         4. Update cache usage counter
         5. Return result
         
@@ -487,8 +487,8 @@ class Orchestrator:
             step_id=0
         )
         
-        # Call Agent C narrator
-        agent_c_response = self._call_agent_c_narrator(
+        # Call Agent A narrator
+        agent_c_response = self._call_agent_a_narrator(
             cycle_id=cycle_id,
             query=query,
             tool_name=cache_hit.tool_name,
@@ -511,7 +511,7 @@ class Orchestrator:
             }
         )
     
-    def _call_agent_c_narrator(
+    def _call_agent_a_narrator(
         self,
         cycle_id: str,
         query: str,
@@ -521,7 +521,7 @@ class Orchestrator:
         exit_code: Optional[int] = None
     ) -> str:
         """
-        Call Agent C in narrator mode to present tool results conversationally.
+        Call Agent A in narrator mode to present tool results conversationally.
         
         Args:
             cycle_id: Cycle ID for logging
@@ -532,9 +532,9 @@ class Orchestrator:
             exit_code: Exit code (if applicable)
         
         Returns:
-            Conversational response from Agent C
+            Conversational response from Agent A
         """
-        # Build context message for Agent C
+        # Build context message for Agent A
         context = f"""User Query: {query}
 
 Tool Executed: {tool_name}
@@ -546,9 +546,9 @@ Success: {success}
         
         context += f"\nTool Output:\n{tool_output}"
         
-        # Build system context for Agent C
+        # Build system context for Agent A
         system_context = self.context_builder.build_for_role(
-            role="C",
+            role="A",
             session_id=self.session_id,
             tool_registry=TOOLS,
             shell_cwd=self._get_effective_shell_cwd()
@@ -559,10 +559,10 @@ Success: {success}
             {"role": "user", "content": context}
         ]
         
-        # Call LLM in Agent C role
+        # Call LLM in Agent A role
         llm_client = LLMClient(
             config=self.config,
-            role="C",
+            role="A",
             memory=self.memory
         )
         
@@ -572,23 +572,23 @@ Success: {success}
         )
         
         if llm_result["error"]:
-            # Fallback to raw output if Agent C fails
-            return f"[Agent C narrator failed: {llm_result['error']}]\n\n{tool_output}"
+            # Fallback to raw output if Agent A fails
+            return f"[Agent A narrator failed: {llm_result['error']}]\n\n{tool_output}"
         
         return llm_result["message"].content or tool_output
     
-    def _call_agent_c_chat(self, cycle_id: str, query: str) -> str:
+    def _call_agent_a_chat(self, cycle_id: str, query: str) -> str:
         """
-        Call Agent C in chat mode for simple informational responses.
+        Call Agent A in chat mode for simple informational responses.
         
-        This is used when Agent A delegates to Agent C or for CHAT route.
+        This is used when the planner delegates to a direct chat reply or for CHAT route.
         
         Args:
             cycle_id: Cycle ID for logging
             query: User's original query
         
         Returns:
-            Conversational response from Agent C
+            Conversational response from Agent A
         """
         # Get chat history for context
         chat_history = self.memory.get_chat_history(
@@ -596,15 +596,15 @@ Success: {success}
             last_n=10
         )
         
-        # Build system context for Agent C
+        # Build system context for Agent A
         system_context = self.context_builder.build_for_role(
-            role="C",
+            role="A",
             session_id=self.session_id,
             tool_registry=TOOLS,
             shell_cwd=self._get_effective_shell_cwd()
         )
         
-        # Build messages for Agent C
+        # Build messages for Agent A
         messages = [
             {"role": "system", "content": system_context + "\n\n" + get_agent_c_prompt("chat")}
         ]
@@ -617,10 +617,10 @@ Success: {success}
         # Add current query
         messages.append({"role": "user", "content": query})
         
-        # Call LLM in Agent C role
+        # Call LLM in Agent A role
         llm_client = LLMClient(
             config=self.config,
-            role="C",
+            role="A",
             memory=self.memory
         )
         
@@ -630,7 +630,7 @@ Success: {success}
         )
         
         if llm_result["error"]:
-            return f"[Agent C chat failed: {llm_result['error']}]"
+            return f"[Agent A chat failed: {llm_result['error']}]"
         
         agent_c_response = llm_result["message"].content or "No response"
         
@@ -652,7 +652,7 @@ Success: {success}
         Agent A can respond with THREE types:
         1. Execution plan (steps) - Execute via Agent B loop
         2. Clarification request - Present to user for clarification
-        3. Delegation to Agent C - Route to Agent C for direct answer
+        3. Delegation to chat mode - Route to a direct answer
         
         Workflow:
         1. Retrieve Chat→Planner context (last 3 chat interactions)
@@ -748,8 +748,8 @@ Success: {success}
         
         # Check if we got a valid response
         if not response:
-            # Failed after all retries - fallback to Agent C explanation
-            agent_c_response = self._call_agent_c_narrator(
+            # Failed after all retries - fallback to Agent A explanation
+            agent_c_response = self._call_agent_a_narrator(
                 cycle_id=cycle_id,
                 query=query,
                 tool_name="agent_a_planner",
@@ -781,11 +781,11 @@ Success: {success}
             )
         
         elif response_type == "delegation":
-            # Agent A is delegating to Agent C - call Agent C directly
+            # Agent A is delegating to a chat-style response
             delegation_reason = response["delegate_to_chat"]
             
-            # Call Agent C directly with original query
-            agent_c_response = self._call_agent_c_chat(
+            # Call Agent A chat mode directly with original query
+            agent_c_response = self._call_agent_a_chat(
                 cycle_id=cycle_id,
                 query=query
             )
@@ -818,8 +818,8 @@ Success: {success}
                 current_step_id=len(plan["steps"]) - 1
             )
             
-            # Call Agent C summarizer to generate final response
-            agent_c_response = self._call_agent_c_summarizer(
+            # Call Agent A summarizer to generate final response
+            agent_c_response = self._call_agent_a_summarizer(
                 cycle_id=cycle_id,
                 query=query,
                 plan=plan,
@@ -842,8 +842,8 @@ Success: {success}
                 error_message=str(e)
             )
             
-            # Call Agent C to explain error
-            agent_c_response = self._call_agent_c_narrator(
+            # Call Agent A to explain error
+            agent_c_response = self._call_agent_a_narrator(
                 cycle_id=cycle_id,
                 query=query,
                 tool_name="plan_executor",
@@ -1220,7 +1220,7 @@ Success: {success}
         # Recursively substitute variables
         return substitute_in_value(result)
     
-    def _call_agent_c_summarizer(
+    def _call_agent_a_summarizer(
         self,
         cycle_id: str,
         query: str,
@@ -1228,7 +1228,7 @@ Success: {success}
         execution_result: Dict[str, Any]
     ) -> str:
         """
-        Call Agent C in summarizer mode to present execution results.
+        Call Agent A in summarizer mode to present execution results.
         
         Args:
             cycle_id: Cycle ID for logging
@@ -1237,9 +1237,9 @@ Success: {success}
             execution_result: Results from _execute_plan
         
         Returns:
-            Conversational summary from Agent C
+            Conversational summary from Agent A
         """
-        # Build context for Agent C
+        # Build context for Agent A
         context = f"""User Query: {query}
 
 Plan Executed: {len(plan['steps'])} steps
@@ -1262,23 +1262,23 @@ Step Results Summary:
             else:
                 context += f"\n  Error: {result['error']}"
                 
-                # Build system context for Agent C
-                system_context = self.context_builder.build_for_role(
-                role="C",
-                session_id=self.session_id,
-                tool_registry=TOOLS,
-                shell_cwd=self._get_effective_shell_cwd()
-                )
-                
-                messages = [
-                {"role": "system", "content": system_context + "\n\n" + get_agent_c_prompt("summarizer")},
-                {"role": "user", "content": context}
-                ]
+        # Build system context for Agent A
+        system_context = self.context_builder.build_for_role(
+            role="A",
+            session_id=self.session_id,
+            tool_registry=TOOLS,
+            shell_cwd=self._get_effective_shell_cwd()
+        )
+        
+        messages = [
+            {"role": "system", "content": system_context + "\n\n" + get_agent_c_prompt("summarizer")},
+            {"role": "user", "content": context}
+        ]
 
-        # Call LLM in Agent C role
+        # Call LLM in Agent A role
         llm_client = LLMClient(
             config=self.config,
-            role="C",
+            role="A",
             memory=self.memory
         )
         
@@ -1288,8 +1288,8 @@ Step Results Summary:
         )
         
         if llm_result["error"]:
-            # Fallback to raw summary if Agent C fails
-            return f"[Agent C summarizer failed: {llm_result['error']}]\n\n{context}"
+            # Fallback to raw summary if Agent A fails
+            return f"[Agent A summarizer failed: {llm_result['error']}]\n\n{context}"
         
         return llm_result["message"].content or context
     
