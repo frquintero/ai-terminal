@@ -32,7 +32,7 @@ class TestPhase0Acceptance:
         
         # Should exist after any Memory() instantiation
         mem = Memory()
-        mem.close()
+        mem.close(force=True)
         
         assert db_path.exists(), "orchestrator.db should exist"
         assert db_path.is_file(), "orchestrator.db should be a file"
@@ -76,7 +76,7 @@ class TestPhase0Acceptance:
         assert len(tables) >= len(required_tables), \
             f"Expected at least {len(required_tables)} tables, got {len(tables)}"
         
-        mem.close()
+        mem.close(force=True)
     
     def test_full_crud_api(self):
         """Test Memory API CRUD operations work end-to-end."""
@@ -134,7 +134,7 @@ class TestPhase0Acceptance:
         traces = mem.get_llm_traces(cycle_id=cycle_id)
         assert len(traces) == 1
         
-        mem.close()
+        mem.close(force=True)
         
         print("✓ All CRUD operations working")
     
@@ -162,7 +162,7 @@ class TestPhase0Acceptance:
         assert len(interactions) > 0, "LLMClient should log to interactions"
         assert interactions[0]['role'] == 'C'
         
-        mem.close()
+        mem.close(force=True)
         
         print("✓ LLMClient integration working")
     
@@ -189,7 +189,7 @@ class TestPhase0Acceptance:
         assert len(steps) > 0, "ToolExecutor should log to step_outputs"
         assert steps[0]['tool_name'] == 'run_command'
         
-        mem.close()
+        mem.close(force=True)
         
         print("✓ ToolExecutor integration working")
     
@@ -219,9 +219,9 @@ class TestPhase0Acceptance:
         """Verify schema is valid and up-to-date."""
         mem = Memory()
         
-        # Schema version should be 1
+        # Schema version should be current (v2)
         version = get_schema_version(mem.conn)
-        assert version == 1, f"Expected schema version 1, got {version}"
+        assert version == 2, f"Expected schema version 2, got {version}"
         
         # Schema should pass verification
         is_valid = verify_schema(mem.conn)
@@ -232,7 +232,7 @@ class TestPhase0Acceptance:
         assert status['up_to_date'], "Schema should be up-to-date"
         assert status['pending_migrations'] == 0, "No pending migrations"
         
-        mem.close()
+        mem.close(force=True)
         
         print("✓ Schema verification passed")
     
@@ -251,7 +251,7 @@ class TestPhase0Acceptance:
             mem.conn.commit()
         
         mem.conn.rollback()
-        mem.close()
+        mem.close(force=True)
         
         print("✓ Foreign key constraints enforced")
     
@@ -276,7 +276,7 @@ class TestPhase0Acceptance:
             assert decision is not None
             assert decision['cycle_id'] == cycle_id
         
-        mem.close()
+        mem.close(force=True)
         
         print("✓ Concurrent cycles working")
 

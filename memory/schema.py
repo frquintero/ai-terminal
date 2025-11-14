@@ -12,7 +12,7 @@ from typing import Optional
 
 DEFAULT_DB_PATH = Path("logs/orchestrator.db")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 CREATE_TABLES = """
 -- Schema version tracking
@@ -147,6 +147,12 @@ CREATE TABLE IF NOT EXISTS step_outputs (
     success INTEGER NOT NULL CHECK (success IN (0, 1)),
     exit_code INTEGER,
     output_preview TEXT,
+    stdout TEXT,
+    stderr TEXT,
+    raw_stdout BLOB,
+    raw_stderr BLOB,
+    output_format_json TEXT,
+    parsed_outputs_json TEXT,
     artifact_path TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (cycle_id) REFERENCES router_decisions(cycle_id)
@@ -231,6 +237,39 @@ CREATE TABLE IF NOT EXISTS llm_traces (
     FOREIGN KEY (cycle_id) REFERENCES router_decisions(cycle_id)
 );
 
+-- Route metrics table
+CREATE TABLE IF NOT EXISTS route_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    route TEXT NOT NULL,
+    confidence REAL,
+    latency_ms INTEGER,
+    cache_hit INTEGER DEFAULT 0,
+    interactive INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Step metrics table
+CREATE TABLE IF NOT EXISTS step_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    step_id INTEGER NOT NULL,
+    tool_name TEXT NOT NULL,
+    success INTEGER NOT NULL,
+    latency_ms INTEGER,
+    output_size_bytes INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- LLM metrics table
+CREATE TABLE IF NOT EXISTS llm_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    role TEXT NOT NULL,
+    model TEXT NOT NULL,
+    prompt_tokens INTEGER,
+    completion_tokens INTEGER,
+    latency_ms INTEGER,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_router_decisions_cycle_id ON router_decisions(cycle_id);
 CREATE INDEX IF NOT EXISTS idx_router_decisions_session_id ON router_decisions(session_id);
@@ -265,17 +304,24 @@ def init_db(db_path: Optional[Path] = None) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     
     # Connect and enable foreign keys
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(
+        str(db_path),
+        timeout=30.0,
+        check_same_thread=False
+    )
     conn.execute("PRAGMA foreign_keys = ON")
     
     # Execute schema
     conn.executescript(CREATE_TABLES)
     
     # Record schema version
-    conn.execute(
-        "INSERT OR IGNORE INTO schema_version (version) VALUES (?)",
-        (SCHEMA_VERSION,)
-    )
+    cursor = conn.execute("SELECT COUNT(*) FROM schema_version")
+    has_version = cursor.fetchone()[0] > 0
+    if not has_version:
+        conn.execute(
+            "INSERT INTO schema_version (version) VALUES (?)",
+            (SCHEMA_VERSION,)
+        )
     conn.commit()
     
     return conn

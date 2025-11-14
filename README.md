@@ -1,37 +1,36 @@
 # AI-Powered Linux Shell Terminal — v2.0
 
-**Version:** 2.0 (Multi-Role Orchestrator Architecture)
+**Version:** 2.0 (Routerless Dual-Agent Orchestrator)
 
 ## Overview
 
-This is an **AI-powered Linux terminal** using the **v2.0 Triple-Agent Orchestration Architecture**. A lightweight router classifies queries into four routes (SHELL/CACHED/CHAT/PLANNER), then dispatches to specialized LLM agents with fine-tuned roles:
+This is an **AI-powered Linux terminal** built on a dual-agent orchestrator. A lightweight command classifier (regex heuristics + intention cache) decides whether a query should run through the SHELL, CACHED, CHAT, or PLANNER path, and Agent A always narrates the final answer.
 
-- **Agent A (Planner)**: Decomposes complex tasks into high-level steps  
-- **Agent B (Command Engineer)**: Generates precise tool arguments for each step  
-- **Agent C (Narrator)**: Converts raw outputs into natural language for all routes
+- **Agent A (Planner / Narrator / Chat):** First hop for every request. Emits either a direct response or a structured plan with `steps[]` + `narration_template`, then renders the final narration after execution.
+- **Agent B (Command Engineer):** Called per step to generate precise shell commands (or tool arguments for non-shell tools) plus an `output_format` that explains how to interpret stdout.
 
-**Core Philosophy**: 
+**Core Philosophy**:
 - **In AI We Trust**: Minimal guardrails, full system access
-- **Shell-First**: Shell commands execute immediately (50%+ of interactions), not through planning layers  
-- **Speed Through Intelligence**: Router uses fast regex rules + intention cache; only ambiguous queries hit the planner
+- **Shell-First**: Favor single, precise shell commands; multi-step plans are opt-in
+- **Speed Through Intelligence**: On-device classifier + cache keep literal shell commands under ~500 ms without sacrificing narration quality
 
 ---
 
 ## Architecture Overview
 
-### v2.0 Routes (4-Level Precedence)
+### Routerless Flow (Classifier + Cache)
 
 ```
 Query
   ↓
-[SHELL] (160+ command patterns) → run_command/run_interactive immediately
-  ↓ (if no match)
-[CACHED] (FTS5 intention cache) → Cached tool args + Agent C narrator
-  ↓ (if no cache hit)
-[CHAT] (12 Q&A patterns) → Direct Agent C chat mode (no tools)
-  ↓ (if ambiguous)
-[PLANNER] (fallback) → Agent A→B loop for complex tasks
+[Classifier + Intention Cache]
+  ├─ SHELL   → Agent A emits single-step plan → Agent B runs run_command/run_interactive → narration
+  ├─ CACHED  → ToolExecutor replays cached tool args → Agent A narrates result
+  ├─ CHAT    → Agent A responds directly (no tools)
+  └─ PLANNER → Agent A issues multi-step plan → Agent B executes each step → template rendered
 ```
+
+The classifier mirrors the legacy router’s precedence but is embedded in `orchestrator/command_classifier.py`, so there is no standalone router service or CLI anymore.
 
 ### Unified Memory System
 
@@ -42,20 +41,21 @@ Tables:
 - `router_decisions`: Route classification with confidence scores
 - `intention_cache`: FTS5-indexed cache of successful executions
 - `task_state`: PLANNER route plans and status
-- `step_outputs`: Individual step results with output previews
+- `step_outputs`: Individual step results with stdout/stderr snapshots, raw blobs, `output_format`, and JSON-encoded `parsed_outputs`
 - `chat_history`: Conversation history for context injection
 - `llm_traces`: Full prompt/response logs for debugging
 - `route_metrics`, `step_metrics`, `llm_metrics`: Telemetry
 
-All state is **transactional** with `session_id` + `cycle_id` tracking per orchestration cycle.
+All state is **transactional** with `session_id` + `cycle_id` tracking per orchestration cycle. The orchestrator now wraps every cycle in `Memory.cycle_transaction()`, committing only after a successful response so partial plans/step outputs never touch disk. Need a clean slate? Run `python -m memory.purge_db --yes --include-sessions --include-cache` to wipe orchestrator state before starting a new upgrade.
 
-### Three-Role LLM System
+### Dual-Role LLM System
 
 | Role | Prompt | Input | Output | Example |
 |------|--------|-------|--------|---------|
-| **Agent A (Planner)** | Strategic task decomposer | User query + available tools | JSON plan: `{steps: [{id, tool_name, intent, description}]}` | "Create script → Design → Deploy" |
-| **Agent B (Command Engineer)** | Precise tool executor | Plan step + tool schemas + previous outputs | JSON args: `{tool_name, tool_args}` | `{"command": "ls -lah | grep .py"}` |
-| **Agent C (Narrator)** | Universal narrator | Raw outputs + context | Natural language response | "Found 3 Python files (42 KB total)" |
+| **Agent A (Planner / Narrator)** | Strategic planner + narrator instructions | User query, tool list, prior chat context | `{"response": ...}` or `{"steps": [...], "narration_template": "..."}` | `"steps": [{"tool_name": "run_command", ...}], "narration_template": "Files: {files}"` |
+| **Agent B (Command Engineer)** | Precise tool executor | Current step metadata + schemas + previous outputs | Shell steps → `{"command": "...", "output_format": {...}}`; other tools → `{"tool_args": {...}}` | `{"command": "ls -lah", "output_format": {"files": "list"}}` |
+
+After ToolExecutor runs a command, the orchestrator captures full stdout/stderr (normalized + raw), computes a 1 KB preview, and runs it through `orchestrator/output_parser.py`. The parser materializes Agent B’s declared `output_format` into typed Python values (`int`, `float`, `list`, `raw`, `table`, `json`, `str`). Those parsed values are persisted to `memory.step_outputs` and fed into Agent A’s `narration_template`, so templates can safely reference `{count}`, `{files}`, etc. without brittle string slicing.
 
 ---
 
@@ -66,14 +66,14 @@ All state is **transactional** with `session_id` + `cycle_id` tracking per orche
 ```
 orchestrator/
 ├── orchestrator.py         # Main Orchestrator class, handle_query() entry point
-├── prompts.py              # Agent A/B/C system prompts with context injection
-├── metrics.py              # Telemetry collection (route distribution, latency, cache hits)
+├── command_classifier.py   # Routerless classifier + heuristics
+├── command_patterns.py     # Regex bundles for shell/chat/interactive detection
+├── intention_cache.py      # FTS5-backed cache shared across routes
+├── prompts.py              # Agent A/B system prompts with context injection
+├── plan_schema.py          # Schema + helpers for narration templates/output_keys
 ├── plan_validator.py       # JSON schema validation with retry logic
-
-router/
-├── router.py               # Main Router class, 4-level classification
-├── rules.py                # RuleEngine with regex patterns + interactive detection
-├── cli.py                  # Manual testing/debugging tool
+├── output_parser.py        # Typed stdout parser for Agent B output_format payloads
+├── metrics.py              # Telemetry collection (route distribution, latency, cache hits)
 
 memory/
 ├── api.py                  # Unified Memory API (CRUD for all tables)
@@ -82,8 +82,8 @@ memory/
 tools.py                     # Tool registry (run_command, run_interactive, write_file, http_request, etc.)
 shell_integration.py         # Bash/zsh wrapper with cwd isolation
 config.py                    # Multi-backend LLM configuration (OpenAI, MiniMax, Kimi, custom)
-llm_client.py               # LLM client with role-specific prompts
-tool_executor.py            # Tool invocation and validation
+llm_client.py                # LLM client with role-specific prompts
+tool_executor.py             # Tool invocation and validation
 main.py                      # CLI entry point (REPL)
 ```
 
@@ -132,23 +132,12 @@ TEMPERATURE=0.7
 python main.py --agent kimi2 --max-tokens 4096 --temperature 0.9
 ```
 
-### Manual Router Testing
+## REPL Experience
 
-Use the Router CLI tool for debugging classification:
-
-```bash
-# Single query
-python -m router.cli "What is Docker?"
-# Output: CHAT route with confidence 0.95
-
-# Batch test
-python -m router.cli --test-file queries.txt
-
-# Interactive REPL
-python -m router.cli --interactive
-```
-
----
+- **Dynamic prompt & status line** – The prompt mirrors the AI shell’s cwd (`user@host ~/repo ❯`). A single in-place status line cycles through `Planning…`, `Executing commands…`, and `Preparing response…` with elapsed seconds so you always know what the orchestrator is doing.
+- **Narration stays human** – Agent A’s final narration is rendered as a Rich panel (Markdown supported) outside any ANSI block, keeping the conversation readable even when commands run in between.
+- **Command panels for raw output** – Every shell or planner step streams into an ANSI-styled panel that shows the command header, success state, and stdout/stderr. JSON payloads are auto-prettified, and `read_file` steps render Markdown/code with syntax highlighting plus truncation notices for huge files.
+- **Sequential streaming** – Narration and panels arrive in execution order, so prompts that mix reasoning (“explain Tokyo”) and shell work (“list *.txt”) naturally display as `narration → command panel → narration → command panel`, matching the dual-agent plan.
 
 ## Telemetry & Metrics
 
@@ -235,54 +224,19 @@ class MyTool(BaseTool):
         return f"Executed with {arg1}"
 ```
 
-### Tuning the Router
+### Tuning the Classifier
 
-Router classification is controlled by regex patterns in `router/rules.py`:
+Regex heuristics now live in `orchestrator/command_patterns.py`:
 
-- **SHELL_COMMAND_PATTERNS** (160+ patterns): File ops, package managers, build tools, etc.
-- **CHAT_QUERY_PATTERNS** (12 patterns): "What is...", "Explain...", etc.
-- **INTERACTIVE_COMMAND_PATTERNS** (20+ patterns): vim, nano, top, htop, etc.
+- `SHELL_PATTERNS`: 160+ single-line shell commands (git, npm, ls, etc.)
+- `CHAT_PATTERNS`: Informational prompts such as “What is…”
+- `INTERACTIVE_PATTERNS`: vim, nano, top, ssh, mysql, etc.
 
-To add a new SHELL command pattern:
-
-```python
-# In router/rules.py, add to SHELL_COMMAND_PATTERNS:
-r'^mycommand\b',  # Matches: mycommand, mycommand -flags
-```
-
-Then test:
-
-```bash
-python -m router.cli "mycommand arg1 arg2"
-# Should output: SHELL route
-```
+To add a new shell command, edit `SHELL_PATTERNS` and re-run `python -m pytest tests/test_command_classifier.py`. Interactive commands should go into `INTERACTIVE_PATTERNS` so Agent B selects `run_interactive`.
 
 ### Adjusting Cache Thresholds
 
-Intention cache matching uses FTS5 BM25 scoring. Tuning:
-
-```python
-# In router/router.py, adjust threshold:
-CACHE_THRESHOLD = 0.85  # Default: 85% similarity
-```
-
-Lower threshold → more cache hits but risk false positives  
-Higher threshold → fewer cache hits but higher precision
-
-### Debugging a Query
-
-Enable verbose output:
-
-```bash
-python -m router.cli "complex query" --verbose --show-patterns
-```
-
-Output includes:
-- Route classification
-- Matched rules
-- Confidence scores
-- Pattern statistics
-- Interactive command detection
+`orchestrator/intention_cache.py` exposes `IntentionCache.DEFAULT_MIN_SCORE`, `DEFAULT_MIN_USAGE`, and `DEFAULT_SEARCH_LIMIT`. Lowering `min_score` increases cache hits but risks false positives; raising it makes cache hits rarer but safer. After changing these values, run `python -m pytest tests/test_e2e_chat_cached.py -k cached` to confirm behavior.
 
 ### LLM Tracing
 
@@ -325,9 +279,8 @@ $PYTHON -m pytest tests/test_e2e_*.py tests/test_cross_*.py -v
 
 **What's Tested:**
 - ✅ PLANNER route (multi-step task decomposition)
-- ✅ Agent A planning (JSON plan generation)
-- ✅ Agent B execution (tool schema → precise args) **[Phase 4: Only current tool schema]**
-- ✅ Agent C narration (conversational responses)
+- ✅ Agent A planning + narration (JSON plan generation + templated summaries)
+- ✅ Agent B execution (tool schema → precise args)
 - ✅ CHAT route (simple queries)
 - ✅ CACHED route (intention cache, zero-LLM execution)
 - ✅ Cross-route context preservation
@@ -337,8 +290,8 @@ $PYTHON -m pytest tests/test_e2e_*.py tests/test_cross_*.py -v
 ### Additional Tests
 
 ```bash
-# Router tests (SHELL/CHAT/PLANNER classification)
-$PYTHON -m pytest tests/test_router.py -v
+# Command-classifier heuristics
+$PYTHON -m pytest tests/test_command_classifier.py -v
 
 # Memory API tests (database operations)
 $PYTHON -m pytest tests/test_memory.py -v
@@ -389,7 +342,7 @@ Better to over-plan an ambiguous query than misroute it. PLANNER confidence defa
 - Multi-user or tenant support
 - Distributed execution
 - Background/scheduled tasks
-- Custom agent roles beyond A/B/C
+- Custom agent roles beyond A/B
 
 ---
 
@@ -400,14 +353,13 @@ All architecture and development docs are in the `history/` directory:
 | File | Purpose |
 |------|---------|
 | **[IMPLEMENTATION_PLAN.md](history/IMPLEMENTATION_PLAN.md)** | Complete v2.0 design spec: 6 phases, success criteria, architecture decisions, risk mitigation |
-| **[DOUBLE_AGENT_ARCHITECTURE.md](DOUBLE_AGENT_ARCHITECTURE.md)** | Core architectural vision: triple-agent system, unified memory, router design |
+| **[DOUBLE_AGENT_ARCHITECTURE.md](DOUBLE_AGENT_ARCHITECTURE.md)** | Historical doc outlining the original triple-agent concept (pre-upgrade) |
 | **[PHASE_2_SIGN_OFF.md](history/PHASE_2_SIGN_OFF.md)** | Phase 2 final verification: 58 tests passing, all acceptance criteria met |
 | **[PHASE_2_COMPLETION.md](history/PHASE_2_COMPLETION.md)** | Phase 2 detailed completion: cross-route integration, context handoff, step persistence |
 | **[PHASE_2_ACCEPTANCE_CRITERIA.md](history/PHASE_2_ACCEPTANCE_CRITERIA.md)** | Phase 2 acceptance tests: specific test commands and success metrics |
-| **[ROUTER_TUNING_GUIDE.md](history/ROUTER_TUNING_GUIDE.md)** | **Operators**: How to customize router patterns, adjust cache thresholds, debug routing decisions |
+| **[architectural_upgrade.md](history/architectural_upgrade.md)** | Dual-agent upgrade plan with phased rollout, acceptance criteria, and testing strategy |
 | **[DEBUGGING_V2.md](history/DEBUGGING_V2.md)** | **Developers**: Layer-by-layer debugging strategies, LLM tracing, performance profiling, database forensics |
 | **[cycles_debug_guide.md](cycles_debug_guide.md)** | **Cycle Analysis**: Step-by-step guide to debug any execution cycle using database forensics and debug_cycle.py tool |
-| **[ROUTER_CLI_COMPLETE.md](history/ROUTER_CLI_COMPLETE.md)** | Router CLI tool docs: manual testing, batch classification, interactive REPL, JSON output |
 | **[PHASE_5_COMPLETION.md](history/PHASE_5_COMPLETION.md)** | Phase 5 final: telemetry integration, docs complete, 65/65 tests passing, production ready |
 | **[PRODUCTION_READY_FIXES.md](history/PRODUCTION_READY_FIXES.md)** | **Production**: Oracle review fixes - config env names, metrics wiring, safe variable substitution, cross-platform venv, legacy tool gating |
 
@@ -428,7 +380,7 @@ All architecture and development docs are in the `history/` directory:
 
 1. **Check ready work**: `bd ready --json` to see unblocked issues
 2. **Claim your task**: `bd update bd-XXX --status in_progress`
-3. **Make changes**: New code in v2.0 modules (orchestrator/, router/, memory/)
+3. **Make changes**: New code in v2.0 modules (orchestrator/, memory/, tools/)
 4. **Test**: Run `pytest` to ensure all tests pass
 5. **Commit**: Always commit `.beads/issues.jsonl` with code changes
 6. **Close issue**: `bd close bd-XXX --reason "Done"` when complete
@@ -449,7 +401,7 @@ For questions, file a new bead:
 bd create "Question: How do I...?" -t task -p 2 --json
 ```
 
-For debugging issues, see [DEBUGGING_V2.md](history/DEBUGGING_V2.md). For analyzing execution cycles, see [cycles_debug_guide.md](cycles_debug_guide.md). For router customization, see [ROUTER_TUNING_GUIDE.md](history/ROUTER_TUNING_GUIDE.md).
+For debugging issues, see [DEBUGGING_V2.md](history/DEBUGGING_V2.md). For analyzing execution cycles, see [cycles_debug_guide.md](cycles_debug_guide.md). For classifier or architecture details, read [history/architectural_upgrade.md](history/architectural_upgrade.md).
 
 ---
 

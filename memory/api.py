@@ -6,17 +6,60 @@ All operations are transactional and thread-safe.
 """
 
 import json
+import logging
 import sqlite3
 import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
+from memory.migrations import apply_migrations
 from memory.schema import DEFAULT_DB_PATH, init_db
 
 
+logger = logging.getLogger(__name__)
+
+
+class _CycleTransactionHandle:
+    """Lightweight controller for committing/rolling back a cycle transaction."""
+
+    def __init__(self):
+        self._commit_requested = False
+        self._explicit_rollback = False
+
+    def commit(self):
+        """Request to commit when the transaction context exits cleanly."""
+        self._commit_requested = True
+        self._explicit_rollback = False
+
+    def rollback(self):
+        """Force rollback even if no exception bubbles out of the context."""
+        self._explicit_rollback = True
+        self._commit_requested = False
+
+    @property
+    def should_commit(self) -> bool:
+        return self._commit_requested and not self._explicit_rollback
+
+
 class Memory:
+    """Unified Memory System - Single source of truth (per database path)."""
+
+    _instances: ClassVar[Dict[Path, "Memory"]] = {}
+    _instances_lock: ClassVar[threading.RLock] = threading.RLock()
+
+    def __new__(cls, db_path: Optional[Path] = None):
+        resolved_path = Path(db_path or DEFAULT_DB_PATH).resolve()
+        with cls._instances_lock:
+            instance = cls._instances.get(resolved_path)
+            if instance is None or getattr(instance, "_closed", False):
+                instance = super().__new__(cls)
+                cls._instances[resolved_path] = instance
+                instance._initialized = False  # type: ignore[attr-defined]
+                instance._closed = False       # type: ignore[attr-defined]
+            return instance
     """
     Unified Memory System - Single source of truth for all orchestrator state.
     
@@ -27,15 +70,147 @@ class Memory:
     """
     
     def __init__(self, db_path: Optional[Path] = None):
-        """Initialize memory system with database connection."""
-        self.db_path = db_path or DEFAULT_DB_PATH
+        """Initialize memory system with database connection (per path singleton)."""
+        resolved_path = Path(db_path or DEFAULT_DB_PATH).resolve()
+
+        if getattr(self, "_initialized", False):
+            # Subsequent constructions for the same path reuse the existing instance.
+            if resolved_path != getattr(self, "db_path", resolved_path):
+                raise ValueError(
+                    "Memory instance already initialized for a different database path"
+                )
+            return
+
+        self.db_path = resolved_path
         self.conn = init_db(self.db_path)
+        apply_migrations(self.conn)
         # Thread lock for concurrent cycle operations
         self._lock = threading.RLock()
+        self._transaction_active = False
+        self._initialized = True
+        self._closed = False
     
-    def close(self):
-        """Close database connection."""
+    def close(self, *, force: bool = False, reason: Optional[str] = None):
+        """Close database connection; requires explicit force to guard shared singleton."""
+        if getattr(self, "_closed", False):
+            return
+
+        if not force:
+            logger.warning(
+                "Blocked Memory.close() without force flag for %s%s",
+                self.db_path,
+                f" ({reason})" if reason else ""
+            )
+            raise RuntimeError(
+                "Memory.close() requires force=True to avoid shutting down the shared singleton"
+            )
+
         self.conn.close()
+        self._closed = True
+
+        # Remove from singleton cache so a new connection can be created later.
+        with self._instances_lock:
+            cached = self._instances.get(self.db_path)
+            if cached is self:
+                del self._instances[self.db_path]
+        self._initialized = False
+
+    @contextmanager
+    def cycle_transaction(self):
+        """
+        Context manager wrapping all cycle mutations in a single SQLite transaction.
+
+        Usage:
+            with memory.cycle_transaction() as txn:
+                cycle_id = memory.create_cycle(...)
+                ...
+                txn.commit()  # Persist only when the cycle succeeds
+        """
+        handle = _CycleTransactionHandle()
+        with self._lock:
+            if self._transaction_active:
+                raise RuntimeError("Nested Memory transactions are not supported")
+
+            try:
+                self._transaction_active = True
+                self.conn.execute("BEGIN IMMEDIATE")
+
+                try:
+                    yield handle
+                except Exception:
+                    self.conn.rollback()
+                    raise
+                else:
+                    if handle.should_commit:
+                        self.conn.commit()
+                    else:
+                        self.conn.rollback()
+            finally:
+                self._transaction_active = False
+
+    def _commit_or_defer(self):
+        """Commit immediately unless we're inside an explicit transaction."""
+        if not self._transaction_active:
+            self.conn.commit()
+    
+    # ========== Metrics Recording ==========
+
+    def record_route_metric(
+        self,
+        *,
+        route: str,
+        confidence: float,
+        latency_ms: int,
+        cache_hit: bool = False,
+        interactive: bool = False
+    ) -> None:
+        """Record a route classification metric."""
+        self.conn.execute(
+            """
+            INSERT INTO route_metrics (route, confidence, latency_ms, cache_hit, interactive)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (route, confidence, latency_ms, int(cache_hit), int(interactive))
+        )
+        self._commit_or_defer()
+
+    def record_step_metric(
+        self,
+        *,
+        step_id: int,
+        tool_name: str,
+        success: bool,
+        latency_ms: int,
+        output_size_bytes: int = 0
+    ) -> None:
+        """Record a planner step execution metric."""
+        self.conn.execute(
+            """
+            INSERT INTO step_metrics (step_id, tool_name, success, latency_ms, output_size_bytes)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (step_id, tool_name, int(success), latency_ms, output_size_bytes)
+        )
+        self._commit_or_defer()
+
+    def record_llm_metric(
+        self,
+        *,
+        role: str,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        latency_ms: int
+    ) -> None:
+        """Record LLM usage metrics."""
+        self.conn.execute(
+            """
+            INSERT INTO llm_metrics (role, model, prompt_tokens, completion_tokens, latency_ms)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (role, model, prompt_tokens, completion_tokens, latency_ms)
+        )
+        self._commit_or_defer()
     
     # ========== Session Management ==========
     
@@ -65,7 +240,7 @@ class Memory:
             """,
             (session_id, model, system_info_json)
         )
-        self.conn.commit()
+        self._commit_or_defer()
         return session_id
     
     def update_session_activity(self, session_id: str):
@@ -74,7 +249,7 @@ class Memory:
             "UPDATE sessions SET last_activity_at = CURRENT_TIMESTAMP WHERE session_id = ?",
             (session_id,)
         )
-        self.conn.commit()
+        self._commit_or_defer()
     
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get session details."""
@@ -118,9 +293,77 @@ class Memory:
             """,
             (session_id, cycle_id, query)
         )
-        self.conn.commit()
+        self._commit_or_defer()
         
         return cycle_id
+    
+    def delete_cycle(self, cycle_id: str):
+        """
+        Remove all persisted data for a cycle.
+        
+        Ensures we only retain successful cycles by deleting every row
+        keyed by cycle_id across dependent tables.
+        """
+        tables = [
+            "interactions",
+            "llm_traces",
+            "task_state",
+            "step_outputs",
+            "chat_history"
+        ]
+        
+        with self._lock:
+            try:
+                for table in tables:
+                    self.conn.execute(
+                        f"DELETE FROM {table} WHERE cycle_id = ?",
+                        (cycle_id,)
+                    )
+                self.conn.execute(
+                    "DELETE FROM router_decisions WHERE cycle_id = ?",
+                    (cycle_id,)
+                )
+                self._commit_or_defer()
+            except sqlite3.Error:
+                self.conn.rollback()
+                raise
+    
+    def purge_all_data(
+        self,
+        include_sessions: bool = False,
+        include_intention_cache: bool = False
+    ):
+        """
+        Purge orchestrator data so the system can start fresh.
+        
+        Args:
+            include_sessions: Also delete session metadata
+            include_intention_cache: Also clear intention cache tables
+        """
+        cycle_tables = [
+            "interactions",
+            "llm_traces",
+            "task_state",
+            "step_outputs",
+            "chat_history",
+            "router_decisions"
+        ]
+        
+        with self._lock:
+            try:
+                for table in cycle_tables:
+                    self.conn.execute(f"DELETE FROM {table}")
+                
+                if include_sessions:
+                    self.conn.execute("DELETE FROM sessions")
+                
+                if include_intention_cache:
+                    self.conn.execute("DELETE FROM intention_cache")
+                
+                self._commit_or_defer()
+            except sqlite3.Error:
+                self.conn.rollback()
+                raise
     
     # ========== Router Operations ==========
     
@@ -155,7 +398,7 @@ class Memory:
             """,
             (route, confidence, rules_json, cache_hit_tool, cache_hit_args_json, cycle_id)
         )
-        self.conn.commit()
+        self._commit_or_defer()
     
     def get_router_decision(self, cycle_id: str) -> Optional[Dict[str, Any]]:
         """Get router decision for cycle."""
@@ -215,7 +458,7 @@ class Memory:
             """,
             (user_query, normalized_intent, tool_name, tool_args_json, success_flag)
         )
-        self.conn.commit()
+        self._commit_or_defer()
     
     def search_intention_cache(
         self, 
@@ -285,7 +528,7 @@ class Memory:
             """,
             (cache_id,)
         )
-        self.conn.commit()
+        self._commit_or_defer()
     
     # ========== Interaction Logging (Roles A/B/C) ==========
     
@@ -323,7 +566,7 @@ class Memory:
             (cycle_id, role, system_prompt_checksum, prompt_preview, response_preview,
              token_usage_json, latency_ms)
         )
-        self.conn.commit()
+        self._commit_or_defer()
     
     def get_interactions(
         self, 
@@ -387,7 +630,7 @@ class Memory:
             """,
             (cycle_id, plan_json, status)
         )
-        self.conn.commit()
+        self._commit_or_defer()
     
     def update_task_status(
         self,
@@ -405,7 +648,7 @@ class Memory:
             """,
             (status, current_step_id, error_message, cycle_id)
         )
-        self.conn.commit()
+        self._commit_or_defer()
     
     def get_task_state(self, cycle_id: str) -> Optional[Dict[str, Any]]:
         """Get task state for cycle."""
@@ -443,6 +686,12 @@ class Memory:
         success: bool,
         exit_code: Optional[int] = None,
         output_preview: Optional[str] = None,
+        stdout: Optional[str] = None,
+        stderr: Optional[str] = None,
+        raw_stdout: Optional[str] = None,
+        raw_stderr: Optional[str] = None,
+        output_format: Optional[Dict[str, Any]] = None,
+        parsed_outputs: Optional[Dict[str, Any]] = None,
         artifact_path: Optional[str] = None
     ):
         """
@@ -456,22 +705,32 @@ class Memory:
             success: Whether step succeeded
             exit_code: Exit code (for shell commands)
             output_preview: First 1000 chars of output
+            stdout: Full normalized stdout text
+            stderr: Full normalized stderr text
+            raw_stdout: Raw stdout with ANSI/control codes preserved
+            raw_stderr: Raw stderr with ANSI/control codes preserved
+            output_format: Mapping from output_key -> type for this step
+            parsed_outputs: Parsed values keyed by output_key
             artifact_path: Path to full output file (if large)
         """
         tool_args_json = json.dumps(tool_args)
         success_flag = 1 if success else 0
+        output_format_json = json.dumps(output_format) if output_format else None
+        parsed_outputs_json = json.dumps(parsed_outputs) if parsed_outputs else None
         
         self.conn.execute(
             """
             INSERT INTO step_outputs
             (cycle_id, step_id, tool_name, tool_args_json, success, exit_code, 
-             output_preview, artifact_path)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             output_preview, stdout, stderr, raw_stdout, raw_stderr,
+             output_format_json, parsed_outputs_json, artifact_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (cycle_id, step_id, tool_name, tool_args_json, success_flag, exit_code,
-             output_preview, artifact_path)
+             output_preview, stdout, stderr, raw_stdout, raw_stderr,
+             output_format_json, parsed_outputs_json, artifact_path)
         )
-        self.conn.commit()
+        self._commit_or_defer()
     
     def get_step_outputs(self, cycle_id: str, last_n: Optional[int] = None) -> List[Dict[str, Any]]:
         """
@@ -486,7 +745,9 @@ class Memory:
         """
         query = """
             SELECT id, cycle_id, step_id, tool_name, tool_args_json, success, 
-                   exit_code, output_preview, artifact_path, created_at
+                   exit_code, output_preview, stdout, stderr, raw_stdout,
+                   raw_stderr, output_format_json, parsed_outputs_json,
+                   artifact_path, created_at
             FROM step_outputs
             WHERE cycle_id = ?
             ORDER BY step_id DESC
@@ -508,8 +769,14 @@ class Memory:
                 "success": bool(row[5]),
                 "exit_code": row[6],
                 "output_preview": row[7],
-                "artifact_path": row[8],
-                "created_at": row[9]
+                "stdout": row[8],
+                "stderr": row[9],
+                "raw_stdout": row[10],
+                "raw_stderr": row[11],
+                "output_format": json.loads(row[12]) if row[12] else None,
+                "parsed_outputs": json.loads(row[13]) if row[13] else None,
+                "artifact_path": row[14],
+                "created_at": row[15]
             })
         
         return list(reversed(results))  # Return in chronological order
@@ -531,7 +798,7 @@ class Memory:
             """,
             (session_id, cycle_id, user_query, agent_response)
         )
-        self.conn.commit()
+        self._commit_or_defer()
     
     def get_chat_history(
         self, 
@@ -612,7 +879,7 @@ class Memory:
             """,
             (cycle_id, role, full_prompt, full_response, model, temperature, max_tokens)
         )
-        self.conn.commit()
+        self._commit_or_defer()
     
     def get_llm_traces(
         self, 
@@ -802,6 +1069,12 @@ class Memory:
                 so.success,
                 so.exit_code,
                 so.output_preview,
+                so.stdout,
+                so.stderr,
+                so.raw_stdout,
+                so.raw_stderr,
+                so.output_format_json,
+                so.parsed_outputs_json,
                 so.artifact_path,
                 so.created_at,
                 fts.rank,
@@ -843,10 +1116,16 @@ class Memory:
                 "success": bool(row[5]),
                 "exit_code": row[6],
                 "output_preview": row[7],
-                "artifact_path": row[8],
-                "created_at": row[9],
-                "rank": row[10],
-                "session_id": row[11]
+                "stdout": row[8],
+                "stderr": row[9],
+                "raw_stdout": row[10],
+                "raw_stderr": row[11],
+                "output_format": json.loads(row[12]) if row[12] else None,
+                "parsed_outputs": json.loads(row[13]) if row[13] else None,
+                "artifact_path": row[14],
+                "created_at": row[15],
+                "rank": row[16],
+                "session_id": row[17]
             })
         
         return results
@@ -956,4 +1235,3 @@ class Memory:
         
         # Otherwise return as-is (simple term search)
         return query
-

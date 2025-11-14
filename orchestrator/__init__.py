@@ -1,7 +1,5 @@
 """
-Orchestrator module - Main entry point for v2.0 multi-role architecture
-
-Coordinates Router → Execution → Agent C narrator flow
+Orchestrator module - routerless dual-agent controller (Agent A planner/narrator + Agent B executor).
 """
 
 from orchestrator.orchestrator import Orchestrator

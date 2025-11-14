@@ -34,7 +34,7 @@ class ToolExecutor:
     
     MAX_OUTPUT_PREVIEW = 1000  # Characters to store in step_outputs
     
-    def __init__(self):
+    def __init__(self, **_unused):
         """
         Initialize tool executor.
         
@@ -60,12 +60,14 @@ class ToolExecutor:
             cycle_id: Cycle ID for logging
             step_id: Step number in plan (for PLANNER route)
         
-        Returns:
-            Dict with:
-                - success: bool
-                - result: str (tool output)
-                - exit_code: int (for shell commands)
-                - error: str (if failed)
+        Returns a dict containing:
+            - success: bool
+            - result: str (primary text for backward compatibility)
+            - stdout / stderr: normalized strings (if provided)
+            - raw_stdout / raw_stderr: untrimmed strings for archival
+            - exit_code: Optional[int]
+            - output_preview: Truncated text for memory snapshots
+            - error: Optional[str]
         """
         # Validate tool exists
         tool = TOOLS.get(tool_name)
@@ -74,6 +76,11 @@ class ToolExecutor:
             return {
                 "success": False,
                 "result": error_msg,
+                "stdout": None,
+                "stderr": error_msg,
+                "raw_stdout": None,
+                "raw_stderr": error_msg,
+                "output_preview": error_msg[:self.MAX_OUTPUT_PREVIEW],
                 "exit_code": None,
                 "error": error_msg
             }
@@ -84,6 +91,11 @@ class ToolExecutor:
             return {
                 "success": False,
                 "result": validation_error,
+                "stdout": None,
+                "stderr": validation_error,
+                "raw_stdout": None,
+                "raw_stderr": validation_error,
+                "output_preview": validation_error[:self.MAX_OUTPUT_PREVIEW],
                 "exit_code": None,
                 "error": validation_error
             }
@@ -91,16 +103,25 @@ class ToolExecutor:
         # Execute tool
         try:
             result = tool.execute(**tool_args)
-            result_str = result if isinstance(result, str) else str(result)
+            normalized = self._normalize_tool_result(result)
             
             # Extract exit code if available
             # Note: Some tools set exit code in _SESSION_STATE, but we'll track it separately
             exit_code = self._extract_exit_code(tool_name, result)
+            preview = self._build_preview(normalized["stdout"], normalized["stderr"])
+            primary_text = normalized["stdout"] if normalized["stdout"] is not None else (
+                normalized["stderr"] or ""
+            )
             
             return {
                 "success": True,
-                "result": result_str,
+                "result": primary_text,
+                "stdout": normalized["stdout"],
+                "stderr": normalized["stderr"],
+                "raw_stdout": normalized["raw_stdout"],
+                "raw_stderr": normalized["raw_stderr"],
                 "exit_code": exit_code,
+                "output_preview": preview,
                 "error": None
             }
         
@@ -109,6 +130,11 @@ class ToolExecutor:
             return {
                 "success": False,
                 "result": error_msg,
+                "stdout": None,
+                "stderr": error_msg,
+                "raw_stdout": None,
+                "raw_stderr": error_msg,
+                "output_preview": error_msg[:self.MAX_OUTPUT_PREVIEW],
                 "exit_code": None,
                 "error": str(e)
             }
@@ -236,6 +262,51 @@ class ToolExecutor:
         # For now, return None (actual exit codes tracked in _SESSION_STATE)
         
         return None
+
+    def _normalize_tool_result(self, value: Any) -> Dict[str, Optional[str]]:
+        """
+        Normalize tool return value into stdout/stderr/raw fields.
+        """
+        stdout = None
+        stderr = None
+        raw_stdout = None
+        raw_stderr = None
+        
+        if isinstance(value, dict):
+            stdout = value.get("stdout")
+            stderr = value.get("stderr")
+            raw_stdout = value.get("raw_stdout", stdout)
+            raw_stderr = value.get("raw_stderr", stderr)
+            # Fallback to generic payload string if no stdout provided
+            if stdout is None and "result" in value:
+                stdout = str(value["result"])
+        elif isinstance(value, (list, tuple)):
+            stdout = "\n".join(str(item) for item in value)
+            raw_stdout = stdout
+        elif value is not None:
+            stdout = value if isinstance(value, str) else str(value)
+            raw_stdout = stdout
+        else:
+            stdout = ""
+            raw_stdout = ""
+        
+        return {
+            "stdout": stdout,
+            "stderr": stderr,
+            "raw_stdout": raw_stdout,
+            "raw_stderr": raw_stderr
+        }
+    
+    def _build_preview(
+        self,
+        stdout: Optional[str],
+        stderr: Optional[str]
+    ) -> Optional[str]:
+        """Return truncated preview text for Memory snapshots."""
+        source = stdout if stdout not in (None, "") else stderr
+        if not source:
+            return None
+        return source[: self.MAX_OUTPUT_PREVIEW]
     
 
 def format_observation_content(

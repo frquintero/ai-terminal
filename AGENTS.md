@@ -1,22 +1,15 @@
-## Architecture: v2.0 Multi-Role Orchestrator
+## Architecture: Routerless Dual-Agent Orchestrator
 
-**Version 2.0** implements the Triple Agent Architecture from `DOUBLE_AGENT_ARCHITECTURE.md`:
+The upgraded stack collapses narration and chat into **Agent A** so only two roles exist:
 
-- **ONE LLM** (OpenAI-compatible) called in THREE different roles via system prompts:
-  - **Agent A (Planner)**: Strategic task decomposer (generates high-level plan with tool_name + intent)
-  - **Agent B (Command Engineer)**: Precise tool executor (generates tool_args for each step)
-  - **Agent C (Chat/Narrator/Summarizer)**: Universal narrator for all routes
+- **Agent A (Planner / Narrator / Chat):** Always the first hop. Chooses between a direct response (`{"response": ...}`) or a structured plan (`{"steps": [...], "narration_template": "..."}`) and ultimately narrates results back to the user.
+- **Agent B (Command Engineer):** Invoked per step to generate precise shell commands (or schema-compliant tool args) plus `output_format` mappings that satisfy Agent A’s intent.
 
-- **Intelligent Router** with 4-level precedence:
-  1. SHELL - Fast-path for shell commands (130+ regex patterns)
-  2. CACHED - FTS5 intention cache (zero LLM calls)
-  3. CHAT - Simple informational queries
-  4. PLANNER - Complex multi-step tasks
+Agent B’s `output_format` contract is now enforced end-to-end: ToolExecutor returns normalized stdout/stderr + raw blobs, and the orchestrator runs them through `orchestrator/output_parser.py` to materialize the requested types (`int`, `float`, `list`, `raw`, `table`, `json`, `str`). Parsed values are persisted to `memory.step_outputs` and injected into Agent A’s narration template so placeholders like `{count}` or `{files}` always resolve to typed, trustworthy data.
 
-- **Unified Memory System**: Single SQLite database (`logs/orchestrator.db`) with cycle-based tracking
-- **Core Philosophy**: "Shell-First" + "In AI We Trust" (full system access, minimal guardrails)
+Instead of a separate router service, the orchestrator now embeds a lightweight command classifier plus the intention cache to decide between SHELL, CACHED, CHAT, and PLANNER flows. All cycle/step data still live in the unified SQLite memory, and the guiding principles remain unchanged: **In AI we trust** and **shell-first execution**.
 
-See `orchestrator/`, `router/`, `memory/` modules and `DOUBLE_AGENT_ARCHITECTURE.md` for details.
+See `orchestrator/`, `memory/`, and `history/architectural_upgrade.md` for additional context.
 
 ---
 

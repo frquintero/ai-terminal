@@ -23,7 +23,7 @@ from unittest.mock import Mock, patch, MagicMock
 from config import Config
 from memory.api import Memory
 from orchestrator.orchestrator import Orchestrator
-from router.rules import Route
+from orchestrator.routes import RouterResult, Route
 
 
 @pytest.fixture
@@ -61,7 +61,7 @@ def memory(temp_db):
     """Create Memory instance with test database"""
     mem = Memory(db_path=temp_db)
     yield mem
-    mem.close()
+        mem.close(force=True)
 
 
 @pytest.fixture
@@ -81,7 +81,12 @@ class TestIntegration1ChatToShell:
     def test_chat_then_shell_preserves_context(self, orchestrator):
         """User asks about ls command, then runs it"""
         
-        with patch("orchestrator.orchestrator.LLMClient") as MockLLMClient:
+        with patch.object(Orchestrator, "classify_query") as mock_classify, \
+                patch("orchestrator.orchestrator.LLMClient") as MockLLMClient:
+            mock_classify.side_effect = [
+                RouterResult(route=Route.CHAT, confidence=0.85, latency_ms=5),
+                RouterResult(route=Route.SHELL, confidence=0.95, latency_ms=5),
+            ]
             # Step 1: CHAT route - "How do I list files?"
             mock_llm = Mock()
             mock_llm.call.return_value = {
@@ -95,7 +100,7 @@ class TestIntegration1ChatToShell:
 
             result1 = orchestrator.handle_query("How do I list files?")
             assert result1.route == "CHAT"
-            assert "ls" in result1.agent_c_response.lower()
+            assert "ls" in result1.agent_response.lower()
             assert result1.cycle_id is not None
             chat_cycle_id = result1.cycle_id
 
@@ -248,20 +253,23 @@ class TestIntegration2ShellToPlanner:
                 shell_cycle_id = result1.cycle_id
 
             # Step 2: PLANNER route - Complex task
-            planner_plan = """{
+            planner_plan = json.dumps({
                 "steps": [
                     {
-                        "id": 0,
-                        "tool": "create_file",
-                        "description": "Create monitoring script"
+                        "tool_name": "create_file",
+                        "intent": "Create monitoring script",
+                        "description": "Create monitoring script",
+                        "output_keys": ["script_path"]
                     },
                     {
-                        "id": 1,
-                        "tool": "run_command",
-                        "description": "Make script executable"
+                        "tool_name": "run_command",
+                        "intent": "Make script executable",
+                        "description": "Make script executable",
+                        "output_keys": ["chmod_result"]
                     }
-                ]
-            }"""
+                ],
+                "narration_template": "Script saved to {script_path}. chmod: {chmod_result}"
+            })
 
             mock_llm.call.return_value = {
                 "message": Mock(content=planner_plan),
@@ -290,7 +298,12 @@ class TestIntegration2ShellToPlanner:
             }
             MockLLMClient.return_value = mock_llm
 
-            with patch("orchestrator.orchestrator.ToolExecutor") as MockExecutor:
+            with patch("orchestrator.orchestrator.ToolExecutor") as MockExecutor, \
+                    patch.object(Orchestrator, "classify_query") as mock_classify:
+                mock_classify.side_effect = [
+                    RouterResult(route=Route.SHELL, confidence=0.95, latency_ms=5),
+                    RouterResult(route=Route.CHAT, confidence=0.85, latency_ms=5),
+                ]
                 mock_executor = Mock()
                 mock_executor.execute.return_value = {
                     "success": True,
@@ -330,9 +343,18 @@ class TestIntegration3ChatPlannerChat:
     def test_full_chat_planner_chat_cycle(self, orchestrator):
         """Complete: ask, do task, ask follow-up"""
         
-        with patch("orchestrator.orchestrator.LLMClient") as MockLLMClient:
-            # Step 1: CHAT - "What's a cron job?"
+        with patch.object(Orchestrator, "classify_query") as mock_classify, \
+                patch("orchestrator.orchestrator.LLMClient") as MockLLMClient:
+            mock_classify.side_effect = [
+                RouterResult(route=Route.CHAT, confidence=0.85, latency_ms=5),
+                RouterResult(route=Route.PLANNER, confidence=0.6, latency_ms=5),
+                RouterResult(route=Route.CHAT, confidence=0.85, latency_ms=5),
+            ]
+            
             mock_llm = Mock()
+            MockLLMClient.return_value = mock_llm
+            
+            # Step 1: CHAT - "What's a cron job?"
             mock_llm.call.return_value = {
                 "message": Mock(content="A cron job is a scheduled task in Unix/Linux"),
                 "usage": None,
@@ -340,44 +362,40 @@ class TestIntegration3ChatPlannerChat:
                 "trace_id": "chat-trace-3",
                 "error": None,
             }
-            MockLLMClient.return_value = mock_llm
-
             result1 = orchestrator.handle_query("What's a cron job?")
-            # May route to CHAT or PLANNER (both are valid for this query)
-            assert result1.route in ["CHAT", "PLANNER"]
+            assert result1.route == "CHAT"
             chat_cycle_1 = result1.cycle_id
-
-            # Manually save chat exchange (verify memory persistence)
+            
             orchestrator.memory.save_chat_exchange(
                 session_id=orchestrator.session_id,
                 cycle_id=chat_cycle_1,
                 user_query="What's a cron job?",
-                agent_response=result1.agent_c_response
+                agent_response=result1.agent_response
             )
-
-            # Verify chat history saved
             history = orchestrator.memory.get_chat_history(
                 session_id=orchestrator.session_id,
                 last_n=10
             )
             assert len(history) > 0
-
+            
             # Step 2: PLANNER - "Set up daily backup"
-            planner_response = """{
+            planner_response = json.dumps({
                 "steps": [
                     {
-                        "id": 0,
-                        "tool": "create_file",
-                        "description": "Create backup script"
+                        "tool_name": "create_file",
+                        "intent": "Create backup script",
+                        "description": "Create backup script",
+                        "output_keys": ["backup_script_path"]
                     },
                     {
-                        "id": 1,
-                        "tool": "run_command",
-                        "description": "Install in cron"
+                        "tool_name": "run_command",
+                        "intent": "Install cron job",
+                        "description": "Install in cron",
+                        "output_keys": ["cron_status"]
                     }
-                ]
-            }"""
-
+                ],
+                "narration_template": "Backup script at {backup_script_path}; cron status: {cron_status}"
+            })
             mock_llm.call.return_value = {
                 "message": Mock(content=planner_response),
                 "usage": None,
@@ -385,7 +403,6 @@ class TestIntegration3ChatPlannerChat:
                 "trace_id": "planner-trace-3",
                 "error": None,
             }
-
             with patch("orchestrator.orchestrator.ToolExecutor") as MockExecutor:
                 mock_executor = Mock()
                 mock_executor.execute.return_value = {
@@ -395,12 +412,12 @@ class TestIntegration3ChatPlannerChat:
                     "error": None,
                 }
                 MockExecutor.return_value = mock_executor
-
+                
                 result2 = orchestrator.handle_query("Set up daily backup of my home directory")
-                # May route to PLANNER
+                assert result2.route == "PLANNER"
                 planner_cycle = result2.cycle_id
                 assert planner_cycle != chat_cycle_1
-
+            
             # Step 3: CHAT follow-up - "How do I verify it's running?"
             mock_llm.call.return_value = {
                 "message": Mock(content="Use crontab -l to list your jobs and check logs"),
@@ -409,16 +426,15 @@ class TestIntegration3ChatPlannerChat:
                 "trace_id": "chat-trace-4",
                 "error": None,
             }
-
             result3 = orchestrator.handle_query("How do I verify it's running?")
-            assert result3.route in ["CHAT", "PLANNER"]  # Both valid routes
+            assert result3.route == "CHAT"
             chat_cycle_2 = result3.cycle_id
-
+            
             # Verify all cycles unique
             assert chat_cycle_1 != planner_cycle
             assert planner_cycle != chat_cycle_2
             assert chat_cycle_1 != chat_cycle_2
-
+            
             # Verify final chat history contains all exchanges
             final_history = orchestrator.memory.get_chat_history(
                 session_id=orchestrator.session_id,
@@ -480,7 +496,7 @@ class TestIntegration3ChatPlannerChat:
                 assert len(history) > 0
 
     def test_chat_includes_recent_planner_context(self, orchestrator, memory):
-        """Verify Agent C (Chat) receives recent task completion context"""
+        """Verify Agent A (Chat) receives recent task completion context"""
         
         # Create a completed plan
         cycle_id_plan = memory.create_cycle(

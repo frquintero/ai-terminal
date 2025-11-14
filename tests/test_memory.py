@@ -30,7 +30,7 @@ def memory(temp_db):
     """Create Memory instance with temp database."""
     mem = Memory(db_path=temp_db)
     yield mem
-    mem.close()
+    mem.close(force=True)
 
 
 class TestMemorySchema:
@@ -62,13 +62,31 @@ class TestMemorySchema:
     def test_schema_version(self, memory):
         """Verify schema version is tracked."""
         version = get_schema_version(memory.conn)
-        assert version == 1
+        assert version == 3
     
     def test_foreign_keys_enabled(self, memory):
         """Verify foreign key constraints are enabled."""
         cursor = memory.conn.execute("PRAGMA foreign_keys")
         fk_enabled = cursor.fetchone()[0]
         assert fk_enabled == 1
+
+
+class TestCloseGuards:
+    """Ensure singleton close protection works."""
+
+    def test_close_requires_force_and_logs(self, temp_db, caplog):
+        caplog.set_level("WARNING")
+        mem = Memory(db_path=temp_db)
+        mem.create_session('guard-session-1', 'gpt-4')
+
+        with pytest.raises(RuntimeError):
+            mem.close()
+
+        assert "Blocked Memory.close()" in caplog.text
+
+        # Connection should still be usable after blocked close attempt
+        mem.create_session('guard-session-2', 'gpt-4')
+        mem.close(force=True)
 
 
 class TestSessionManagement:
@@ -338,6 +356,33 @@ class TestStepOutputs:
         assert last_3[0]['step_id'] == 3  # Chronological order
         assert last_3[2]['step_id'] == 5
 
+    def test_structured_fields_persist(self, memory):
+        """Ensure stdout/stderr/output_format fields persist."""
+        session_id = 'test-session-struct'
+        memory.create_session(session_id, 'gpt-4')
+        cycle_id = memory.create_cycle(session_id, 'structured')
+        
+        memory.save_step_output(
+            cycle_id=cycle_id,
+            step_id=1,
+            tool_name='run_command',
+            tool_args={'command': 'ls'},
+            success=True,
+            exit_code=0,
+            output_preview='ls output',
+            stdout='file1\nfile2\n',
+            stderr='',
+            raw_stdout='file1\nfile2\n',
+            raw_stderr='',
+            output_format={'files': 'list'},
+            parsed_outputs={'files': ['file1', 'file2']}
+        )
+        
+        step = memory.get_step_outputs(cycle_id)[0]
+        assert step['stdout'] == 'file1\nfile2\n'
+        assert step['output_format'] == {'files': 'list'}
+        assert step['parsed_outputs'] == {'files': ['file1', 'file2']}
+
 
 class TestChatHistory:
     """Test chat conversation tracking."""
@@ -377,7 +422,7 @@ class TestChatHistory:
             if i % 5 == 0:  # Sleep every 5 to ensure timestamp changes
                 time.sleep(1.1)
         
-        # Get last 10 (default for Agent C)
+        # Get last 10 (default for Agent A)
         last_10 = memory.get_chat_history(session_id, last_n=10)
         assert len(last_10) == 10
         # Verify we got recent ones (exact order depends on timestamps)
@@ -410,3 +455,150 @@ class TestLLMTraces:
         assert traces[0]['role'] == 'A'
         assert traces[0]['model'] == 'gpt-4'
         assert traces[0]['temperature'] == 0.7
+
+
+class TestCyclePurging:
+    """Tests for deleting cycles and purging orchestrator data."""
+    
+    def test_delete_cycle_removes_all_rows(self, memory):
+        session_id = 'purge-session-001'
+        memory.create_session(session_id, 'gpt-4')
+        cycle_id = memory.create_cycle(session_id, 'cleanup me')
+        
+        memory.save_router_decision(cycle_id, 'CHAT', confidence=0.8)
+        memory.save_plan(cycle_id, {'steps': []}, status='pending')
+        memory.save_step_output(
+            cycle_id=cycle_id,
+            step_id=0,
+            tool_name='run_command',
+            tool_args={'command': 'ls'},
+            success=True,
+            exit_code=0,
+            output_preview='ok'
+        )
+        memory.save_chat_exchange(
+            session_id=session_id,
+            cycle_id=cycle_id,
+            user_query='cleanup me',
+            agent_response='done'
+        )
+        memory.log_interaction(
+            cycle_id=cycle_id,
+            role='A',
+            system_prompt_checksum='checksum',
+            prompt_preview='prompt',
+            response_preview='response'
+        )
+        memory.save_llm_trace(
+            cycle_id=cycle_id,
+            role='A',
+            full_prompt='prompt',
+            full_response='response',
+            model='gpt-4'
+        )
+        
+        assert memory.get_router_decision(cycle_id) is not None
+        assert memory.get_step_outputs(cycle_id)
+        assert memory.get_chat_history(session_id)
+        assert memory.get_interactions(cycle_id=cycle_id)
+        assert memory.get_llm_traces(cycle_id=cycle_id)
+        assert memory.get_task_state(cycle_id) is not None
+        
+        memory.delete_cycle(cycle_id)
+        
+        assert memory.get_router_decision(cycle_id) is None
+        assert memory.get_step_outputs(cycle_id) == []
+        assert memory.get_chat_history(session_id) == []
+        assert memory.get_interactions(cycle_id=cycle_id) == []
+        assert memory.get_llm_traces(cycle_id=cycle_id) == []
+        assert memory.get_task_state(cycle_id) is None
+    
+    def test_purge_all_data_resets_tables(self, memory):
+        session_id = 'purge-session-002'
+        memory.create_session(session_id, 'gpt-4')
+        cycle_id = memory.create_cycle(session_id, 'full purge')
+        memory.save_router_decision(cycle_id, 'CHAT', confidence=0.9)
+        memory.add_to_intention_cache(
+            'hello', 'hello', 'run_command', {'command': 'echo hello'}
+        )
+        
+        memory.purge_all_data(include_sessions=True, include_intention_cache=True)
+        
+        assert memory.get_router_decision(cycle_id) is None
+        assert memory.get_session(session_id) is None
+        assert memory.search_intention_cache('hello') == []
+
+
+class TestCycleTransactions:
+    """Tests for transactional persistence guarantees."""
+
+    def test_transaction_requires_commit(self, memory):
+        session_id = 'txn-session-001'
+        memory.create_session(session_id, 'gpt-4')
+
+        # Start transaction but skip commit → data should rollback
+        with memory.cycle_transaction():
+            cycle_id = memory.create_cycle(session_id, 'transient query')
+
+        assert memory.get_router_decision(cycle_id) is None
+
+        # Commit path should persist rows
+        with memory.cycle_transaction() as txn:
+            committed_cycle = memory.create_cycle(session_id, 'persist me')
+            txn.commit()
+
+        decision = memory.get_router_decision(committed_cycle)
+        assert decision is not None
+        assert decision['query_text'] == 'persist me'
+
+    def test_transaction_rolls_back_on_exception(self, memory):
+        session_id = 'txn-session-002'
+        memory.create_session(session_id, 'gpt-4')
+
+        with pytest.raises(RuntimeError):
+            with memory.cycle_transaction():
+                cycle_id = memory.create_cycle(session_id, 'boom')
+                raise RuntimeError("fail after writes")
+
+        assert memory.get_router_decision(cycle_id) is None
+
+
+class TestMetricsRecording:
+    """Ensure metrics helpers behave during transactions."""
+
+    def test_metrics_insert_within_cycle_transaction(self, memory):
+        session_id = 'metrics-session'
+        memory.create_session(session_id, 'gpt-4')
+
+        with memory.cycle_transaction() as txn:
+            memory.create_cycle(session_id, 'metrics query')
+            memory.record_route_metric(
+                route='CHAT',
+                confidence=0.9,
+                latency_ms=123,
+                cache_hit=False,
+                interactive=False
+            )
+            memory.record_step_metric(
+                step_id=1,
+                tool_name='run_command',
+                success=True,
+                latency_ms=50,
+                output_size_bytes=12
+            )
+            memory.record_llm_metric(
+                role='A',
+                model='gpt-4',
+                prompt_tokens=100,
+                completion_tokens=20,
+                latency_ms=200
+            )
+            txn.commit()
+
+        route_count = memory.conn.execute("SELECT COUNT(*) FROM route_metrics").fetchone()[0]
+        step_count = memory.conn.execute("SELECT COUNT(*) FROM step_metrics").fetchone()[0]
+        llm_count = memory.conn.execute("SELECT COUNT(*) FROM llm_metrics").fetchone()[0]
+
+        assert route_count == 1
+        assert step_count == 1
+        assert llm_count == 1

@@ -6,7 +6,6 @@ Allows future schema changes without breaking existing databases.
 """
 
 import sqlite3
-from pathlib import Path
 from typing import Callable, List, Tuple
 
 from memory.schema import get_schema_version
@@ -15,23 +14,75 @@ from memory.schema import get_schema_version
 Migration = Tuple[int, str, Callable[[sqlite3.Connection], None]]
 
 
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    cursor = conn.execute(f"PRAGMA table_info({table})")
+    return any(row[1] == column for row in cursor.fetchall())
+
+
 def migrate_v1_to_v2(conn: sqlite3.Connection):
     """
-    Example future migration (v1 → v2).
-    
-    Could add:
-    - New columns to existing tables
-    - New indexes
-    - New tables
+    Expand step_outputs with structured stdout/stderr + parsed value slots.
     """
-    # conn.execute("ALTER TABLE sessions ADD COLUMN timezone TEXT")
-    # conn.commit()
-    pass
+    columns = [
+        ("stdout", "TEXT"),
+        ("stderr", "TEXT"),
+        ("raw_stdout", "BLOB"),
+        ("raw_stderr", "BLOB"),
+        ("output_format_json", "TEXT"),
+        ("parsed_outputs_json", "TEXT"),
+    ]
+    
+    for name, ddl in columns:
+        if not _column_exists(conn, "step_outputs", name):
+            conn.execute(f"ALTER TABLE step_outputs ADD COLUMN {name} {ddl}")
+    
+    conn.commit()
+
+
+def migrate_v2_to_v3(conn: sqlite3.Connection):
+    """
+    Create metrics tables (route_metrics, step_metrics, llm_metrics) inside the primary schema.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS route_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            route TEXT NOT NULL,
+            confidence REAL,
+            latency_ms INTEGER,
+            cache_hit INTEGER DEFAULT 0,
+            interactive INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS step_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            step_id INTEGER NOT NULL,
+            tool_name TEXT NOT NULL,
+            success INTEGER NOT NULL,
+            latency_ms INTEGER,
+            output_size_bytes INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS llm_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            role TEXT NOT NULL,
+            model TEXT NOT NULL,
+            prompt_tokens INTEGER,
+            completion_tokens INTEGER,
+            latency_ms INTEGER,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
 
 
 # Registry of all migrations (version, description, migration function)
 MIGRATIONS: List[Migration] = [
-    # (2, "Add timezone to sessions", migrate_v1_to_v2),
+    (2, "Expand step_outputs for structured outputs", migrate_v1_to_v2),
+    (3, "Create metrics tables in unified schema", migrate_v2_to_v3),
 ]
 
 
@@ -99,7 +150,10 @@ def verify_schema(conn: sqlite3.Connection) -> bool:
         'task_state',
         'step_outputs',
         'chat_history',
-        'llm_traces'
+        'llm_traces',
+        'route_metrics',
+        'step_metrics',
+        'llm_metrics'
     ]
     
     # Check foreign keys enabled

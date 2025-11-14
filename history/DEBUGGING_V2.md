@@ -399,7 +399,7 @@ o = Orchestrator(config=config)
 result = o.handle_query("What is Kubernetes?")
 
 assert result.route == "CHAT", f"Expected CHAT, got {result.route}"
-assert result.agent_c_response is not None, "No response from Agent C"
+assert result.agent_response is not None, "No response from Agent C"
 assert result.error is None, f"Unexpected error: {result.error}"
 assert result.latency_ms < 1000, f"Too slow: {result.latency_ms}ms"
 
@@ -418,7 +418,7 @@ o = Orchestrator(config=config)
 result = o.handle_query("ls -la /tmp")
 
 assert result.route == "SHELL", f"Expected SHELL, got {result.route}"
-assert result.agent_c_response is not None, "No response from Agent C"
+assert result.agent_response is not None, "No response from Agent C"
 assert result.latency_ms < 500, f"Too slow for simple command: {result.latency_ms}ms"
 
 print("✓ SHELL command works end-to-end")
@@ -453,7 +453,7 @@ decision = mem.get_router_decision(result.cycle_id)
 # Note: May be CACHED or PLANNER depending on threshold
 
 print(f"Route: {result.route}")
-print(f"Response: {result.agent_c_response[:100]}...")
+print(f"Response: {result.agent_response[:100]}...")
 ```
 
 ---

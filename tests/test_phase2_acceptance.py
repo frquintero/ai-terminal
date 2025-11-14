@@ -5,7 +5,7 @@ Acceptance Criteria (from IMPLEMENTATION_PLAN.md Phase 2):
 1. ✅ CHAT route responds to "what is X?" queries conversationally
 2. ✅ SHELL route executes direct commands in <500ms
 3. ✅ CACHED route hits intention cache and avoids duplicate planning
-4. ✅ All routes invoke Agent C narrator as final step
+4. ✅ All routes invoke Agent A narrator as final step
 5. ✅ Router logs all decisions to router_decisions table
 6. ✅ Shell fast-path bypasses planner entirely (no multi-step overhead)
 7. ✅ Successful shell executions cached for future CACHED hits
@@ -24,7 +24,7 @@ from unittest.mock import Mock, patch
 from config import Config
 from memory.api import Memory
 from orchestrator.orchestrator import Orchestrator
-from router.rules import Route
+from orchestrator.routes import RouterResult, Route
 
 
 class Phase2AcceptanceTests(unittest.TestCase):
@@ -75,9 +75,9 @@ class Phase2AcceptanceTests(unittest.TestCase):
         # Verify CHAT route was used
         self.assertEqual(result.route, "CHAT")
         
-        # Verify Agent C response is conversational
-        self.assertIn("Docker", result.agent_c_response)
-        self.assertGreater(len(result.agent_c_response), 10)
+        # Verify Agent A response is conversational
+        self.assertIn("Docker", result.agent_response)
+        self.assertGreater(len(result.agent_response), 10)
         
         # Verify no execution result (pure chat, no tools)
         self.assertIsNone(result.execution_result)
@@ -99,7 +99,7 @@ class Phase2AcceptanceTests(unittest.TestCase):
         mock_tools.__getitem__.return_value = mock_run_command
         mock_tools.get.return_value = mock_run_command
         
-        # Mock OpenAI response for Agent C narrator
+        # Mock OpenAI response for Agent A narrator
         mock_client = Mock()
         mock_response = Mock()
         mock_choice = Mock()
@@ -190,7 +190,7 @@ class Phase2AcceptanceTests(unittest.TestCase):
     @patch("tool_executor.TOOLS")
     @patch("llm_client.openai.OpenAI")
     def test_ac4_all_routes_invoke_agent_c(self, mock_openai_class, mock_tools):
-        """AC4: All routes invoke Agent C narrator as final step"""
+        """AC4: All routes invoke Agent A narrator as final step"""
         # Mock tool
         mock_tool = Mock()
         mock_tool.execute.return_value = "test output"
@@ -202,7 +202,7 @@ class Phase2AcceptanceTests(unittest.TestCase):
         mock_response = Mock()
         mock_choice = Mock()
         mock_message = Mock()
-        mock_message.content = "Response from Agent C"
+        mock_message.content = "Response from Agent A"
         mock_choice.message = mock_message
         mock_response.choices = [mock_choice]
         mock_response.usage = Mock(prompt_tokens=20, completion_tokens=10, total_tokens=30)
@@ -212,9 +212,9 @@ class Phase2AcceptanceTests(unittest.TestCase):
         # Test CHAT route
         result_chat = self.orchestrator.handle_query("What is Python?")
         self.assertEqual(result_chat.route, "CHAT")
-        self.assertIsNotNone(result_chat.agent_c_response)
+        self.assertIsNotNone(result_chat.agent_response)
         chat_llm_calls = mock_client.chat.completions.create.call_count
-        self.assertGreater(chat_llm_calls, 0, "CHAT route must call Agent C")
+        self.assertGreater(chat_llm_calls, 0, "CHAT route must call Agent A")
         
         # Reset call count
         mock_client.chat.completions.create.reset_mock()
@@ -222,14 +222,32 @@ class Phase2AcceptanceTests(unittest.TestCase):
         # Test SHELL route
         result_shell = self.orchestrator.handle_query("echo test")
         self.assertEqual(result_shell.route, "SHELL")
-        self.assertIsNotNone(result_shell.agent_c_response)
+        self.assertIsNotNone(result_shell.agent_response)
         shell_llm_calls = mock_client.chat.completions.create.call_count
-        self.assertGreater(shell_llm_calls, 0, "SHELL route must call Agent C narrator")
+        self.assertGreater(shell_llm_calls, 0, "SHELL route must call Agent A narrator")
         
-        print("✅ AC4 PASSED: All routes invoke Agent C narrator")
+        print("✅ AC4 PASSED: All routes invoke Agent A narrator")
     
-    def test_ac5_router_logs_decisions(self):
+    @patch.object(Orchestrator, "classify_query")
+    @patch("orchestrator.orchestrator.LLMClient")
+    def test_ac5_router_logs_decisions(self, mock_llm_client, mock_classify):
         """AC5: Router logs all decisions to router_decisions table"""
+        mock_classify.return_value = RouterResult(
+            route=Route.CHAT,
+            confidence=0.9,
+            latency_ms=5
+        )
+        mock_llm = Mock()
+        mock_message = Mock()
+        mock_message.content = "Test response"
+        mock_llm.call.return_value = {
+            "message": mock_message,
+            "usage": {},
+            "latency_ms": 50,
+            "trace_id": "ac5",
+            "error": None
+        }
+        mock_llm_client.return_value = mock_llm
         with patch("llm_client.openai.OpenAI"):
             # Execute query
             result = self.orchestrator.handle_query("test query")
@@ -255,7 +273,7 @@ class Phase2AcceptanceTests(unittest.TestCase):
         mock_tools.__getitem__.return_value = mock_tool
         mock_tools.get.return_value = mock_tool
         
-        # Mock OpenAI for Agent C narrator only (NOT for planning)
+        # Mock OpenAI for Agent A narrator only (NOT for planning)
         mock_client = Mock()
         mock_response = Mock()
         mock_choice = Mock()
@@ -273,9 +291,9 @@ class Phase2AcceptanceTests(unittest.TestCase):
         # Verify SHELL route was used
         self.assertEqual(result.route, "SHELL")
         
-        # Verify only ONE LLM call (Agent C narrator, no planner)
+        # Verify only ONE LLM call (Agent A narrator, no planner)
         llm_calls = mock_client.chat.completions.create.call_count
-        self.assertEqual(llm_calls, 1, "SHELL route must call LLM only once (Agent C narrator)")
+        self.assertEqual(llm_calls, 1, "SHELL route must call LLM only once (Agent A narrator)")
         
         # Verify task_state table is empty (no planning)
         task_state = self.memory.get_task_state(result.cycle_id)

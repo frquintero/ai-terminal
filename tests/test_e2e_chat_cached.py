@@ -2,10 +2,10 @@
 End-to-end tests for CHAT and CACHED routes.
 
 These tests validate:
-- CHAT route: Simple informational queries routed to Agent C
+- CHAT route: Simple informational queries routed to Agent A
 - CACHED route: Previously executed queries retrieved from intention cache
 - Router classification for both routes
-- Agent C conversational output
+- Agent A conversational output
 - Memory persistence and retrieval
 """
 
@@ -19,7 +19,7 @@ from unittest.mock import Mock, patch, MagicMock
 from config import Config
 from memory.api import Memory
 from orchestrator.orchestrator import Orchestrator
-from router.rules import Route
+from orchestrator.routes import Route
 
 
 # Test configuration with mock LLM
@@ -58,7 +58,7 @@ def memory(temp_db):
     """Create Memory instance with test database"""
     mem = Memory(db_path=temp_db)
     yield mem
-    mem.close()
+        mem.close(force=True)
 
 
 @pytest.fixture
@@ -86,7 +86,7 @@ class TestChatRoute:
         ]
 
         for query in queries:
-            result = orchestrator.router.classify(query)
+            result = orchestrator.classify_query(query)
             assert result.route == Route.CHAT, f"Query '{query}' should route to CHAT"
             assert result.confidence >= 0.8
 
@@ -122,7 +122,7 @@ class TestChatRoute:
 
             # Verify result structure
             assert result.route == "CHAT"
-            assert result.agent_c_response == "Tokyo is the capital of Japan."
+            assert result.agent_response == "Tokyo is the capital of Japan."
             assert result.error is None
             assert result.latency_ms > 0
             assert result.cycle_id is not None
@@ -208,7 +208,7 @@ class TestCachedRoute:
         """Verify no cache hit for new queries"""
         query = "Show me the most recent files in /tmp"
 
-        result = orchestrator.router.classify(query)
+        result = orchestrator.classify_query(query)
         # Should not be CACHED if cache is empty
         assert result.route != Route.CACHED
 
@@ -217,7 +217,7 @@ class TestCachedRoute:
         # This query matches SHELL patterns, not CACHED
         query = "ls -la"
 
-        result = orchestrator.router.classify(query)
+        result = orchestrator.classify_query(query)
         assert result.route == Route.SHELL
 
     def test_populate_intention_cache(self, orchestrator, memory):
@@ -274,7 +274,7 @@ class TestCachedRoute:
 
             # Manually test cache retrieval (Router won't classify as CACHED by default)
             # This tests the intention cache mechanism directly
-            cache_hit = orchestrator.router.intention_cache.lookup(user_query)
+            cache_hit = orchestrator.intention_cache.lookup(user_query)
             assert cache_hit is not None
             assert cache_hit.tool_name == tool_name
             assert cache_hit.tool_args == tool_args
@@ -385,7 +385,7 @@ class TestRouteIntegration:
         )
 
         # Query matches SHELL pattern
-        result = orchestrator.router.classify("ls -la")
+        result = orchestrator.classify_query("ls -la")
         # Should classify as SHELL, not CACHED, despite cache hit
         assert result.route == Route.SHELL
 
@@ -398,7 +398,7 @@ class TestRouteIntegration:
         ]
 
         for query, expected_route, min_confidence in test_cases:
-            result = orchestrator.router.classify(query)
+            result = orchestrator.classify_query(query)
             assert result.route == expected_route
             assert result.confidence >= 0.5  # Minimum realistic confidence
 

@@ -18,7 +18,7 @@ from unittest.mock import Mock, patch, MagicMock, call
 from config import Config
 from memory.api import Memory
 from orchestrator.orchestrator import Orchestrator
-from router.rules import Route
+from orchestrator.routes import Route
 
 
 # Test configuration with mock LLM
@@ -57,7 +57,7 @@ def memory(temp_db):
     """Create Memory instance with test database"""
     mem = Memory(db_path=temp_db)
     yield mem
-    mem.close()
+    mem.close(force=True)
 
 
 @pytest.fixture
@@ -83,7 +83,7 @@ class TestPlannerRoute:
         ]
 
         for query in queries:
-            result = orchestrator.router.classify(query)
+            result = orchestrator.classify_query(query)
             # Complex tasks either route to PLANNER or can route to SHELL/CHAT
             # Router precedence: SHELL > CACHED > CHAT > PLANNER
             assert result.route in [Route.PLANNER, Route.CHAT, Route.SHELL], (
@@ -101,7 +101,7 @@ class TestTask1DiskMonitoring:
             "Create a Python script that monitors disk space "
             "and alerts when it exceeds 80%"
         )
-        result = orchestrator.router.classify(query)
+        result = orchestrator.classify_query(query)
         assert result.route == Route.PLANNER
 
     def test_task1_planning(self, orchestrator):
@@ -209,7 +209,7 @@ class TestTask2BackupScript:
     def test_task2_classification(self, orchestrator):
         """Verify backup task routes to PLANNER"""
         query = "Set up a daily backup of my home directory to an external drive"
-        result = orchestrator.router.classify(query)
+        result = orchestrator.classify_query(query)
         assert result.route == Route.PLANNER
 
     def test_task2_planning(self, orchestrator):
@@ -257,7 +257,7 @@ class TestTask2BackupScript:
             # Verify result structure
             # Router may classify as PLANNER, CHAT, or SHELL depending on patterns
             assert result.route in ["PLANNER", "CHAT", "SHELL"]
-            # Response will have either agent_c_response (CHAT) or plan (PLANNER) or was SHELL
+            # Response will have either agent_response (CHAT) or plan (PLANNER) or was SHELL
             assert result.cycle_id is not None
 
 
@@ -267,7 +267,7 @@ class TestTask3DockerMonitoring:
     def test_task3_classification(self, orchestrator):
         """Verify Docker monitoring task routes appropriately"""
         query = "Find all Docker containers using more than 500MB memory and list them"
-        result = orchestrator.router.classify(query)
+        result = orchestrator.classify_query(query)
         # Docker queries may route to SHELL (docker command), PLANNER, or CHAT
         assert result.route in [Route.PLANNER, Route.CHAT, Route.SHELL]
 

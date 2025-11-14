@@ -176,6 +176,7 @@ def main():
         # Initialize memory and orchestrator
         memory = Memory()
         orchestrator = Orchestrator(config, memory)
+        orchestrator.set_event_callback(ui.handle_orchestrator_event)
         
         # Link AI shell to UI for dynamic prompt
         from tools import TOOLS, RunCommandTool
@@ -204,15 +205,19 @@ def main():
                     break
 
                 # Process input through orchestrator
-                result = orchestrator.handle_query(user_input)
+                ui.begin_cycle()
+                try:
+                    result = orchestrator.handle_query(user_input)
+                finally:
+                    ui.end_cycle()
 
                 # Display response
                 if result.error:
                     ui.error(f"Error: {result.error}")
-                elif result.agent_c_response:
+                elif result.agent_response:
                     # Convert latency from ms to seconds for UI
                     elapsed_time = result.latency_ms / 1000.0 if result.latency_ms else None
-                    ui.ai_response(result.agent_c_response, elapsed_time, result.cycle_id)
+                    ui.ai_response(result.agent_response, elapsed_time, result.cycle_id)
                 
                 console.print()  # Empty line for readability
 

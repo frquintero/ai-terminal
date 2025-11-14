@@ -51,7 +51,7 @@ def memory(temp_db):
     """Create Memory instance with test database"""
     mem = Memory(db_path=temp_db)
     yield mem
-    mem.close()
+        mem.close(force=True)
 
 
 @pytest.fixture

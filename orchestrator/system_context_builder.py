@@ -127,7 +127,7 @@ class SystemContextBuilder:
         Generate role-specific system context.
         
         Args:
-            role: Agent role ('A', 'B', or 'C')
+            role: Agent role ('A' or 'B')
             session_id: Current session ID
             tool_registry: Available tools (name -> schema)
             shell_cwd: Current shell working directory (can differ from OS cwd)
@@ -147,21 +147,24 @@ class SystemContextBuilder:
         
         # 1. Basic environment (always included)
         sections.append(self._build_basic_env(system_info, shell_cwd))
+
+        # 2. Architecture snapshot (role-aware guardrails)
+        sections.append(self._build_architecture_section(role))
         
-        # 2. Tools (role-specific)
+        # 3. Tools (role-specific)
         if role in ['A', 'B'] and tool_registry:
             sections.append(self._build_tools_section(role, tool_registry))
-        
-        # 3. Interpreters (Agent B only - tactical execution)
+
+        # 4. Interpreters (Agent B only - tactical execution)
         if role == 'B':
             sections.append(self._build_interpreters_section(system_info))
-        
-        # 4. Database schema (Agent A only - for search_db planning)
+
+        # 5. Database schema (Agent A only - for search_db planning)
         if role == 'A':
             sections.append(self._build_db_schema_section())
-        
-        # 5. Capabilities summary (Agent C only - for answering "can I...?" questions)
-        if role == 'C':
+
+        # 6. Capabilities summary (Agent A only - for answering "can I...?" questions)
+        if role == 'A':
             sections.append(self._build_capabilities_section(system_info))
         
         return "\n\n".join(sections)
@@ -229,7 +232,7 @@ Each tool has a specific purpose - use the right tool for each step."""
 {self.DB_SCHEMA_SUMMARY}"""
     
     def _build_capabilities_section(self, system_info: Dict) -> str:
-        """Build capabilities summary (Agent C only)."""
+        """Build capabilities summary (Agent A only)."""
         interpreters = system_info.get('interpreters', {})
         
         python = "python3" in interpreters or "python" in interpreters
@@ -248,6 +251,39 @@ Each tool has a specific purpose - use the right tool for each step."""
             caps.append("Bash shell")
         
         return f"""**System Capabilities:** {", ".join(caps)}"""
+
+    def _build_architecture_section(self, role: str) -> str:
+        """
+        Describe how the dual-agent architecture is wired so each role knows its neighbors.
+        """
+        base_lines = [
+            "- User issues commands through the ai-terminal REPL.",
+            "- The Orchestrator receives each query, owns Memory, and decides which LLM role to invoke.",
+            "- Agent A (planner + narrator) designs strategies and is the only voice that addresses the user.",
+            "- Agent B (command engineer) turns each Agent A step into concrete ToolExecutor commands.",
+            "- ToolExecutor runs `run_command`/`run_interactive` in the sandbox and streams outputs back.",
+            "- Memory (logs/orchestrator.db) records cycles, plans, Agent B calls, and parsed step outputs."
+        ]
+
+        role_line = ""
+        if role == "A":
+            role_line = (
+                "- You are Agent A: focus on planning + narration, never emit commands, and expect Agent B to "
+                "fulfill every tool call."
+            )
+        elif role == "B":
+            role_line = (
+                "- You are Agent B: generate commands + output schemas for ONE step at a time, never talk to the "
+                "user, and honor Agent A's declared output_keys."
+            )
+        else:
+            role_line = "- You are an orchestration helper role."
+
+        principle_line = "- Guiding principles: In AI we trust. Remove obsolete/deprecated paths. Balance brevity with the best possible response."
+
+        lines = "\n".join(base_lines + [role_line, principle_line])
+        return f"""**Architecture Snapshot:**
+{lines}"""
     
     def estimate_tokens(self, context: str) -> int:
         """

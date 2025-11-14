@@ -95,6 +95,10 @@ def test_build_for_role_agent_a(builder, sample_tools):
     assert "run_command" in context
     assert "read_file" in context
     assert "search_db" in context
+
+    # Should describe architecture and Agent A's role
+    assert "Architecture Snapshot" in context
+    assert "You are Agent A" in context
     
     # Should include database schema
     assert "Database Schema" in context
@@ -120,6 +124,10 @@ def test_build_for_role_agent_b(builder, sample_tools):
     # Should include tool descriptions
     assert "Available Tools" in context
     assert "Execute shell command" in context  # Description snippet
+
+    # Should describe architecture and Agent B's role
+    assert "Architecture Snapshot" in context
+    assert "You are Agent B" in context
     
     # Should include interpreters
     assert "Interpreters:" in context
@@ -130,12 +138,12 @@ def test_build_for_role_agent_b(builder, sample_tools):
     assert "Database Schema" not in context
 
 
-def test_build_for_role_agent_c(builder, sample_tools):
-    """Test context generation for Agent C (Chat/Narrator)."""
+def test_build_for_role_agent_a_chat(builder):
+    """Test context generation for Agent A when no tool registry is provided."""
     context = builder.build_for_role(
-        role='C',
+        role='A',
         session_id='test-123',
-        tool_registry=None,  # Agent C doesn't need tools
+        tool_registry=None,  # Should gracefully handle missing registry
         shell_cwd='/home/user/project'
     )
     
@@ -154,7 +162,7 @@ def test_build_for_role_agent_c(builder, sample_tools):
 
 def test_token_budget_compliance(builder, sample_tools):
     """Test that generated context stays under 1000 token budget."""
-    for role in ['A', 'B', 'C']:
+    for role in ['A', 'B']:
         context = builder.build_for_role(
             role=role,
             session_id='test-123',
@@ -168,8 +176,8 @@ def test_token_budget_compliance(builder, sample_tools):
         assert estimated_tokens < 1000, \
             f"Agent {role} context exceeds 1000 tokens: {estimated_tokens}"
         
-        # Agent C context can be very short, others should have reasonable content
-        min_tokens = 30 if role == 'C' else 50
+        # Agent A chat context can be short, Agent B needs more detail
+        min_tokens = 30 if role == 'A' else 50
         assert estimated_tokens >= min_tokens, \
             f"Agent {role} context too short: {estimated_tokens} tokens"
 

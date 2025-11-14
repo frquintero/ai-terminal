@@ -80,6 +80,9 @@ Migration/testing checklist:
 3. Persist parsed values in `memory.step_outputs` keyed by `(cycle_id, step_id, output_key)` and store full stdout/stderr in blob columns for replay/debug.
 4. After all steps complete, hydrate `narration_template` with the parsed data, respecting formatting (lists/joined lines, raw calendar blocks, etc.), then send final narration to the REPL.
 
+- **Status: ✅** ToolExecutor now emits stdout/stderr/raw previews, `memory.step_outputs` stores structured blobs + `parsed_outputs`, `orchestrator/output_parser.py` materializes Agent B’s `output_format`, and template hydration is covered by parser + orchestrator tests.
+- **REPL streaming: ✅** The REPL listens to orchestrator status/tool events, shows shell executions in ANSI command panels, pretty-prints JSON/table output, and renders `read_file` previews with Markdown/syntax highlighting so narration can interleave with raw command output.
+
 Migration/testing checklist:
 - Add golden-output tests that compare hydrated narrations versus templates for combinations of `int`, `list`, and `raw`.
 - Ensure `debug_cycle.py` and any dashboard viewers can display preserved ANSI/table outputs without stripping spacing.
@@ -89,6 +92,7 @@ Migration/testing checklist:
    - Drop router-specific tables.
    - Introduce `plans` (steps + narration template), `step_calls` (Agent B metadata), and richer `step_outputs`.
    - Ensure `chat_history` now reflects only direct `response`-type replies from Agent A (no Agent C echoes).
+   - **Status: ✅** Enforce “success-only” retention via `Memory.cycle_transaction()` so failed cycles roll back automatically, and expose a purge utility for clean snapshots before upgrades.
 2. Revise metrics (`RouteMetrics`, `LLMMetrics`) to track Agent A/B latency, success/failure counts, retries, and parsing errors instead of route hit-rates.
 3. Ensure the unified SQLite schema keeps backward compatibility or offers a migration path that rewrites old sessions into the new format.
 4. Update Memory import/export routines so bd issues and orchestration history stay aligned after schema changes.

@@ -10,18 +10,19 @@ import os
 import time
 import uuid
 from string import Formatter
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from config import Config
 from llm_client import LLMClient
 from memory.api import Memory
-from orchestrator.prompts import get_agent_a_prompt, get_agent_b_prompt, get_agent_c_prompt
+from orchestrator.prompts import get_agent_a_prompt, get_agent_b_prompt, get_agent_a_chat_prompt, get_agent_a_narrator_prompt, get_agent_a_summarizer_prompt
 from orchestrator.metrics import RouteMetrics, StepMetrics, LLMMetrics, get_metrics
 from orchestrator.system_context_builder import SystemContextBuilder
 from orchestrator.command_classifier import classify_query, QueryRoute, is_interactive_command
 from tools import get_tool_schemas
 from orchestrator.plan_validator import PlanValidator, PlanValidationError
 from orchestrator.plan_schema import detect_response_type
+from orchestrator.output_parser import OutputParser, OutputParserError
 from orchestrator.routes import RouterResult, Route
 from orchestrator.intention_cache import IntentionCache
 from tool_executor import ToolExecutor
@@ -36,7 +37,7 @@ class OrchestratorResult:
         cycle_id: str,
         route: str,
         query: str,
-        agent_c_response: str,
+        agent_response: str,
         execution_result: Optional[Dict[str, Any]] = None,
         latency_ms: int = 0,
         error: Optional[str] = None
@@ -44,7 +45,7 @@ class OrchestratorResult:
         self.cycle_id = cycle_id
         self.route = route
         self.query = query
-        self.agent_c_response = agent_c_response
+        self.agent_response = agent_response
         self.execution_result = execution_result
         self.latency_ms = latency_ms
         self.error = error
@@ -55,37 +56,11 @@ class OrchestratorResult:
             "cycle_id": self.cycle_id,
             "route": self.route,
             "query": self.query,
-            "agent_c_response": self.agent_c_response,
+            "agent_response": self.agent_response,
             "execution_result": self.execution_result,
             "latency_ms": self.latency_ms,
             "error": self.error
         }
-
-
-class _RuleEngineShim:
-    """Compatibility shim exposing is_interactive_command."""
-    
-    @staticmethod
-    def is_interactive_command(query: str) -> bool:
-        return is_interactive_command(query)
-
-
-class _RouterShim:
-    """
-    Lightweight adapter so legacy tests/code that reference orchestrator.router
-    continue to work while the real Router component is removed.
-    """
-    
-    def __init__(self, orchestrator: "Orchestrator"):
-        self._orchestrator = orchestrator
-        self.intention_cache = orchestrator.intention_cache
-        self.rule_engine = _RuleEngineShim()
-    
-    def classify(self, query: str) -> RouterResult:
-        return self._orchestrator._classify_query(query)
-    
-    def log_decision(self, cycle_id: str, query: str, result: RouterResult):
-        self._orchestrator._log_route_decision(cycle_id, query, result)
 
 
 class Orchestrator:
@@ -104,6 +79,8 @@ class Orchestrator:
     
     # Constants
     MAX_PLAN_RETRIES = 2  # Max attempts for Agent A to generate valid plan
+    SHELL_TOOLS = {"run_command", "run_interactive"}
+    SUPPORTED_OUTPUT_FORMAT_TYPES = {"int", "float", "str", "list", "raw", "table", "json"}
     SHELL_CONFIDENCE = 0.95
     CACHED_CONFIDENCE = 0.90
     CHAT_CONFIDENCE = 0.85
@@ -122,15 +99,16 @@ class Orchestrator:
         
         # Initialize components
         self.intention_cache = IntentionCache(self.memory)
-        self.router = _RouterShim(self)  # Legacy compatibility shim
         self.tool_executor = ToolExecutor()  # ToolExecutor does NOT access memory directly
+        self.output_parser = OutputParser()
         self.context_builder = SystemContextBuilder(memory=self.memory)
-        
+
         # Detect system state once at startup (cached for session)
         self.system_state = self.context_builder.detect_system_state()
-        
+
         # Session management
         self.session_id = self._initialize_session()
+        self._event_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None
     
     def _initialize_session(self) -> str:
         """Create or retrieve session with detected system state"""
@@ -154,8 +132,34 @@ class Orchestrator:
             model=self.config.model,
             system_info=system_info
         )
-        
+
         return session_id
+
+    def set_event_callback(
+        self,
+        callback: Optional[Callable[[str, Dict[str, Any]], None]]
+    ) -> None:
+        """Register a callback for orchestration status/tool events."""
+        self._event_callback = callback
+
+    def _emit_event(self, event_type: str, payload: Dict[str, Any]) -> None:
+        """Safely emit orchestration events to the registered callback."""
+        if not self._event_callback:
+            return
+        try:
+            self._event_callback(event_type, payload)
+        except Exception:
+            # Never allow UI callback failures to break orchestration
+            pass
+
+    def _emit_status(self, phase: str, details: Optional[Dict[str, Any]] = None) -> None:
+        payload = {"phase": phase}
+        if details:
+            payload.update(details)
+        self._emit_event("status", payload)
+
+    def _emit_tool_output(self, payload: Dict[str, Any]) -> None:
+        self._emit_event("tool_output", payload)
     
     def _get_effective_shell_cwd(self) -> str:
         """
@@ -170,7 +174,7 @@ class Orchestrator:
         """
         return TOOLS['run_command'].get_effective_cwd()
 
-    def _classify_query(self, query: str) -> RouterResult:
+    def classify_query(self, query: str) -> RouterResult:
         """
         Classify the query using local heuristics (shell/chat/cache/planner).
         
@@ -255,69 +259,91 @@ class Orchestrator:
         5. Update Memory and return result
         """
         start_time = time.time()
+        result: Optional[OrchestratorResult] = None
+        router_result: Optional[RouterResult] = None
+        cycle_id: Optional[str] = None
+        session_activity_needed = False
         
-        # Step 1: Create cycle
-        cycle_id = self.memory.create_cycle(
-            session_id=self.session_id,
-            query=query
-        )
+        with self.memory.cycle_transaction() as txn:
+            # Step 1: Create cycle
+            cycle_id = self.memory.create_cycle(
+                session_id=self.session_id,
+                query=query
+            )
+            
+            # Step 2: Query classification (routerless)
+            router_result = self.classify_query(query)
+            self._log_route_decision(cycle_id, query, router_result)
+            
+            # Step 3: Route-specific execution
+            try:
+                if router_result.route == Route.CHAT:
+                    result = self._handle_chat_route(cycle_id, query)
+                elif router_result.route == Route.SHELL:
+                    result = self._handle_shell_route(cycle_id, query)
+                elif router_result.route == Route.CACHED:
+                    result = self._handle_cached_route(cycle_id, query, router_result)
+                elif router_result.route == Route.PLANNER:
+                    result = self._handle_planner_route(cycle_id, query)
+                else:
+                    raise ValueError(f"Unknown route: {router_result.route}")
+                
+                # Calculate total latency
+                result.latency_ms = int((time.time() - start_time) * 1000)
+                
+                # Record metrics
+                route_metric = RouteMetrics(
+                    route=router_result.route.value,
+                    confidence=router_result.confidence,
+                    latency_ms=result.latency_ms,
+                    cache_hit=hasattr(router_result, 'cache_hit') and router_result.cache_hit is not None,
+                    interactive=is_interactive_command(query)
+                )
+                if hasattr(self.memory, "record_route_metric"):
+                    self.memory.record_route_metric(
+                        route=route_metric.route,
+                        confidence=route_metric.confidence,
+                        latency_ms=route_metric.latency_ms,
+                        cache_hit=route_metric.cache_hit,
+                        interactive=route_metric.interactive
+                    )
+                else:
+                    metrics = get_metrics()
+                    metrics.record_route_metric(route_metric)
+                
+                session_activity_needed = True
+                
+                # Only retain successful cycles in memory
+                if self._cycle_succeeded(router_result.route, result):
+                    txn.commit()
+            
+            except Exception as e:
+                # Error handling - still call Agent A to explain
+                latency_ms = int((time.time() - start_time) * 1000)
+                
+                error_msg = f"Error during orchestration: {str(e)}"
+                agent_response = self._call_agent_a_narrator(
+                    cycle_id=cycle_id,
+                    query=query,
+                    tool_name="orchestrator",
+                    tool_output=error_msg,
+                    success=False
+                )
+                
+                result = OrchestratorResult(
+                    cycle_id=cycle_id,
+                    route=router_result.route.value if router_result else "UNKNOWN",
+                    query=query,
+                    agent_response=agent_response,
+                    latency_ms=latency_ms,
+                    error=str(e)
+                )
+                # No commit request -> automatic rollback
         
-        # Step 2: Query classification (routerless)
-        router_result = self._classify_query(query)
-        self._log_route_decision(cycle_id, query, router_result)
-        
-        # Step 3: Route-specific execution
-        try:
-            if router_result.route == Route.CHAT:
-                result = self._handle_chat_route(cycle_id, query)
-            elif router_result.route == Route.SHELL:
-                result = self._handle_shell_route(cycle_id, query)
-            elif router_result.route == Route.CACHED:
-                result = self._handle_cached_route(cycle_id, query, router_result)
-            elif router_result.route == Route.PLANNER:
-                result = self._handle_planner_route(cycle_id, query)
-            else:
-                raise ValueError(f"Unknown route: {router_result.route}")
-            
-            # Calculate total latency
-            result.latency_ms = int((time.time() - start_time) * 1000)
-            
-            # Record metrics
-            metrics = get_metrics()
-            metrics.record_route_metric(RouteMetrics(
-                route=router_result.route.value,
-                confidence=router_result.confidence,
-                latency_ms=result.latency_ms,
-                cache_hit=hasattr(router_result, 'cache_hit') and router_result.cache_hit is not None,
-                interactive=is_interactive_command(query)
-            ))
-            
-            # Update session activity
+        if session_activity_needed:
             self.memory.update_session_activity(self.session_id)
-            
-            return result
         
-        except Exception as e:
-            # Error handling - still call Agent A to explain
-            latency_ms = int((time.time() - start_time) * 1000)
-            
-            error_msg = f"Error during orchestration: {str(e)}"
-            agent_c_response = self._call_agent_a_narrator(
-                cycle_id=cycle_id,
-                query=query,
-                tool_name="orchestrator",
-                tool_output=error_msg,
-                success=False
-            )
-            
-            return OrchestratorResult(
-                cycle_id=cycle_id,
-                route=router_result.route.value,
-                query=query,
-                agent_c_response=agent_c_response,
-                latency_ms=latency_ms,
-                error=str(e)
-            )
+        return result
     
     def _handle_chat_route(self, cycle_id: str, query: str) -> OrchestratorResult:
         """
@@ -330,6 +356,7 @@ class Orchestrator:
         4. Log to chat_history
         5. Return result
         """
+        self._emit_status("planning", {"route": "CHAT"})
         # Get chat history for context
         chat_history = self.memory.get_chat_history(
             session_id=self.session_id,
@@ -346,7 +373,7 @@ class Orchestrator:
         
         # Build messages for Agent A
         messages = [
-            {"role": "system", "content": system_context + "\n\n" + get_agent_c_prompt("chat")}
+            {"role": "system", "content": system_context + "\n\n" + get_agent_a_chat_prompt()}
         ]
         
         # Planner→Chat handoff: Include summary of most recent completed task if available
@@ -384,21 +411,22 @@ class Orchestrator:
         if llm_result["error"]:
             raise RuntimeError(f"LLM call failed: {llm_result['error']}")
         
-        agent_c_response = llm_result["message"].content or ""
+        agent_response = llm_result["message"].content or ""
         
         # Save to chat_history
         self.memory.save_chat_exchange(
             session_id=self.session_id,
             cycle_id=cycle_id,
             user_query=query,
-            agent_response=agent_c_response
+            agent_response=agent_response
         )
+        self._emit_status("preparing_response", {"route": "CHAT"})
         
         return OrchestratorResult(
             cycle_id=cycle_id,
             route="CHAT",
             query=query,
-            agent_c_response=agent_c_response,
+            agent_response=agent_response,
             execution_result=None
         )
     
@@ -418,6 +446,15 @@ class Orchestrator:
         # Detect if this is an interactive command requiring TTY
         is_interactive = is_interactive_command(query)
         tool_name = "run_interactive" if is_interactive else "run_command"
+        self._emit_status(
+            "executing",
+            {
+                "route": "SHELL",
+                "tool": tool_name,
+                "command": query,
+                "interactive": is_interactive
+            }
+        )
         
         # Execute command directly
         exec_result = self.tool_executor.execute(
@@ -426,11 +463,26 @@ class Orchestrator:
             cycle_id=cycle_id,
             step_id=0  # Single-step execution
         )
+        exec_result["tool_name"] = tool_name
+        exec_result["command"] = query
+        self._emit_tool_output({
+            "route": "SHELL",
+            "tool_name": tool_name,
+            "command": query,
+            "stdout": exec_result.get("stdout"),
+            "stderr": exec_result.get("stderr"),
+            "raw_stdout": exec_result.get("raw_stdout"),
+            "raw_stderr": exec_result.get("raw_stderr"),
+            "success": exec_result.get("success"),
+            "exit_code": exec_result.get("exit_code"),
+            "step_id": 0,
+            "total_steps": 1
+        })
         
         # Call Agent A narrator
         # For interactive commands, the output is minimal (exit status message)
         # since the user was controlling the program directly
-        agent_c_response = self._call_agent_a_narrator(
+        agent_response = self._call_agent_a_narrator(
             cycle_id=cycle_id,
             query=query,
             tool_name=tool_name,
@@ -447,12 +499,13 @@ class Orchestrator:
                 tool_name=tool_name,
                 tool_args={"command": query}
             )
+        self._emit_status("preparing_response", {"route": "SHELL"})
         
         return OrchestratorResult(
             cycle_id=cycle_id,
             route="SHELL",
             query=query,
-            agent_c_response=agent_c_response,
+            agent_response=agent_response,
             execution_result=exec_result
         )
     
@@ -479,6 +532,17 @@ class Orchestrator:
         if not cache_hit:
             raise ValueError("CACHED route requires cache_hit in router_result")
         
+        cached_command = None
+        if cache_hit.tool_args:
+            cached_command = cache_hit.tool_args.get("command")
+        self._emit_status(
+            "executing",
+            {
+                "route": "CACHED",
+                "tool": cache_hit.tool_name,
+                "command": cached_command
+            }
+        )
         # Execute cached tool
         exec_result = self.tool_executor.execute(
             tool_name=cache_hit.tool_name,
@@ -486,9 +550,25 @@ class Orchestrator:
             cycle_id=cycle_id,
             step_id=0
         )
+        if cached_command:
+            exec_result.setdefault("command", cached_command)
+        exec_result.setdefault("tool_name", cache_hit.tool_name)
+        self._emit_tool_output({
+            "route": "CACHED",
+            "tool_name": cache_hit.tool_name,
+            "command": cached_command,
+            "stdout": exec_result.get("stdout"),
+            "stderr": exec_result.get("stderr"),
+            "raw_stdout": exec_result.get("raw_stdout"),
+            "raw_stderr": exec_result.get("raw_stderr"),
+            "success": exec_result.get("success"),
+            "exit_code": exec_result.get("exit_code"),
+            "step_id": 0,
+            "total_steps": 1
+        })
         
         # Call Agent A narrator
-        agent_c_response = self._call_agent_a_narrator(
+        agent_response = self._call_agent_a_narrator(
             cycle_id=cycle_id,
             query=query,
             tool_name=cache_hit.tool_name,
@@ -499,12 +579,13 @@ class Orchestrator:
         
         # Update cache usage counter
         self.memory.update_cache_usage(cache_hit.cache_id)
+        self._emit_status("preparing_response", {"route": "CACHED"})
         
         return OrchestratorResult(
             cycle_id=cycle_id,
             route="CACHED",
             query=query,
-            agent_c_response=agent_c_response,
+            agent_response=agent_response,
             execution_result={
                 **exec_result,
                 "cache_hit": cache_hit.to_dict()
@@ -555,7 +636,7 @@ Success: {success}
         )
         
         messages = [
-            {"role": "system", "content": system_context + "\n\n" + get_agent_c_prompt("narrator")},
+            {"role": "system", "content": system_context + "\n\n" + get_agent_a_narrator_prompt()},
             {"role": "user", "content": context}
         ]
         
@@ -606,7 +687,7 @@ Success: {success}
         
         # Build messages for Agent A
         messages = [
-            {"role": "system", "content": system_context + "\n\n" + get_agent_c_prompt("chat")}
+            {"role": "system", "content": system_context + "\n\n" + get_agent_a_chat_prompt()}
         ]
         
         # Add previous chat context
@@ -632,17 +713,17 @@ Success: {success}
         if llm_result["error"]:
             return f"[Agent A chat failed: {llm_result['error']}]"
         
-        agent_c_response = llm_result["message"].content or "No response"
+        agent_response = llm_result["message"].content or "No response"
         
         # Save to chat_history
         self.memory.save_chat_exchange(
             session_id=self.session_id,
             cycle_id=cycle_id,
             user_query=query,
-            agent_response=agent_c_response
+            agent_response=agent_response
         )
         
-        return agent_c_response
+        return agent_response
 
     
     def _handle_planner_route(self, cycle_id: str, query: str) -> OrchestratorResult:
@@ -662,6 +743,7 @@ Success: {success}
         
         Target: <2s response generation, 95%+ valid JSON on first attempt
         """
+        self._emit_status("planning", {"route": "PLANNER", "stage": "agent_a"})
         # Get available tools for validation
         available_tools = sorted(TOOLS.keys())
         
@@ -706,6 +788,10 @@ Success: {success}
         last_error = None
         
         for attempt in range(self.MAX_PLAN_RETRIES + 1):
+            self._emit_status(
+                "planning",
+                {"route": "PLANNER", "stage": "agent_a", "attempt": attempt + 1}
+            )
             # Call LLM in Agent A role
             llm_client = LLMClient(
                 config=self.config,
@@ -748,7 +834,11 @@ Success: {success}
         # Check if we got a valid response
         if not response:
             # Failed after all retries - fallback to Agent A explanation
-            agent_c_response = self._call_agent_a_narrator(
+            self._emit_status(
+                "preparing_response",
+                {"route": "PLANNER", "error": True}
+            )
+            agent_response = self._call_agent_a_narrator(
                 cycle_id=cycle_id,
                 query=query,
                 tool_name="agent_a_planner",
@@ -760,7 +850,7 @@ Success: {success}
                 cycle_id=cycle_id,
                 route="PLANNER",
                 query=query,
-                agent_c_response=agent_c_response,
+                agent_response=agent_response,
                 error=last_error
             )
         
@@ -776,11 +866,15 @@ Success: {success}
                 user_query=query,
                 agent_response=agent_response
             )
+            self._emit_status(
+                "preparing_response",
+                {"route": "PLANNER", "direct_response": True}
+            )
             return OrchestratorResult(
                 cycle_id=cycle_id,
                 route="PLANNER",
                 query=query,
-                agent_c_response=agent_response,
+                agent_response=agent_response,
                 execution_result=None
             )
         
@@ -808,6 +902,10 @@ Success: {success}
             
             if execution_result["success"]:
                 try:
+                    self._emit_status(
+                        "preparing_response",
+                        {"route": "PLANNER", "success": True}
+                    )
                     final_response = self._render_narration_template(
                         template=plan["narration_template"],
                         output_values=execution_result.get("output_values", {})
@@ -820,6 +918,10 @@ Success: {success}
                         f"{execution_result.get('output_values', {})}"
                     )
             else:
+                self._emit_status(
+                    "preparing_response",
+                    {"route": "PLANNER", "success": False}
+                )
                 final_response = self._call_agent_a_summarizer(
                     cycle_id=cycle_id,
                     query=query,
@@ -831,7 +933,7 @@ Success: {success}
                 cycle_id=cycle_id,
                 route="PLANNER",
                 query=query,
-                agent_c_response=final_response,
+                agent_response=final_response,
                 execution_result=execution_result
             )
         
@@ -844,7 +946,7 @@ Success: {success}
             )
             
             # Call Agent A to explain error
-            agent_c_response = self._call_agent_a_narrator(
+            agent_response = self._call_agent_a_narrator(
                 cycle_id=cycle_id,
                 query=query,
                 tool_name="plan_executor",
@@ -856,7 +958,7 @@ Success: {success}
                 cycle_id=cycle_id,
                 route="PLANNER",
                 query=query,
-                agent_c_response=agent_c_response,
+                agent_response=agent_response,
                 error=str(e)
             )
     
@@ -895,6 +997,7 @@ Success: {success}
         steps_completed = 0
         steps_failed = 0
         output_values: Dict[str, str] = {}
+        total_steps = len(plan["steps"])
         
         for step_id, step in enumerate(plan["steps"]):
             # Update current step in task_state
@@ -902,6 +1005,17 @@ Success: {success}
                 cycle_id=cycle_id,
                 status="in_progress",
                 current_step_id=step_id
+            )
+            description = step.get("description", "")
+            self._emit_status(
+                "executing",
+                {
+                    "route": "PLANNER",
+                    "step": step_id + 1,
+                    "total_steps": total_steps,
+                    "tool": step["tool_name"],
+                    "description": description
+                }
             )
             
             # Call Agent B to generate precise tool_args
@@ -911,6 +1025,8 @@ Success: {success}
                 step_id=step_id,
                 previous_results=step_results
             )
+            
+            step_output_format = agent_b_result.get("output_format") or {}
             
             if not agent_b_result["success"]:
                 # Agent B failed to generate valid tool_args
@@ -926,6 +1042,7 @@ Success: {success}
                 }
                 step_results.append(step_result)
                 steps_failed += 1
+                error_text = agent_b_result.get("error", "Agent B failed to generate tool_args")
                 
                 # CRITICAL: Persist Agent B failure to step_outputs so it's visible in debugging
                 # (Previously these failures were never saved, causing them to "disappear" from step_outputs)
@@ -936,7 +1053,13 @@ Success: {success}
                     tool_args={},
                     success=False,
                     exit_code=None,
-                    output_preview=agent_b_result.get("error", "Agent B failed to generate tool_args")[:1000],
+                    output_preview=error_text[:1000],
+                    stdout=None,
+                    stderr=error_text,
+                    raw_stdout=None,
+                    raw_stderr=error_text,
+                    output_format=step_output_format,
+                    parsed_outputs=None,
                     artifact_path=None
                 )
                 continue
@@ -948,6 +1071,18 @@ Success: {success}
                 tool_args,
                 step_results
             )
+            if "command" in tool_args:
+                self._emit_status(
+                    "executing",
+                    {
+                        "route": "PLANNER",
+                        "step": step_id + 1,
+                        "total_steps": total_steps,
+                        "tool": step["tool_name"],
+                        "description": description,
+                        "command": tool_args.get("command")
+                    }
+                )
             
             # Execute step
             exec_result = self.tool_executor.execute(
@@ -957,48 +1092,107 @@ Success: {success}
                 step_id=step_id
             )
             
-            # Record result
-            description = step.get("description", "")
+            parsed_outputs = None
+            rendered_values = None
+            parse_error = None
+            if exec_result["success"] and step_output_format:
+                try:
+                    parsed_outputs, rendered_values = self.output_parser.parse(
+                        output_format=step_output_format,
+                        stdout=exec_result.get("stdout"),
+                        raw_stdout=exec_result.get("raw_stdout")
+                    )
+                except OutputParserError as exc:
+                    parse_error = str(exc)
+            
+            step_success = exec_result["success"] and parse_error is None
+            step_output_value = exec_result.get("stdout") if exec_result["success"] else None
+            if step_output_value is None:
+                step_output_value = exec_result.get("result")
             step_result = {
                 "step_id": step_id,
                 "tool_name": step["tool_name"],
                 "tool_args": tool_args,
                 "description": description,
-                "success": exec_result["success"],
-                "output": exec_result["result"],
+                "output_format": step_output_format,
+                "success": step_success,
+                "output": step_output_value,
+                "stdout": exec_result.get("stdout"),
+                "stderr": exec_result.get("stderr"),
+                "raw_stdout": exec_result.get("raw_stdout"),
+                "raw_stderr": exec_result.get("raw_stderr"),
                 "exit_code": exec_result.get("exit_code"),
-                "error": exec_result.get("error")
+                "error": parse_error or exec_result.get("error")
             }
             step_results.append(step_result)
+            self._emit_tool_output({
+                "route": "PLANNER",
+                "step_id": step_id,
+                "total_steps": total_steps,
+                "tool_name": step["tool_name"],
+                "tool_args": tool_args,
+                "command": tool_args.get("command"),
+                "stdout": exec_result.get("stdout"),
+                "stderr": exec_result.get("stderr"),
+                "raw_stdout": exec_result.get("raw_stdout"),
+                "raw_stderr": exec_result.get("raw_stderr"),
+                "success": step_success,
+                "exit_code": exec_result.get("exit_code"),
+                "description": description
+            })
             
             # Persist step output to database
-            output_preview = exec_result["result"][:1000] if exec_result["result"] else None
+            output_preview = exec_result.get("output_preview")
+            if output_preview is None:
+                result_text = exec_result.get("result")
+                output_preview = result_text[:1000] if result_text else None
             self.memory.save_step_output(
                 cycle_id=cycle_id,
                 step_id=step_id,
                 tool_name=step["tool_name"],
                 tool_args=tool_args,
-                success=exec_result["success"],
+                success=step_success,
                 exit_code=exec_result.get("exit_code"),
                 output_preview=output_preview,
+                stdout=exec_result.get("stdout"),
+                stderr=exec_result.get("stderr"),
+                raw_stdout=exec_result.get("raw_stdout"),
+                raw_stderr=exec_result.get("raw_stderr"),
+                output_format=step_output_format,
+                parsed_outputs=parsed_outputs if step_success else None,
                 artifact_path=None  # TODO: Implement artifact storage for large outputs
             )
             
             # Record step metrics
             output_size = len(exec_result["result"]) if exec_result["result"] else 0
             step_latency = exec_result.get("latency_ms", 0)
-            metrics = get_metrics()
-            metrics.record_step_metric(StepMetrics(
+            step_metric = StepMetrics(
                 step_id=step_id,
                 tool_name=step["tool_name"],
-                success=exec_result["success"],
+                success=step_success,
                 latency_ms=step_latency,
                 output_size_bytes=output_size
-            ))
+            )
+            if hasattr(self.memory, "record_step_metric"):
+                self.memory.record_step_metric(
+                    step_id=step_metric.step_id,
+                    tool_name=step_metric.tool_name,
+                    success=step_metric.success,
+                    latency_ms=step_metric.latency_ms,
+                    output_size_bytes=step_metric.output_size_bytes
+                )
+            else:
+                metrics = get_metrics()
+                metrics.record_step_metric(step_metric)
             
-            if exec_result["success"]:
-                steps_completed += 1
+            if step_success and rendered_values:
+                for key, value in rendered_values.items():
+                    output_values[key] = value
+            elif not step_output_format:
                 self._record_step_outputs(step, exec_result["result"], output_values)
+            
+            if step_success:
+                steps_completed += 1
             else:
                 steps_failed += 1
                 # For now, continue execution even on failure
@@ -1033,10 +1227,10 @@ Success: {success}
             Dict with:
                 - success: bool
                 - tool_args: dict (if successful)
+                - command: Optional[str]
+                - output_format: dict mapping output_keys -> types
                 - error: str (if failed)
         """
-        import json
-        
         # Get current step's tool name and schema
         current_step = plan["steps"][step_id]
         tool_name = current_step["tool_name"]
@@ -1095,27 +1289,34 @@ Success: {success}
         response_text = llm_result["message"].content or ""
         
         try:
-            # Try to extract JSON from response
             response_json = self._parse_agent_b_json(response_text)
-            
-            if "tool_args" not in response_json:
-                return {
-                    "success": False,
-                    "tool_args": {},
-                    "error": "Agent B response missing 'tool_args' field"
-                }
-            
+            normalized = self._normalize_agent_b_payload(
+                step=current_step,
+                step_id=step_id,
+                payload=response_json
+            )
             return {
                 "success": True,
-                "tool_args": response_json["tool_args"],
+                "tool_args": normalized["tool_args"],
+                "command": normalized.get("command"),
+                "output_format": normalized.get("output_format", {}),
                 "error": None
             }
-        
         except json.JSONDecodeError as e:
             return {
                 "success": False,
                 "tool_args": {},
+                "output_format": {},
+                "command": None,
                 "error": f"Agent B returned invalid JSON: {e}"
+            }
+        except ValueError as e:
+            return {
+                "success": False,
+                "tool_args": {},
+                "output_format": {},
+                "command": None,
+                "error": str(e)
             }
     
     def _parse_agent_b_json(self, text: str) -> Dict[str, Any]:
@@ -1167,6 +1368,89 @@ Success: {success}
         
         # Give up
         return json.loads(text)
+
+    def _normalize_agent_b_payload(
+        self,
+        step: Dict[str, Any],
+        step_id: int,
+        payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Normalize Agent B payload into {command, tool_args, output_format}."""
+        tool_name = step["tool_name"]
+        is_shell_tool = tool_name in self.SHELL_TOOLS
+        output_format = payload.get("output_format")
+        
+        if is_shell_tool:
+            command = payload.get("command")
+            if not command and isinstance(payload.get("tool_args"), dict):
+                command = payload["tool_args"].get("command")
+            if not isinstance(command, str) or not command.strip():
+                raise ValueError(
+                    f"Agent B must provide a 'command' for shell tool step {step_id}"
+                )
+            normalized_tool_args = {"command": command.strip()}
+        else:
+            tool_args = payload.get("tool_args")
+            if not isinstance(tool_args, dict):
+                raise ValueError(
+                    f"Agent B must provide 'tool_args' dict for tool '{tool_name}' (step {step_id})"
+                )
+            normalized_tool_args = tool_args
+            command = tool_args.get("command") if isinstance(tool_args.get("command"), str) else None
+        
+        normalized_output_format = self._validate_agent_b_output_format(
+            step=step,
+            step_id=step_id,
+            output_format=output_format
+        )
+        
+        return {
+            "command": command.strip() if isinstance(command, str) else None,
+            "tool_args": normalized_tool_args,
+            "output_format": normalized_output_format
+        }
+
+    def _validate_agent_b_output_format(
+        self,
+        step: Dict[str, Any],
+        step_id: int,
+        output_format: Optional[Dict[str, Any]]
+    ) -> Dict[str, str]:
+        """Validate and normalize Agent B output_format payload."""
+        expected_keys = step.get("output_keys") or []
+        
+        if not expected_keys:
+            return {}
+        
+        if not isinstance(output_format, dict):
+            raise ValueError(
+                f"Agent B must specify 'output_format' for step {step_id} with keys {expected_keys}"
+            )
+        
+        normalized: Dict[str, str] = {}
+        missing_keys = [key for key in expected_keys if key not in output_format]
+        if missing_keys:
+            raise ValueError(
+                f"Agent B output_format missing keys {missing_keys} for step {step_id}"
+            )
+        
+        for key, value in output_format.items():
+            if key not in expected_keys:
+                raise ValueError(
+                    f"Agent B output_format provided unexpected key '{key}' for step {step_id}"
+                )
+            if not isinstance(value, str):
+                raise ValueError(
+                    f"Agent B output_format for key '{key}' must be string in step {step_id}"
+                )
+            fmt = value.strip().lower()
+            if fmt not in self.SUPPORTED_OUTPUT_FORMAT_TYPES:
+                raise ValueError(
+                    f"Unsupported output_format type '{value}' for key '{key}' (step {step_id})"
+                )
+            normalized[key] = fmt
+        
+        return normalized
     
     def _substitute_step_variables(
         self,
@@ -1276,7 +1560,7 @@ Step Results Summary:
         )
         
         messages = [
-            {"role": "system", "content": system_context + "\n\n" + get_agent_c_prompt("summarizer")},
+            {"role": "system", "content": system_context + "\n\n" + get_agent_a_summarizer_prompt()},
             {"role": "user", "content": context}
         ]
 
@@ -1356,6 +1640,30 @@ Step Results Summary:
             success=True
         )
     
+    def _cycle_succeeded(self, route: Route, result: OrchestratorResult) -> bool:
+        """
+        Determine whether a cycle completed successfully.
+        
+        Only successful cycles should remain in Memory.
+        """
+        if result.error:
+            return False
+        
+        route_value = route.value if isinstance(route, Route) else route
+        exec_result = result.execution_result or {}
+        
+        if route_value in {Route.SHELL.value, Route.CACHED.value}:
+            return bool(exec_result.get("success", False))
+        
+        if route_value == Route.PLANNER.value:
+            if not exec_result:
+                # Direct responses (no plan execution) count as success
+                return True
+            return bool(exec_result.get("success", False))
+        
+        # CHAT and other narrative-only routes succeed if no error was raised
+        return True
+    
     def close(self):
         """Clean up resources"""
-        self.memory.close()
+        self.memory.close(force=True)
