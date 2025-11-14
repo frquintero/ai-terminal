@@ -1,11 +1,11 @@
 """
-Telemetry and Metrics Collection for v2.0 Orchestrator
+Telemetry and Metrics Collection for routerless orchestrator flows.
 
 Tracks:
-- Route distribution (SHELL, CACHED, CHAT, PLANNER)
-- Latency per route
-- Cache hit rates
-- Plan validity and step success rates
+- Cycle resolution breakdown (direct vs execution plan)
+- Latency per resolution type
+- Interactive/tooling invocation rates
+- Plan step success rates
 - Token usage per role (Agent A/B/C)
 """
 
@@ -18,12 +18,11 @@ from dataclasses import dataclass, asdict
 
 
 @dataclass
-class RouteMetrics:
-    """Metrics for a single route classification"""
-    route: str
-    confidence: float
+class CycleMetrics:
+    """Metrics for a single cycle (routerless)."""
+    cycle_id: str
+    used_plan: bool
     latency_ms: int
-    cache_hit: bool = False
     interactive: bool = False
     timestamp: str = None
     
@@ -80,16 +79,16 @@ class MetricsCollector:
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
         
-        # Route metrics table
+        # Cycle metrics table
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS route_metrics (
+            CREATE TABLE IF NOT EXISTS cycle_metrics (
                 id INTEGER PRIMARY KEY,
-                route TEXT NOT NULL,
-                confidence REAL,
+                cycle_id TEXT NOT NULL,
+                used_plan INTEGER NOT NULL,
                 latency_ms INTEGER,
-                cache_hit INTEGER DEFAULT 0,
                 interactive INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (cycle_id) REFERENCES router_decisions(cycle_id)
             )
         """)
         
@@ -122,16 +121,20 @@ class MetricsCollector:
         conn.commit()
         conn.close()
     
-    def record_route_metric(self, metric: RouteMetrics):
-        """Record route classification metric"""
+    def record_cycle_metric(self, metric: CycleMetrics):
+        """Record route-less cycle metric"""
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
         
         cursor.execute("""
-            INSERT INTO route_metrics (route, confidence, latency_ms, cache_hit, interactive)
-            VALUES (?, ?, ?, ?, ?)
-        """, (metric.route, metric.confidence, metric.latency_ms, 
-              int(metric.cache_hit), int(metric.interactive)))
+            INSERT INTO cycle_metrics (cycle_id, used_plan, latency_ms, interactive)
+            VALUES (?, ?, ?, ?)
+        """, (
+            metric.cycle_id,
+            int(metric.used_plan),
+            metric.latency_ms,
+            int(metric.interactive)
+        ))
         
         conn.commit()
         conn.close()
@@ -164,55 +167,38 @@ class MetricsCollector:
         conn.commit()
         conn.close()
     
-    def get_route_distribution(self, limit_hours: int = 24) -> Dict[str, int]:
-        """
-        Get route distribution for recent queries.
-        
-        Args:
-            limit_hours: Time window (default: last 24 hours)
-        
-        Returns:
-            Dict with route -> count mapping
-        """
+    def get_resolution_breakdown(self, limit_hours: int = 24) -> Dict[str, int]:
+        """Return counts for direct responses vs execution plans."""
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
-        
-        cursor.execute(f"""
-            SELECT route, COUNT(*) as count
-            FROM route_metrics
+        cursor.execute(
+            f"""
+            SELECT used_plan, COUNT(*)
+            FROM cycle_metrics
             WHERE created_at >= datetime('now', '-{limit_hours} hours')
-            GROUP BY route
-            ORDER BY count DESC
-        """)
-        
-        results = {row[0]: row[1] for row in cursor.fetchall()}
+            GROUP BY used_plan
+            """
+        )
+        rows = cursor.fetchall()
         conn.close()
-        return results
+        breakdown = {"execution_plan": 0, "direct_response": 0}
+        for used_plan, count in rows:
+            key = "execution_plan" if used_plan else "direct_response"
+            breakdown[key] = count
+        return breakdown
     
-    def get_latency_stats(self, route: Optional[str] = None, limit_hours: int = 24) -> Dict[str, Any]:
-        """
-        Get latency statistics.
-        
-        Args:
-            route: Optional route filter (None = all routes)
-            limit_hours: Time window
-        
-        Returns:
-            Dict with avg, min, max, p50, p95 latencies
-        """
+    def get_latency_stats(self, used_plan: Optional[bool] = None, limit_hours: int = 24) -> Dict[str, Any]:
+        """Get latency stats optionally filtered by resolution."""
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
         
         where_clause = ""
         params = []
         
-        if route:
-            where_clause = "WHERE route = ? AND "
-            params.append(route)
-        else:
-            where_clause = "WHERE "
-        
-        where_clause += f"created_at >= datetime('now', '-{limit_hours} hours')"
+        where_clause = f"WHERE created_at >= datetime('now', '-{limit_hours} hours')"
+        if used_plan is not None:
+            where_clause += " AND used_plan = ?"
+            params.append(int(used_plan))
         
         cursor.execute(f"""
             SELECT 
@@ -220,7 +206,7 @@ class MetricsCollector:
                 MIN(latency_ms) as min,
                 MAX(latency_ms) as max,
                 COUNT(*) as count
-            FROM route_metrics
+            FROM cycle_metrics
             {where_clause}
         """, params)
         
@@ -234,7 +220,7 @@ class MetricsCollector:
         # Get percentiles
         cursor.execute(f"""
             SELECT latency_ms
-            FROM route_metrics
+            FROM cycle_metrics
             {where_clause}
             ORDER BY latency_ms
         """, params)
@@ -249,8 +235,14 @@ class MetricsCollector:
         p50_idx = int(len(latencies) * 0.5)
         p95_idx = int(len(latencies) * 0.95)
         
+        if used_plan is None:
+            descriptor = "all"
+        elif used_plan:
+            descriptor = "execution_plan"
+        else:
+            descriptor = "direct_response"
         return {
-            "route": route or "all",
+            "resolution": descriptor,
             "count": count,
             "avg_ms": round(avg, 2) if avg else 0,
             "min_ms": min_latency or 0,
@@ -258,40 +250,28 @@ class MetricsCollector:
             "p50_ms": latencies[p50_idx] if p50_idx < len(latencies) else 0,
             "p95_ms": latencies[p95_idx] if p95_idx < len(latencies) else 0,
         }
-    
-    def get_cache_hit_rate(self, limit_hours: int = 24) -> Dict[str, Any]:
-        """
-        Get cache hit rate statistics.
-        
-        Args:
-            limit_hours: Time window
-        
-        Returns:
-            Dict with cache hit rate and counts
-        """
+
+    def get_interactive_rate(self, limit_hours: int = 24) -> Dict[str, Any]:
+        """Return the ratio of cycles that invoked run_interactive."""
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
-        
         cursor.execute(f"""
             SELECT 
-                SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END) as hits,
-                COUNT(*) as total,
-                SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as hit_rate
-            FROM route_metrics
+                SUM(CASE WHEN interactive = 1 THEN 1 ELSE 0 END) as interactive_cycles,
+                COUNT(*) as total
+            FROM cycle_metrics
             WHERE created_at >= datetime('now', '-{limit_hours} hours')
         """)
-        
         row = cursor.fetchone()
         conn.close()
-        
         if not row or row[1] == 0:
             return {"error": "No data"}
-        
-        hits, total, hit_rate = row
+        interactive_cycles, total = row
+        rate = (interactive_cycles or 0) * 100.0 / total if total else 0
         return {
-            "hits": hits or 0,
-            "total": total or 0,
-            "hit_rate_percent": round(hit_rate, 2) if hit_rate else 0,
+            "interactive_cycles": interactive_cycles or 0,
+            "total_cycles": total or 0,
+            "interactive_rate_percent": round(rate, 2)
         }
     
     def get_planner_stats(self, limit_hours: int = 24) -> Dict[str, Any]:
@@ -385,14 +365,12 @@ class MetricsCollector:
         """
         return {
             "time_window_hours": limit_hours,
-            "route_distribution": self.get_route_distribution(limit_hours),
-            "cache_hit_rate": self.get_cache_hit_rate(limit_hours),
+            "resolution_breakdown": self.get_resolution_breakdown(limit_hours),
+            "interactive_rate": self.get_interactive_rate(limit_hours),
             "latency_stats": {
                 "all": self.get_latency_stats(None, limit_hours),
-                "shell": self.get_latency_stats("SHELL", limit_hours),
-                "cached": self.get_latency_stats("CACHED", limit_hours),
-                "chat": self.get_latency_stats("CHAT", limit_hours),
-                "planner": self.get_latency_stats("PLANNER", limit_hours),
+                "direct_response": self.get_latency_stats(False, limit_hours),
+                "execution_plan": self.get_latency_stats(True, limit_hours),
             },
             "planner_stats": self.get_planner_stats(limit_hours),
             "llm_stats": self.get_llm_stats(limit_hours),

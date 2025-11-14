@@ -25,7 +25,7 @@ import sqlite3
 import json
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Set
 
 
 class CycleDebugger:
@@ -35,6 +35,7 @@ class CycleDebugger:
     
     def __init__(self):
         self.conn: Optional[sqlite3.Connection] = None
+        self.available_tables: Set[str] = set()
         self._connect()
     
     def _connect(self):
@@ -49,6 +50,19 @@ class CycleDebugger:
         except sqlite3.Error as e:
             print(f"❌ Database error: {e}")
             sys.exit(2)
+
+        self._cache_available_tables()
+
+    def _cache_available_tables(self):
+        """Cache the list of tables present in the database."""
+        cursor = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+        self.available_tables = {row[0] for row in cursor.fetchall()}
+
+    def _table_exists(self, table_name: str) -> bool:
+        """Check if a given table exists in the current database."""
+        return table_name in self.available_tables
     
     def close(self):
         """Close database connection"""
@@ -104,33 +118,20 @@ class CycleDebugger:
         )
         return [dict(row) for row in cursor.fetchall()]
     
-    def get_variable_bindings(self, cycle_id: str) -> List[Dict[str, Any]]:
-        """Get all variable bindings for this cycle"""
+    def get_task_state(self, cycle_id: str) -> Optional[Dict[str, Any]]:
+        """Get stored plan/state for the cycle."""
+        if not self._table_exists("task_state"):
+            return None
         cursor = self.conn.execute(
             """
-            SELECT step_id, var_name, var_value, extraction_method, 
-                   extractor_spec, created_at 
-            FROM variable_bindings 
-            WHERE cycle_id = ? 
-            ORDER BY step_id, var_name
+            SELECT plan_json, status, current_step_id, error_message, updated_at
+            FROM task_state
+            WHERE cycle_id = ?
             """,
             (cycle_id,)
         )
-        return [dict(row) for row in cursor.fetchall()]
-    
-    def get_step_commands(self, cycle_id: str) -> List[Dict[str, Any]]:
-        """Get all step commands (resolved tool_args with audit trail)"""
-        cursor = self.conn.execute(
-            """
-            SELECT step_id, tool_name, command_template, resolved_command, 
-                   substitution_log, created_at 
-            FROM step_commands 
-            WHERE cycle_id = ? 
-            ORDER BY step_id
-            """,
-            (cycle_id,)
-        )
-        return [dict(row) for row in cursor.fetchall()]
+        row = cursor.fetchone()
+        return dict(row) if row else None
     
     def get_step_outputs(self, cycle_id: str) -> List[Dict[str, Any]]:
         """Get all step execution outputs"""
@@ -184,13 +185,28 @@ class CycleDebugger:
         print(f"  Created:    {metadata['created_at']}")
         
         # 2. Agent Interactions
+        # 2. Task State / Plan
+        task_state = self.get_task_state(cycle_id)
+        if task_state:
+            print("\n🧭 PLAN STATE:")
+            print(f"  Status:       {task_state['status']}")
+            if task_state.get('current_step_id') is not None:
+                print(f"  Current step: {task_state['current_step_id']}")
+            if task_state.get('error_message'):
+                print(f"  Error:        {task_state['error_message']}")
+            print(f"  Updated at:   {task_state['updated_at']}")
+            if task_state.get('plan_json'):
+                print("  Plan JSON:")
+                print(self._format_json(task_state['plan_json']))
+
+        # 3. Agent Interactions
         interactions = self.get_agent_interactions(cycle_id)
         if interactions:
             print(f"\n🤖 AGENT INTERACTIONS ({len(interactions)} calls):")
             for i, inter in enumerate(interactions, 1):
                 role_name = "A (Planner)" if inter['role'] == 'A' else "B (Engineer)"
                 print(f"\n  [{i}] Agent {role_name}")
-                print(f"      Latency: {inter['latency_ms']}ms")
+                print(f"      Latency: {inter.get('latency_ms', 'N/A')}ms")
                 print(f"      Prompt:  {self._truncate(inter['prompt_preview'], 80)}")
                 print(f"      Response:{self._truncate(inter['response_preview'], 80)}")
                 
@@ -202,41 +218,7 @@ class CycleDebugger:
                     except:
                         pass
         
-        # 3. Variable Bindings
-        variables = self.get_variable_bindings(cycle_id)
-        if variables:
-            print(f"\n📊 VARIABLES EXTRACTED ({len(variables)} total):")
-            for var in variables:
-                print(f"  [{var['step_id']}] {var['var_name']} = {var['var_value']}")
-                print(f"      Method: {var['extraction_method']}")
-                if var['extractor_spec']:
-                    spec = json.loads(var['extractor_spec'])
-                    if 'pattern' in spec:
-                        print(f"      Pattern: {spec['pattern']}")
-        
-        # 4. Step Commands (resolved with substitution)
-        commands = self.get_step_commands(cycle_id)
-        if commands:
-            print(f"\n⚙️  STEP COMMANDS (with variable substitution):")
-            for cmd in commands:
-                print(f"\n  [Step {cmd['step_id']}] {cmd['tool_name']}")
-                print(f"      Intent: {cmd['command_template']}")
-                
-                if cmd['substitution_log']:
-                    subs = json.loads(cmd['substitution_log'])
-                    if subs:
-                        print(f"      Substitutions:")
-                        for var_name, var_value in subs.items():
-                            print(f"        ${{{var_name}}} → {var_value}")
-                
-                if cmd['resolved_command']:
-                    resolved = json.loads(cmd['resolved_command'])
-                    if 'command' in resolved:
-                        print(f"      Command: {self._truncate(resolved['command'], 100)}")
-                    else:
-                        print(f"      Args: {json.dumps(resolved, indent=14)}")
-        
-        # 5. Step Outputs
+        # 4. Step Outputs
         outputs = self.get_step_outputs(cycle_id)
         if outputs:
             print(f"\n✅ STEP EXECUTION RESULTS ({len(outputs)} steps):")
@@ -265,8 +247,8 @@ class CycleDebugger:
             failed_count = len(outputs) - success_count
             print(f"  Steps: {success_count} succeeded, {failed_count} failed")
         
-        if variables:
-            print(f"  Variables extracted: {len(variables)}")
+        if task_state:
+            print(f"  Plan status: {task_state['status']}")
         
         print("\n" + "="*70 + "\n")
         return True

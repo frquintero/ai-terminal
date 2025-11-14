@@ -79,10 +79,30 @@ def migrate_v2_to_v3(conn: sqlite3.Connection):
     conn.commit()
 
 
+def migrate_v3_to_v4(conn: sqlite3.Connection):
+    """Replace route_metrics with route-less cycle_metrics."""
+    conn.execute("DROP TABLE IF EXISTS route_metrics")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cycle_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cycle_id TEXT NOT NULL,
+            used_plan INTEGER NOT NULL,
+            latency_ms INTEGER,
+            interactive INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (cycle_id) REFERENCES router_decisions(cycle_id)
+        )
+        """
+    )
+    conn.commit()
+
+
 # Registry of all migrations (version, description, migration function)
 MIGRATIONS: List[Migration] = [
     (2, "Expand step_outputs for structured outputs", migrate_v1_to_v2),
     (3, "Create metrics tables in unified schema", migrate_v2_to_v3),
+    (4, "Swap route_metrics for route-less cycle_metrics", migrate_v3_to_v4),
 ]
 
 
@@ -151,7 +171,7 @@ def verify_schema(conn: sqlite3.Connection) -> bool:
         'step_outputs',
         'chat_history',
         'llm_traces',
-        'route_metrics',
+        'cycle_metrics',
         'step_metrics',
         'llm_metrics'
     ]

@@ -19,6 +19,7 @@ class Config:
         event_memory_max_events: int,
         event_memory_max_chars: int,
         artifact_threshold_bytes: int,
+        save_llm_traces: bool,
     ):
         self.api_key = api_key
         self.model = model
@@ -35,6 +36,7 @@ class Config:
         self.event_memory_max_events = event_memory_max_events
         self.event_memory_max_chars = event_memory_max_chars
         self.artifact_threshold_bytes = artifact_threshold_bytes
+        self.save_llm_traces = save_llm_traces
 
 def load_config() -> Config:
     load_dotenv()
@@ -115,6 +117,14 @@ def load_config() -> Config:
 
     use_event_memory = os.getenv('USE_EVENT_MEMORY', '1').lower() in ('1', 'true', 'yes')
 
+    save_llm_traces_str = os.getenv('SAVE_LLM_TRACES', 'true').lower()
+    if save_llm_traces_str in ('true', '1', 'yes'):
+        save_llm_traces = True
+    elif save_llm_traces_str in ('false', '0', 'no'):
+        save_llm_traces = False
+    else:
+        raise ValueError("SAVE_LLM_TRACES must be true or false")
+
     def _parse_int_env(name: str, default: str) -> int:
         value = os.getenv(name, default)
         try:
@@ -143,4 +153,5 @@ def load_config() -> Config:
         event_memory_max_events,
         event_memory_max_chars,
         artifact_threshold_bytes,
+        save_llm_traces,
     )

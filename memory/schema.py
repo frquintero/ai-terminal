@@ -12,7 +12,7 @@ from typing import Optional
 
 DEFAULT_DB_PATH = Path("logs/orchestrator.db")
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 CREATE_TABLES = """
 -- Schema version tracking
@@ -237,15 +237,16 @@ CREATE TABLE IF NOT EXISTS llm_traces (
     FOREIGN KEY (cycle_id) REFERENCES router_decisions(cycle_id)
 );
 
--- Route metrics table
-CREATE TABLE IF NOT EXISTS route_metrics (
+
+-- Cycle metrics table (route-less telemetry)
+CREATE TABLE IF NOT EXISTS cycle_metrics (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    route TEXT NOT NULL,
-    confidence REAL,
+    cycle_id TEXT NOT NULL,
+    used_plan INTEGER NOT NULL,
     latency_ms INTEGER,
-    cache_hit INTEGER DEFAULT 0,
     interactive INTEGER DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (cycle_id) REFERENCES router_decisions(cycle_id)
 );
 
 -- Step metrics table

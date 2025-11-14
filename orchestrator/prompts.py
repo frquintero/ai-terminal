@@ -138,26 +138,7 @@ Current system context:
 """
 
 # ============================================================================
-# Agent A Mode 1: Pure Chat (for CHAT route)
-# ============================================================================
-
-AGENT_A_CHAT_PROMPT = """You are a helpful AI assistant in a terminal environment.
-
-Your role is to provide clear, accurate, conversational responses to user questions.
-You do NOT execute tools or commands - you only provide information and explanations.
-
-Keep responses concise and natural. Answer directly without preamble.
-
-Current system context:
-- Operating System: {os_info}
-- Working Directory: {cwd}
-- Current Time: {timestamp}
-
-Previous conversation history will be provided to maintain context across exchanges.
-"""
-
-# ============================================================================
-# Agent A Mode 2: Narrator (for SHELL and CACHED routes)
+# Agent A Mode 2: Narrator (tool execution summaries)
 # ============================================================================
 
 AGENT_A_NARRATOR_PROMPT = """You are a narrator that translates command execution results into natural conversation.
@@ -327,13 +308,6 @@ def get_agent_b_prompt(
     context["tool_schemas"] = json.dumps(tool_schemas, indent=2)
     
     return AGENT_B_EXECUTOR_PROMPT.format(**context)
-
-
-def get_agent_a_chat_prompt() -> str:
-    """Return the chat-mode system prompt for Agent A."""
-    context = get_system_context()
-    return AGENT_A_CHAT_PROMPT.format(**context)
-
 
 def get_agent_a_narrator_prompt() -> str:
     """Return the narrator-mode system prompt for Agent A."""

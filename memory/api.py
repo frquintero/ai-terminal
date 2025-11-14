@@ -155,22 +155,21 @@ class Memory:
     
     # ========== Metrics Recording ==========
 
-    def record_route_metric(
+    def record_cycle_metric(
         self,
         *,
-        route: str,
-        confidence: float,
+        cycle_id: str,
+        used_plan: bool,
         latency_ms: int,
-        cache_hit: bool = False,
         interactive: bool = False
     ) -> None:
-        """Record a route classification metric."""
+        """Record latency/interactive stats for a completed cycle."""
         self.conn.execute(
             """
-            INSERT INTO route_metrics (route, confidence, latency_ms, cache_hit, interactive)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO cycle_metrics (cycle_id, used_plan, latency_ms, interactive)
+            VALUES (?, ?, ?, ?)
             """,
-            (route, confidence, latency_ms, int(cache_hit), int(interactive))
+            (cycle_id, int(used_plan), latency_ms, int(interactive))
         )
         self._commit_or_defer()
 

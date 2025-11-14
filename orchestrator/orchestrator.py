@@ -1,9 +1,9 @@
 """
-Orchestrator - Main controller for v2.0 multi-role architecture
+Orchestrator - Routerless dual-agent controller.
 
-Coordinates: Router → Execution → Agent A narrator
-Implements CHAT, SHELL, and CACHED routes (Phase 2)
-PLANNER route implemented in Phase 3
+Coordinates: Agent A (plan/chat) → Agent B (commands) → Agent A narrator.
+Every user query now enters through Agent A, which decides between
+direct responses or structured plans that Agent B executes.
 """
 
 import os
@@ -15,16 +15,13 @@ from typing import Any, Callable, Dict, List, Optional
 from config import Config
 from llm_client import LLMClient
 from memory.api import Memory
-from orchestrator.prompts import get_agent_a_prompt, get_agent_b_prompt, get_agent_a_chat_prompt, get_agent_a_narrator_prompt, get_agent_a_summarizer_prompt
-from orchestrator.metrics import RouteMetrics, StepMetrics, LLMMetrics, get_metrics
+from orchestrator.prompts import get_agent_a_prompt, get_agent_b_prompt, get_agent_a_narrator_prompt, get_agent_a_summarizer_prompt
+from orchestrator.metrics import CycleMetrics, StepMetrics, LLMMetrics, get_metrics
 from orchestrator.system_context_builder import SystemContextBuilder
-from orchestrator.command_classifier import classify_query, QueryRoute, is_interactive_command
-from tools import get_tool_schemas
 from orchestrator.plan_validator import PlanValidator, PlanValidationError
 from orchestrator.plan_schema import detect_response_type
 from orchestrator.output_parser import OutputParser, OutputParserError
-from orchestrator.routes import RouterResult, Route
-from orchestrator.intention_cache import IntentionCache
+from orchestrator.routes import Route
 from tool_executor import ToolExecutor
 from tools import TOOLS
 
@@ -65,26 +62,22 @@ class OrchestratorResult:
 
 class Orchestrator:
     """
-    Main orchestrator for v2.0 multi-role architecture.
+    Main orchestrator for the dual-agent architecture.
     
     Entry point: handle_query(query) → OrchestratorResult
     
     Workflow:
     1. Create cycle_id and log to Memory
-    2. Router.classify(query) → route decision
-    3. Route-specific handler (CHAT/SHELL/CACHED/PLANNER)
-    4. Agent A narrator (universal final step)
-    5. Return OrchestratorResult
+    2. Call Agent A (planner/chat) to produce a direct reply or execution plan
+    3. If a plan is returned, Agent B engineers tool commands and ToolExecutor runs them
+    4. Agent A narrator or narration template produces the final response
+    5. Return OrchestratorResult with route + metrics
     """
     
     # Constants
     MAX_PLAN_RETRIES = 2  # Max attempts for Agent A to generate valid plan
     SHELL_TOOLS = {"run_command", "run_interactive"}
     SUPPORTED_OUTPUT_FORMAT_TYPES = {"int", "float", "str", "list", "raw", "table", "json"}
-    SHELL_CONFIDENCE = 0.95
-    CACHED_CONFIDENCE = 0.90
-    CHAT_CONFIDENCE = 0.85
-    PLANNER_CONFIDENCE = 0.50
     
     def __init__(self, config: Config, memory: Optional[Memory] = None):
         """
@@ -98,7 +91,6 @@ class Orchestrator:
         self.memory = memory or Memory()
         
         # Initialize components
-        self.intention_cache = IntentionCache(self.memory)
         self.tool_executor = ToolExecutor()  # ToolExecutor does NOT access memory directly
         self.output_parser = OutputParser()
         self.context_builder = SystemContextBuilder(memory=self.memory)
@@ -174,153 +166,51 @@ class Orchestrator:
         """
         return TOOLS['run_command'].get_effective_cwd()
 
-    def classify_query(self, query: str) -> RouterResult:
-        """
-        Classify the query using local heuristics (shell/chat/cache/planner).
-        
-        Replaces the legacy Router component while preserving RouterResult
-        semantics for downstream logging/tests.
-        """
-        start_time = time.time()
-        classification = classify_query(query)
-        latency_ms = lambda: int((time.time() - start_time) * 1000)
-        
-        if classification.route == QueryRoute.SHELL:
-            return RouterResult(
-                route=Route.SHELL,
-                confidence=self.SHELL_CONFIDENCE,
-                latency_ms=latency_ms(),
-                matched_rule=classification.matched_pattern
-            )
-        
-        cache_hit = self.intention_cache.lookup(query)
-        if cache_hit:
-            return RouterResult(
-                route=Route.CACHED,
-                confidence=self.CACHED_CONFIDENCE,
-                latency_ms=latency_ms(),
-                cache_hit=cache_hit
-            )
-        
-        if classification.route == QueryRoute.CHAT:
-            return RouterResult(
-                route=Route.CHAT,
-                confidence=self.CHAT_CONFIDENCE,
-                latency_ms=latency_ms(),
-                matched_rule=classification.matched_pattern
-            )
-        
-        return RouterResult(
-            route=Route.PLANNER,
-            confidence=self.PLANNER_CONFIDENCE,
-            latency_ms=latency_ms()
-        )
-
-    def _log_route_decision(self, cycle_id: str, query: str, result: RouterResult):
-        """Persist route decision metadata to Memory."""
-        cache_hit_tool = None
-        cache_hit_args = None
-        
-        if result.cache_hit:
-            cache_hit_tool = result.cache_hit.tool_name
-            cache_hit_args = result.cache_hit.tool_args
-        
-        rules = {}
-        if result.matched_rule:
-            rules["pattern"] = result.matched_rule
-        if result.cache_hit:
-            rules["cache_id"] = result.cache_hit.cache_id
-            rules["cache_score"] = result.cache_hit.score
-        
-        self.memory.save_router_decision(
-            cycle_id=cycle_id,
-            route=result.route.value,
-            confidence=result.confidence,
-            rules=rules if rules else None,
-            cache_hit_tool=cache_hit_tool,
-            cache_hit_args=cache_hit_args
-        )
     
     def handle_query(self, query: str) -> OrchestratorResult:
-        """
-        Main entry point - orchestrate query through full pipeline.
-        
-        Args:
-            query: User query text
-        
-        Returns:
-            OrchestratorResult with route, response, and metadata
-        
-        Workflow:
-        1. Create cycle_id
-        2. Router classification
-        3. Route-specific execution
-        4. Agent A narrator
-        5. Update Memory and return result
-        """
+        """Main entry point – every query flows through Agent A first."""
         start_time = time.time()
         result: Optional[OrchestratorResult] = None
-        router_result: Optional[RouterResult] = None
+        route_value: str = Route.PLANNER.value
         cycle_id: Optional[str] = None
         session_activity_needed = False
-        
+
         with self.memory.cycle_transaction() as txn:
-            # Step 1: Create cycle
             cycle_id = self.memory.create_cycle(
                 session_id=self.session_id,
                 query=query
             )
-            
-            # Step 2: Query classification (routerless)
-            router_result = self.classify_query(query)
-            self._log_route_decision(cycle_id, query, router_result)
-            
-            # Step 3: Route-specific execution
+
             try:
-                if router_result.route == Route.CHAT:
-                    result = self._handle_chat_route(cycle_id, query)
-                elif router_result.route == Route.SHELL:
-                    result = self._handle_shell_route(cycle_id, query)
-                elif router_result.route == Route.CACHED:
-                    result = self._handle_cached_route(cycle_id, query, router_result)
-                elif router_result.route == Route.PLANNER:
-                    result = self._handle_planner_route(cycle_id, query)
-                else:
-                    raise ValueError(f"Unknown route: {router_result.route}")
-                
-                # Calculate total latency
-                result.latency_ms = int((time.time() - start_time) * 1000)
-                
-                # Record metrics
-                route_metric = RouteMetrics(
-                    route=router_result.route.value,
-                    confidence=router_result.confidence,
-                    latency_ms=result.latency_ms,
-                    cache_hit=hasattr(router_result, 'cache_hit') and router_result.cache_hit is not None,
-                    interactive=is_interactive_command(query)
+                result = self._run_agent_a_cycle(cycle_id, query)
+                # Guarantee result references the orchestrator-assigned cycle
+                result.cycle_id = cycle_id
+                route_value = result.route or Route.PLANNER.value
+
+                self.memory.save_router_decision(
+                    cycle_id=cycle_id,
+                    route=route_value,
+                    confidence=1.0,
+                    rules=None,
+                    cache_hit_tool=None,
+                    cache_hit_args=None
                 )
-                if hasattr(self.memory, "record_route_metric"):
-                    self.memory.record_route_metric(
-                        route=route_metric.route,
-                        confidence=route_metric.confidence,
-                        latency_ms=route_metric.latency_ms,
-                        cache_hit=route_metric.cache_hit,
-                        interactive=route_metric.interactive
-                    )
-                else:
-                    metrics = get_metrics()
-                    metrics.record_route_metric(route_metric)
-                
+
+                result.latency_ms = int((time.time() - start_time) * 1000)
+                self._record_cycle_metric(
+                    route_value=route_value,
+                    latency_ms=result.latency_ms,
+                    execution_result=result.execution_result,
+                    cycle_id=cycle_id
+                )
+
                 session_activity_needed = True
-                
-                # Only retain successful cycles in memory
-                if self._cycle_succeeded(router_result.route, result):
+
+                if self._cycle_succeeded(route_value, result):
                     txn.commit()
-            
+
             except Exception as e:
-                # Error handling - still call Agent A to explain
                 latency_ms = int((time.time() - start_time) * 1000)
-                
                 error_msg = f"Error during orchestration: {str(e)}"
                 agent_response = self._call_agent_a_narrator(
                     cycle_id=cycle_id,
@@ -329,268 +219,60 @@ class Orchestrator:
                     tool_output=error_msg,
                     success=False
                 )
-                
+
                 result = OrchestratorResult(
                     cycle_id=cycle_id,
-                    route=router_result.route.value if router_result else "UNKNOWN",
+                    route=route_value,
                     query=query,
                     agent_response=agent_response,
                     latency_ms=latency_ms,
                     error=str(e)
                 )
-                # No commit request -> automatic rollback
-        
+
         if session_activity_needed:
             self.memory.update_session_activity(self.session_id)
-        
+
         return result
-    
-    def _handle_chat_route(self, cycle_id: str, query: str) -> OrchestratorResult:
-        """
-        CHAT route: Simple informational query handled directly by Agent A.
-        
-        Workflow:
-        1. Retrieve last 10 chat exchanges from Memory
-        2. Check for recent task completions (Planner→Chat handoff)
-        3. Call LLM in Agent A (chat mode) with full context
-        4. Log to chat_history
-        5. Return result
-        """
-        self._emit_status("planning", {"route": "CHAT"})
-        # Get chat history for context
-        chat_history = self.memory.get_chat_history(
-            session_id=self.session_id,
-            last_n=10
-        )
-        
-        # Build system context for Agent A (chat mode)
-        system_context = self.context_builder.build_for_role(
-            role="A",
-            session_id=self.session_id,
-            tool_registry=TOOLS,
-            shell_cwd=self._get_effective_shell_cwd()
-        )
-        
-        # Build messages for Agent A
-        messages = [
-            {"role": "system", "content": system_context + "\n\n" + get_agent_a_chat_prompt()}
-        ]
-        
-        # Planner→Chat handoff: Include summary of most recent completed task if available
-        recent_plan = self.memory.get_recent_completed_plan(
-            session_id=self.session_id,
-            last_n=1
-        )
-        
-        if recent_plan and len(recent_plan) > 0:
-            # Add task summary to context
-            task_summary = recent_plan[0]
-            task_context = f"\n[Context: User recently completed a task: {task_summary.get('query', 'task')}']\n"
-            messages[0]["content"] = messages[0]["content"] + task_context
-        
-        # Add previous chat context
-        for exchange in chat_history:
-            messages.append({"role": "user", "content": exchange["user_query"]})
-            messages.append({"role": "assistant", "content": exchange["agent_response"]})
-        
-        # Add current query
-        messages.append({"role": "user", "content": query})
-        
-        # Call LLM in Agent A role (chat mode)
-        llm_client = LLMClient(
-            config=self.config,
-            role="A",
-            memory=self.memory
-        )
-        
-        llm_result = llm_client.call(
-            messages=messages,
-            cycle_id=cycle_id
-        )
-        
-        if llm_result["error"]:
-            raise RuntimeError(f"LLM call failed: {llm_result['error']}")
-        
-        agent_response = llm_result["message"].content or ""
-        
-        # Save to chat_history
-        self.memory.save_chat_exchange(
-            session_id=self.session_id,
-            cycle_id=cycle_id,
-            user_query=query,
-            agent_response=agent_response
-        )
-        self._emit_status("preparing_response", {"route": "CHAT"})
-        
-        return OrchestratorResult(
-            cycle_id=cycle_id,
-            route="CHAT",
-            query=query,
-            agent_response=agent_response,
-            execution_result=None
-        )
-    
-    def _handle_shell_route(self, cycle_id: str, query: str) -> OrchestratorResult:
-        """
-        SHELL route: Direct shell command execution with Agent A narration.
-        
-        Workflow:
-        1. Detect if interactive command (vim, top, etc.) or regular command
-        2. Execute via appropriate tool (run_interactive for TTY commands, run_command for regular)
-        3. Call Agent A narrator to present results
-        4. Cache successful execution for future CACHED hits
-        5. Return result
-        
-        Target: <500ms end-to-end for non-interactive commands
-        """
-        # Detect if this is an interactive command requiring TTY
-        is_interactive = is_interactive_command(query)
-        tool_name = "run_interactive" if is_interactive else "run_command"
-        self._emit_status(
-            "executing",
-            {
-                "route": "SHELL",
-                "tool": tool_name,
-                "command": query,
-                "interactive": is_interactive
-            }
-        )
-        
-        # Execute command directly
-        exec_result = self.tool_executor.execute(
-            tool_name=tool_name,
-            tool_args={"command": query},
-            cycle_id=cycle_id,
-            step_id=0  # Single-step execution
-        )
-        exec_result["tool_name"] = tool_name
-        exec_result["command"] = query
-        self._emit_tool_output({
-            "route": "SHELL",
-            "tool_name": tool_name,
-            "command": query,
-            "stdout": exec_result.get("stdout"),
-            "stderr": exec_result.get("stderr"),
-            "raw_stdout": exec_result.get("raw_stdout"),
-            "raw_stderr": exec_result.get("raw_stderr"),
-            "success": exec_result.get("success"),
-            "exit_code": exec_result.get("exit_code"),
-            "step_id": 0,
-            "total_steps": 1
-        })
-        
-        # Call Agent A narrator
-        # For interactive commands, the output is minimal (exit status message)
-        # since the user was controlling the program directly
-        agent_response = self._call_agent_a_narrator(
-            cycle_id=cycle_id,
-            query=query,
-            tool_name=tool_name,
-            tool_output=exec_result["result"],
-            success=exec_result["success"],
-            exit_code=exec_result.get("exit_code")
-        )
-        
-        # Cache successful execution for future hits (only for non-interactive commands)
-        # Interactive commands are typically user-controlled and may not be repeatable
-        if exec_result["success"] and not is_interactive:
-            self._cache_execution(
-                query=query,
-                tool_name=tool_name,
-                tool_args={"command": query}
-            )
-        self._emit_status("preparing_response", {"route": "SHELL"})
-        
-        return OrchestratorResult(
-            cycle_id=cycle_id,
-            route="SHELL",
-            query=query,
-            agent_response=agent_response,
-            execution_result=exec_result
-        )
-    
-    def _handle_cached_route(
+
+    def _record_cycle_metric(
         self,
+        *,
         cycle_id: str,
-        query: str,
-        router_result
-    ) -> OrchestratorResult:
-        """
-        CACHED route: Retrieve cached tool + Execute → Agent A narrator
-        
-        Workflow:
-        1. Retrieve cached tool/args from router_result
-        2. Execute via ToolExecutor
-        3. Call Agent A narrator
-        4. Update cache usage counter
-        5. Return result
-        
-        Target: <200ms end-to-end (zero LLM overhead for execution)
-        """
-        cache_hit = router_result.cache_hit
-        
-        if not cache_hit:
-            raise ValueError("CACHED route requires cache_hit in router_result")
-        
-        cached_command = None
-        if cache_hit.tool_args:
-            cached_command = cache_hit.tool_args.get("command")
-        self._emit_status(
-            "executing",
-            {
-                "route": "CACHED",
-                "tool": cache_hit.tool_name,
-                "command": cached_command
-            }
-        )
-        # Execute cached tool
-        exec_result = self.tool_executor.execute(
-            tool_name=cache_hit.tool_name,
-            tool_args=cache_hit.tool_args,
+        route_value: str,
+        latency_ms: int,
+        execution_result: Optional[Dict[str, Any]]
+    ) -> None:
+        interactive = False
+        exec_result = execution_result or {}
+
+        if isinstance(exec_result, dict):
+            if exec_result.get("tool_name") == "run_interactive":
+                interactive = True
+            step_results = exec_result.get("step_results")
+            if isinstance(step_results, list):
+                interactive = any(
+                    step.get("tool_name") == "run_interactive"
+                    for step in step_results
+                )
+
+        used_plan = route_value == Route.PLANNER.value
+        cycle_metric = CycleMetrics(
             cycle_id=cycle_id,
-            step_id=0
+            used_plan=used_plan,
+            latency_ms=latency_ms,
+            interactive=interactive
         )
-        if cached_command:
-            exec_result.setdefault("command", cached_command)
-        exec_result.setdefault("tool_name", cache_hit.tool_name)
-        self._emit_tool_output({
-            "route": "CACHED",
-            "tool_name": cache_hit.tool_name,
-            "command": cached_command,
-            "stdout": exec_result.get("stdout"),
-            "stderr": exec_result.get("stderr"),
-            "raw_stdout": exec_result.get("raw_stdout"),
-            "raw_stderr": exec_result.get("raw_stderr"),
-            "success": exec_result.get("success"),
-            "exit_code": exec_result.get("exit_code"),
-            "step_id": 0,
-            "total_steps": 1
-        })
-        
-        # Call Agent A narrator
-        agent_response = self._call_agent_a_narrator(
-            cycle_id=cycle_id,
-            query=query,
-            tool_name=cache_hit.tool_name,
-            tool_output=exec_result["result"],
-            success=exec_result["success"],
-            exit_code=exec_result.get("exit_code")
-        )
-        
-        # Update cache usage counter
-        self.memory.update_cache_usage(cache_hit.cache_id)
-        self._emit_status("preparing_response", {"route": "CACHED"})
-        
-        return OrchestratorResult(
-            cycle_id=cycle_id,
-            route="CACHED",
-            query=query,
-            agent_response=agent_response,
-            execution_result={
-                **exec_result,
-                "cache_hit": cache_hit.to_dict()
-            }
-        )
+
+        if hasattr(self.memory, "record_cycle_metric"):
+            self.memory.record_cycle_metric(
+                cycle_id=cycle_metric.cycle_id,
+                used_plan=cycle_metric.used_plan,
+                latency_ms=cycle_metric.latency_ms,
+                interactive=cycle_metric.interactive
+            )
+        else:
+            metrics = get_metrics()
+            metrics.record_cycle_metric(cycle_metric)
     
     def _call_agent_a_narrator(
         self,
@@ -658,77 +340,9 @@ Success: {success}
         
         return llm_result["message"].content or tool_output
     
-    def _call_agent_a_chat(self, cycle_id: str, query: str) -> str:
+    def _run_agent_a_cycle(self, cycle_id: str, query: str) -> OrchestratorResult:
         """
-        Call Agent A in chat mode for simple informational responses.
-        
-        This is used when the planner delegates to a direct chat reply or for CHAT route.
-        
-        Args:
-            cycle_id: Cycle ID for logging
-            query: User's original query
-        
-        Returns:
-            Conversational response from Agent A
-        """
-        # Get chat history for context
-        chat_history = self.memory.get_chat_history(
-            session_id=self.session_id,
-            last_n=10
-        )
-        
-        # Build system context for Agent A
-        system_context = self.context_builder.build_for_role(
-            role="A",
-            session_id=self.session_id,
-            tool_registry=TOOLS,
-            shell_cwd=self._get_effective_shell_cwd()
-        )
-        
-        # Build messages for Agent A
-        messages = [
-            {"role": "system", "content": system_context + "\n\n" + get_agent_a_chat_prompt()}
-        ]
-        
-        # Add previous chat context
-        for exchange in chat_history:
-            messages.append({"role": "user", "content": exchange["user_query"]})
-            messages.append({"role": "assistant", "content": exchange["agent_response"]})
-        
-        # Add current query
-        messages.append({"role": "user", "content": query})
-        
-        # Call LLM in Agent A role
-        llm_client = LLMClient(
-            config=self.config,
-            role="A",
-            memory=self.memory
-        )
-        
-        llm_result = llm_client.call(
-            messages=messages,
-            cycle_id=cycle_id
-        )
-        
-        if llm_result["error"]:
-            return f"[Agent A chat failed: {llm_result['error']}]"
-        
-        agent_response = llm_result["message"].content or "No response"
-        
-        # Save to chat_history
-        self.memory.save_chat_exchange(
-            session_id=self.session_id,
-            cycle_id=cycle_id,
-            user_query=query,
-            agent_response=agent_response
-        )
-        
-        return agent_response
-
-    
-    def _handle_planner_route(self, cycle_id: str, query: str) -> OrchestratorResult:
-        """
-        PLANNER route: Multi-step task planning via Agent A
+        Unified Agent A entry point (planning + narration).
         
         Agent A can respond with TWO types:
         1. Execution plan (steps + narration template)
@@ -848,7 +462,7 @@ Success: {success}
             
             return OrchestratorResult(
                 cycle_id=cycle_id,
-                route="PLANNER",
+                route=Route.PLANNER.value,
                 query=query,
                 agent_response=agent_response,
                 error=last_error
@@ -872,7 +486,7 @@ Success: {success}
             )
             return OrchestratorResult(
                 cycle_id=cycle_id,
-                route="PLANNER",
+                route=Route.CHAT.value,
                 query=query,
                 agent_response=agent_response,
                 execution_result=None
@@ -931,7 +545,7 @@ Success: {success}
             
             return OrchestratorResult(
                 cycle_id=cycle_id,
-                route="PLANNER",
+                route=Route.PLANNER.value,
                 query=query,
                 agent_response=final_response,
                 execution_result=execution_result
@@ -956,7 +570,7 @@ Success: {success}
             
             return OrchestratorResult(
                 cycle_id=cycle_id,
-                route="PLANNER",
+                route=Route.PLANNER.value,
                 query=query,
                 agent_response=agent_response,
                 error=str(e)

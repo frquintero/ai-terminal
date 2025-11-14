@@ -18,7 +18,6 @@ from unittest.mock import Mock, patch, MagicMock, call
 from config import Config
 from memory.api import Memory
 from orchestrator.orchestrator import Orchestrator
-from orchestrator.routes import Route
 
 
 # Test configuration with mock LLM
@@ -66,43 +65,8 @@ def orchestrator(test_config, memory):
     return Orchestrator(config=test_config, memory=memory)
 
 
-# ============================================================================
-# PLANNER Route Tests - 3 Representative Tasks
-# ============================================================================
-
-
-class TestPlannerRoute:
-    """Test PLANNER route functionality"""
-
-    def test_planner_route_classification(self, orchestrator):
-        """Verify complex tasks route to PLANNER"""
-        queries = [
-            "Create a Python script that monitors disk space and alerts when it exceeds 80%",
-            "Set up a daily backup of my home directory to an external drive",
-            "Build a web scraper that collects data from multiple sites",
-        ]
-
-        for query in queries:
-            result = orchestrator.classify_query(query)
-            # Complex tasks either route to PLANNER or can route to SHELL/CHAT
-            # Router precedence: SHELL > CACHED > CHAT > PLANNER
-            assert result.route in [Route.PLANNER, Route.CHAT, Route.SHELL], (
-                f"Query '{query}' routed to {result.route}"
-            )
-            assert result.confidence >= 0.5
-
-
 class TestTask1DiskMonitoring:
     """Task 1: Disk space monitoring script"""
-
-    def test_task1_classification(self, orchestrator):
-        """Verify disk monitoring task routes to PLANNER"""
-        query = (
-            "Create a Python script that monitors disk space "
-            "and alerts when it exceeds 80%"
-        )
-        result = orchestrator.classify_query(query)
-        assert result.route == Route.PLANNER
 
     def test_task1_planning(self, orchestrator):
         """Test Agent A decomposition for disk monitoring task"""
@@ -206,12 +170,6 @@ class TestTask1DiskMonitoring:
 class TestTask2BackupScript:
     """Task 2: Daily backup automation"""
 
-    def test_task2_classification(self, orchestrator):
-        """Verify backup task routes to PLANNER"""
-        query = "Set up a daily backup of my home directory to an external drive"
-        result = orchestrator.classify_query(query)
-        assert result.route == Route.PLANNER
-
     def test_task2_planning(self, orchestrator):
         """Test Agent A decomposition for backup task"""
         query = "Set up a daily backup of my home directory to an external drive"
@@ -263,13 +221,6 @@ class TestTask2BackupScript:
 
 class TestTask3DockerMonitoring:
     """Task 3: Docker memory monitoring"""
-
-    def test_task3_classification(self, orchestrator):
-        """Verify Docker monitoring task routes appropriately"""
-        query = "Find all Docker containers using more than 500MB memory and list them"
-        result = orchestrator.classify_query(query)
-        # Docker queries may route to SHELL (docker command), PLANNER, or CHAT
-        assert result.route in [Route.PLANNER, Route.CHAT, Route.SHELL]
 
     def test_task3_planning(self, orchestrator):
         """Test Agent A decomposition for Docker monitoring task"""

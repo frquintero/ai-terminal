@@ -327,21 +327,21 @@ except PlanValidationError as e:
 
 ## Metrics Debugging
 
-### View Route Distribution
+### View Resolution Breakdown
 
 ```python
 from orchestrator.metrics import get_metrics
 
 metrics = get_metrics()
 
-# Route distribution over time windows
+# Resolution breakdown over time windows
 for hours in [1, 24, 168]:  # Last 1h, 1d, 1w
-    dist = metrics.get_route_distribution(limit_hours=hours)
+    dist = metrics.get_resolution_breakdown(limit_hours=hours)
     total = sum(dist.values())
-    print(f"\nLast {hours}h ({total} queries):")
-    for route, count in sorted(dist.items(), key=lambda x: -x[1]):
+    print(f"\nLast {hours}h ({total} cycles):")
+    for resolution, count in dist.items():
         pct = count / total * 100 if total > 0 else 0
-        print(f"  {route:8} {count:4} ({pct:5.1f}%)")
+        print(f"  {resolution:16} {count:4} ({pct:5.1f}%)")
 ```
 
 ### Check Latency Percentiles
@@ -358,11 +358,11 @@ print(f"  Avg: {stats['avg_ms']}ms")
 print(f"  P50: {stats['p50_ms']}ms")
 print(f"  P95: {stats['p95_ms']}ms")
 
-# Per-route latency
-for route in ['SHELL', 'CACHED', 'CHAT', 'PLANNER']:
-    stats = metrics.get_latency_stats(route=route, limit_hours=24)
+# Per-resolution latency
+for label, used_plan in [("Direct response", False), ("Execution plan", True)]:
+    stats = metrics.get_latency_stats(used_plan=used_plan, limit_hours=24)
     if stats.get('count', 0) > 0:
-        print(f"\n{route} latency:")
+        print(f"\n{label} latency:")
         print(f"  Avg: {stats['avg_ms']}ms")
         print(f"  P95: {stats['p95_ms']}ms")
 ```

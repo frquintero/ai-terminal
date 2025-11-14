@@ -285,7 +285,7 @@ class LLMClient:
         )
         
         # Optional: Save full trace for debugging
-        if hasattr(self.config, 'save_llm_traces') and self.config.save_llm_traces:
+        if self.config.save_llm_traces:
             full_prompt = json.dumps(messages, indent=2)
             self.memory.save_llm_trace(
                 cycle_id=cycle_id,

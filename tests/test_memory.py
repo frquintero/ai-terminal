@@ -571,12 +571,11 @@ class TestMetricsRecording:
         memory.create_session(session_id, 'gpt-4')
 
         with memory.cycle_transaction() as txn:
-            memory.create_cycle(session_id, 'metrics query')
-            memory.record_route_metric(
-                route='CHAT',
-                confidence=0.9,
+            cycle_id = memory.create_cycle(session_id, 'metrics query')
+            memory.record_cycle_metric(
+                cycle_id=cycle_id,
+                used_plan=False,
                 latency_ms=123,
-                cache_hit=False,
                 interactive=False
             )
             memory.record_step_metric(
@@ -595,7 +594,7 @@ class TestMetricsRecording:
             )
             txn.commit()
 
-        route_count = memory.conn.execute("SELECT COUNT(*) FROM route_metrics").fetchone()[0]
+        route_count = memory.conn.execute("SELECT COUNT(*) FROM cycle_metrics").fetchone()[0]
         step_count = memory.conn.execute("SELECT COUNT(*) FROM step_metrics").fetchone()[0]
         llm_count = memory.conn.execute("SELECT COUNT(*) FROM llm_metrics").fetchone()[0]
 

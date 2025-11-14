@@ -4,7 +4,7 @@
 
 ## Overview
 
-This is an **AI-powered Linux terminal** built on a dual-agent orchestrator. A lightweight command classifier (regex heuristics + intention cache) decides whether a query should run through the SHELL, CACHED, CHAT, or PLANNER path, and Agent A always narrates the final answer.
+This is an **AI-powered Linux terminal** built on a dual-agent orchestrator. Every query is handled by Agent A first; it either answers directly or produces a structured execution plan that Agent B carries out via ToolExecutor. Agent A also renders the final narration, so there is no router shortcut or extra narrator role.
 
 - **Agent A (Planner / Narrator / Chat):** First hop for every request. Emits either a direct response or a structured plan with `steps[]` + `narration_template`, then renders the final narration after execution.
 - **Agent B (Command Engineer):** Called per step to generate precise shell commands (or tool arguments for non-shell tools) plus an `output_format` that explains how to interpret stdout.
@@ -18,19 +18,17 @@ This is an **AI-powered Linux terminal** built on a dual-agent orchestrator. A l
 
 ## Architecture Overview
 
-### Routerless Flow (Classifier + Cache)
+### Routerless Flow (Agent A-first)
 
 ```
 Query
-  ↓
-[Classifier + Intention Cache]
-  ├─ SHELL   → Agent A emits single-step plan → Agent B runs run_command/run_interactive → narration
-  ├─ CACHED  → ToolExecutor replays cached tool args → Agent A narrates result
-  ├─ CHAT    → Agent A responds directly (no tools)
-  └─ PLANNER → Agent A issues multi-step plan → Agent B executes each step → template rendered
+    ↓
+Agent A (plan or direct response)
+    ├─ Direct response → saved to chat history → returned to REPL
+    └─ Execution plan  → Agent B engineers commands per step → ToolExecutor runs them → typed outputs hydrate Agent A's narration template
 ```
 
-The classifier mirrors the legacy router’s precedence but is embedded in `orchestrator/command_classifier.py`, so there is no standalone router service or CLI anymore.
+The legacy router and classifier are gone; all telemetry now comes from Agent A’s decisions and the resulting plan execution.
 
 ### Unified Memory System
 
@@ -44,7 +42,7 @@ Tables:
 - `step_outputs`: Individual step results with stdout/stderr snapshots, raw blobs, `output_format`, and JSON-encoded `parsed_outputs`
 - `chat_history`: Conversation history for context injection
 - `llm_traces`: Full prompt/response logs for debugging
-- `route_metrics`, `step_metrics`, `llm_metrics`: Telemetry
+- `cycle_metrics`, `step_metrics`, `llm_metrics`: Telemetry
 
 All state is **transactional** with `session_id` + `cycle_id` tracking per orchestration cycle. The orchestrator now wraps every cycle in `Memory.cycle_transaction()`, committing only after a successful response so partial plans/step outputs never touch disk. Need a clean slate? Run `python -m memory.purge_db --yes --include-sessions --include-cache` to wipe orchestrator state before starting a new upgrade.
 
@@ -66,14 +64,12 @@ After ToolExecutor runs a command, the orchestrator captures full stdout/stderr 
 ```
 orchestrator/
 ├── orchestrator.py         # Main Orchestrator class, handle_query() entry point
-├── command_classifier.py   # Routerless classifier + heuristics
-├── command_patterns.py     # Regex bundles for shell/chat/interactive detection
 ├── intention_cache.py      # FTS5-backed cache shared across routes
 ├── prompts.py              # Agent A/B system prompts with context injection
 ├── plan_schema.py          # Schema + helpers for narration templates/output_keys
 ├── plan_validator.py       # JSON schema validation with retry logic
 ├── output_parser.py        # Typed stdout parser for Agent B output_format payloads
-├── metrics.py              # Telemetry collection (route distribution, latency, cache hits)
+├── metrics.py              # Telemetry collection (cycle breakdowns, latency, tool stats)
 
 memory/
 ├── api.py                  # Unified Memory API (CRUD for all tables)
@@ -127,6 +123,7 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 MODEL=gpt-4-turbo
 MAX_TOKENS=2048
 TEMPERATURE=0.7
+SAVE_LLM_TRACES=true              # turn off only if storage is a concern
 
 # CLI override
 python main.py --agent kimi2 --max-tokens 4096 --temperature 0.9
@@ -150,21 +147,21 @@ from orchestrator.metrics import get_metrics
 
 metrics = get_metrics()
 
-# Route distribution (last 24h)
-print(metrics.get_route_distribution())
-# Output: {'SHELL': 45, 'CHAT': 28, 'CACHED': 12, 'PLANNER': 5}
+# Resolution breakdown (last 24h)
+print(metrics.get_resolution_breakdown())
+# Output: {'execution_plan': 12, 'direct_response': 33}
 
 # Latency stats
 print(metrics.get_latency_stats())
 # Output: {avg: 250ms, p95: 450ms, ...}
 
-# Cache hit rate
-print(metrics.get_cache_hit_rate())
-# Output: {hits: 12, total: 100, hit_rate_percent: 12.0}
+# Interactive rate
+print(metrics.get_interactive_rate())
+# Output: {interactive_cycles: 4, total_cycles: 25, interactive_rate_percent: 16.0}
 
 # Full report
 report = metrics.get_summary_report()
-print(f"SHELL avg latency: {report['latency_stats']['shell']['avg_ms']}ms")
+print(f"Plans avg latency: {report['latency_stats']['execution_plan']['avg_ms']}ms")
 ```
 
 ### Metrics Dashboard (Future)
@@ -224,19 +221,13 @@ class MyTool(BaseTool):
         return f"Executed with {arg1}"
 ```
 
-### Tuning the Classifier
+### Guiding Agent A Decisions
 
-Regex heuristics now live in `orchestrator/command_patterns.py`:
-
-- `SHELL_PATTERNS`: 160+ single-line shell commands (git, npm, ls, etc.)
-- `CHAT_PATTERNS`: Informational prompts such as “What is…”
-- `INTERACTIVE_PATTERNS`: vim, nano, top, ssh, mysql, etc.
-
-To add a new shell command, edit `SHELL_PATTERNS` and re-run `python -m pytest tests/test_command_classifier.py`. Interactive commands should go into `INTERACTIVE_PATTERNS` so Agent B selects `run_interactive`.
+With the classifier removed, Agent A’s prompt is the primary lever for influencing routing behavior. Update `orchestrator/prompts.py` to remind Agent A when to issue a direct response versus a one-step plan, and to flag interactive work explicitly by setting `tool_name` to `run_interactive`. Any prompt tweaks should be accompanied by new fixtures in `tests/test_orchestrator.py` or `tests/test_e2e_planner.py` so regressions are caught automatically.
 
 ### Adjusting Cache Thresholds
 
-`orchestrator/intention_cache.py` exposes `IntentionCache.DEFAULT_MIN_SCORE`, `DEFAULT_MIN_USAGE`, and `DEFAULT_SEARCH_LIMIT`. Lowering `min_score` increases cache hits but risks false positives; raising it makes cache hits rarer but safer. After changing these values, run `python -m pytest tests/test_e2e_chat_cached.py -k cached` to confirm behavior.
+`orchestrator/intention_cache.py` still exposes `IntentionCache.DEFAULT_MIN_SCORE`, `DEFAULT_MIN_USAGE`, and `DEFAULT_SEARCH_LIMIT`. Lowering `min_score` increases cache hits but risks false positives; raising it makes cache hits rarer but safer. After changing these values, add or update targeted tests (for example in `tests/test_orchestrator.py`) to confirm the new thresholds behave as expected.
 
 ### LLM Tracing
 
@@ -262,37 +253,32 @@ for trace in traces:
 
 ### Core Integration Tests (Recommended)
 
-These tests validate the complete v2.0 orchestrator with Agent A/B/C coordination:
+These tests validate the routerless orchestrator with the dual-agent loop:
 
 ```bash
 # Use venv python to run tests
 PYTHON=.venv/bin/python
 
-# Core end-to-end tests (42 tests - ALL PASS ✅)
-$PYTHON -m pytest tests/test_e2e_planner.py -v              # 16 tests: PLANNER route, Agent A/B
-$PYTHON -m pytest tests/test_cross_route_integration.py -v  # 11 tests: Cross-route workflows
-$PYTHON -m pytest tests/test_e2e_chat_cached.py -v          # 15 tests: CHAT, CACHED routes
-
+# Core suites (ALL PASS ✅)
+$PYTHON -m pytest tests/test_orchestrator.py -v        # Agent A prompts, handle_query, Agent B payloads
+$PYTHON -m pytest tests/test_e2e_planner.py -v         # Plan execution + narration templates
+$PYTHON -m pytest tests/test_output_parser.py -v       # Typed stdout parsing for narration templates
+```
 # Run all core tests together
 $PYTHON -m pytest tests/test_e2e_*.py tests/test_cross_*.py -v
 ```
 
 **What's Tested:**
-- ✅ PLANNER route (multi-step task decomposition)
 - ✅ Agent A planning + narration (JSON plan generation + templated summaries)
 - ✅ Agent B execution (tool schema → precise args)
-- ✅ CHAT route (simple queries)
-- ✅ CACHED route (intention cache, zero-LLM execution)
-- ✅ Cross-route context preservation
+- ✅ Plan → ToolExecutor → OutputParser handshake (typed values for narration templates)
 - ✅ Memory persistence (SQLite)
-- ✅ Cycle tracking and state advancement
+- ✅ Cycle tracking and session bookkeeping
+- ✅ Step output storage + structured previews
 
 ### Additional Tests
 
 ```bash
-# Command-classifier heuristics
-$PYTHON -m pytest tests/test_command_classifier.py -v
-
 # Memory API tests (database operations)
 $PYTHON -m pytest tests/test_memory.py -v
 
