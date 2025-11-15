@@ -132,9 +132,9 @@ python main.py --agent kimi2 --max-tokens 4096 --temperature 0.9
 ## REPL Experience
 
 - **Dynamic prompt & status line** – The prompt mirrors the AI shell’s cwd (`user@host ~/repo ❯`). A single in-place status line cycles through `Planning…`, `Executing commands…`, and `Preparing response…` with elapsed seconds so you always know what the orchestrator is doing.
-- **Narration stays human** – Agent A’s final narration is rendered as a Rich panel (Markdown supported) outside any ANSI block, keeping the conversation readable even when commands run in between.
-- **Command panels for raw output** – Every shell or planner step streams into an ANSI-styled panel that shows the command header, success state, and stdout/stderr. JSON payloads are auto-prettified, and `read_file` steps render Markdown/code with syntax highlighting plus truncation notices for huge files.
-- **Sequential streaming** – Narration and panels arrive in execution order, so prompts that mix reasoning (“explain Tokyo”) and shell work (“list *.txt”) naturally display as `narration → command panel → narration → command panel`, matching the dual-agent plan.
+- **Narration-first layout** – Agent A’s narration prints as plain text; scalar placeholders (e.g., `{count}`) interpolate inline so sentences stay readable, and Cycle IDs appear as plain text in the lower-right corner of each pane.
+- **Structured blocks when needed** – When a step returns structured data, the REPL inserts fenced blocks (```output```, ```json```, ```md```, language fences, etc.) that contain the tool’s stdout exactly as captured—no nested panels or duplicate headers—matching `history/ai_terminal_spec_v1.5 (1).md`.
+- **Sequential streaming** – Narration and any fenced blocks show up in execution order, so mixed prompts (“explain Tokyo” + “list *.txt”) appear naturally as `narration → fenced block → narration`, mirroring the dual-agent plan.
 
 ## Telemetry & Metrics
 
@@ -338,6 +338,7 @@ All architecture and development docs are in the `history/` directory:
 
 | File | Purpose |
 |------|---------|
+| **[ai_terminal_spec_v1.5](history/ai_terminal_spec_v1.5%20(1).md)** | Canonical REPL specification (pane structure, status line, plain text + fenced-block rendering) |
 | **[IMPLEMENTATION_PLAN.md](history/IMPLEMENTATION_PLAN.md)** | Complete v2.0 design spec: 6 phases, success criteria, architecture decisions, risk mitigation |
 | **[DOUBLE_AGENT_ARCHITECTURE.md](DOUBLE_AGENT_ARCHITECTURE.md)** | Historical doc outlining the original triple-agent concept (pre-upgrade) |
 | **[PHASE_2_SIGN_OFF.md](history/PHASE_2_SIGN_OFF.md)** | Phase 2 final verification: 58 tests passing, all acceptance criteria met |

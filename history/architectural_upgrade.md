@@ -81,7 +81,7 @@ Migration/testing checklist:
 4. After all steps complete, hydrate `narration_template` with the parsed data, respecting formatting (lists/joined lines, raw calendar blocks, etc.), then send final narration to the REPL.
 
 - **Status: ✅** ToolExecutor now emits stdout/stderr/raw previews, `memory.step_outputs` stores structured blobs + `parsed_outputs`, `orchestrator/output_parser.py` materializes Agent B’s `output_format`, and template hydration is covered by parser + orchestrator tests.
-- **REPL streaming: ✅** The REPL listens to orchestrator status/tool events, shows shell executions in ANSI command panels, pretty-prints JSON/table output, and renders `read_file` previews with Markdown/syntax highlighting so narration can interleave with raw command output.
+- **REPL rendering: ✅** The REPL keeps Agent A’s narration as plain text, replaces placeholders inline, and only emits fenced blocks (```output```, ```json```, ```md```, language fences) when a step returns structured stdout—exactly as mandated in `history/ai_terminal_spec_v1.5 (1).md`. No command headers or duplicate “stdout” labels are injected.
 
 Migration/testing checklist:
 - Add golden-output tests that compare hydrated narrations versus templates for combinations of `int`, `list`, and `raw`.
