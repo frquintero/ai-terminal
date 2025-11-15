@@ -255,12 +255,10 @@ class ToolExecutor:
         Returns:
             Exit code or None
         """
-        # For shell commands, exit code is in _SESSION_STATE
-        # but ToolExecutor should be stateless, so we parse from result
-        
-        # Future enhancement: Standardize exit code in tool return values
-        # For now, return None (actual exit codes tracked in _SESSION_STATE)
-        
+        if isinstance(result, dict):
+            exit_code = result.get("exit_code")
+            if isinstance(exit_code, int):
+                return exit_code
         return None
 
     def _normalize_tool_result(self, value: Any) -> Dict[str, Optional[str]]:

@@ -86,3 +86,25 @@ def test_render_output_placeholder_emits_output_block_for_lists():
     assert "alpha.txt" in blocks[0].plain
     assert "beta.txt" in blocks[0].plain
     assert "files" in rendered_blocks
+
+
+def test_render_output_placeholder_skips_block_for_no_output():
+    formatter = UIFormatter()
+    fallback = "Tool run_command (command: find . -name '*.bat') completed with no output."
+    execution_result = {
+        "output_values": {"bat_files": fallback},
+        "output_value_types": {"bat_files": "list"},
+        "output_value_sources": {
+            "bat_files": {"no_output": True}
+        }
+    }
+    rendered_blocks = set()
+
+    inline_value, blocks = formatter._render_output_placeholder(
+        key="bat_files",
+        execution_result=execution_result,
+        rendered_blocks=rendered_blocks
+    )
+
+    assert inline_value == fallback
+    assert blocks == []

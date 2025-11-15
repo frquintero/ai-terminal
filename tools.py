@@ -2168,6 +2168,9 @@ class RunCommandTool(BaseTool):
                 cwd_prefix = f"cd {shlex.quote(self.working_dir)}"
             wrapped = f"{cwd_prefix}; {command}"
             result = self.shell.run_command(wrapped, reset_dir=reset_dir)
+            normalized_stdout = getattr(self.shell, "last_command_normalized_output", result)
+            raw_stdout = getattr(self.shell, "last_command_raw_output", normalized_stdout)
+            exit_code = getattr(self.shell, "last_exit_code", None)
             try:
                 _record_shell_snapshot(
                     command=command,
@@ -2177,7 +2180,11 @@ class RunCommandTool(BaseTool):
                 )
             except Exception:
                 pass
-            return result
+            return {
+                "stdout": result,
+                "raw_stdout": raw_stdout if raw_stdout is not None else normalized_stdout,
+                "exit_code": exit_code
+            }
             
         except Exception as e:
             return f"Error executing command: {str(e)}"

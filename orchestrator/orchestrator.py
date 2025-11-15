@@ -852,11 +852,25 @@ Success: {success}
                     exec_result=exec_result
                 )
                 if rendered_values:
+                    parsed_for_step = parsed_outputs or {}
                     for key, value in rendered_values.items():
-                        output_values[key] = value
                         fmt = (step_output_format or {}).get(key, "str")
+                        final_value = value
+                        source_for_key = dict(source_metadata) if source_metadata else {}
+                        if self._should_use_no_output_message(
+                            fmt=fmt,
+                            rendered_value=value,
+                            parsed_value=parsed_for_step.get(key),
+                            exec_result=exec_result
+                        ):
+                            final_value = self._format_no_output_message(
+                                step=step,
+                                tool_args=tool_args
+                            )
+                            source_for_key["no_output"] = True
+                        output_values[key] = final_value
                         output_value_types[key] = fmt
-                        output_value_sources[key] = source_metadata
+                        output_value_sources[key] = source_for_key
                 elif not step_output_format:
                     recorded_keys = self._record_step_outputs(
                         step=step,
@@ -1375,6 +1389,55 @@ Step Results Summary:
             "raw_stderr": exec_result.get("raw_stderr"),
             "exit_code": exec_result.get("exit_code"),
         }
+
+    def _should_use_no_output_message(
+        self,
+        *,
+        fmt: Optional[str],
+        rendered_value: Optional[str],
+        parsed_value: Any,
+        exec_result: Dict[str, Any]
+    ) -> bool:
+        """Return True if the tool succeeded but produced no stdout to render."""
+        fmt_normalized = (fmt or "").strip().lower()
+        if fmt_normalized in {"int", "float"}:
+            return False
+        exit_code = exec_result.get("exit_code")
+        if exit_code not in (None, 0):
+            return False
+        stdout = exec_result.get("stdout")
+        raw_stdout = exec_result.get("raw_stdout")
+        stderr = exec_result.get("stderr")
+        if any(text not in (None, "", " ") for text in (stdout, raw_stdout, stderr)):
+            if fmt_normalized == "list":
+                return isinstance(parsed_value, list) and len(parsed_value) == 0
+            rendered = (rendered_value or "").strip()
+            return rendered == ""
+        return True
+
+    def _format_no_output_message(
+        self,
+        *,
+        step: Dict[str, Any],
+        tool_args: Dict[str, Any]
+    ) -> str:
+        """Build a sentence explaining that a tool produced no output."""
+        tool_name = step.get("tool_name", "tool")
+        command = (tool_args.get("command") or "").strip()
+        intent = (step.get("intent") or step.get("description") or "the requested action").strip()
+        if intent:
+            intent_text = intent
+        else:
+            intent_text = "the requested action"
+        intent_clause = f" for \"{intent_text}\"" if intent_text else ""
+        if command:
+            return (
+                f"Tool {tool_name} (command: {command}) completed with no output, "
+                f"which I interpret as zero results{intent_clause}."
+            )
+        return (
+            f"Tool {tool_name} completed with no output, which I interpret as zero results{intent_clause}."
+        )
 
     def _cache_execution(
         self,

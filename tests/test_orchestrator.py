@@ -211,6 +211,62 @@ class TestOrchestratorIntegration(unittest.TestCase):
             {"files": ["main.py", "app.py", "count: 2"], "count": 2}
         )
 
+    def test_execute_plan_injects_no_output_message(self):
+        """When stdout is empty, the orchestrator replaces values with a helpful note."""
+        cycle_id = self.memory.create_cycle(
+            session_id=self.orchestrator.session_id,
+            query="any bat files?"
+        )
+        plan = {
+            "steps": [
+                {
+                    "id": 0,
+                    "tool_name": "run_command",
+                    "intent": "Search for BAT files",
+                    "description": "Find *.bat files",
+                    "output_keys": ["bat_files"]
+                }
+            ],
+            "narration_template": "Found these files: {bat_files}"
+        }
+        self.memory.save_plan(cycle_id, plan, status="in_progress")
+
+        agent_b_payload = {
+            "success": True,
+            "tool_args": {"command": "find . -name '*.bat'"},
+            "command": "find . -name '*.bat'",
+            "output_format": {"bat_files": "list"}
+        }
+
+        tool_result = {
+            "success": True,
+            "result": "",
+            "stdout": "",
+            "stderr": None,
+            "raw_stdout": "",
+            "raw_stderr": None,
+            "exit_code": 0,
+            "output_preview": "",
+            "error": None,
+            "latency_ms": 5
+        }
+
+        with patch.object(self.orchestrator, "_call_agent_b", return_value=agent_b_payload), \
+             patch.object(self.orchestrator, "tool_executor") as mock_executor:
+            mock_executor.execute.return_value = tool_result
+
+            summary = self.orchestrator._execute_plan(
+                cycle_id=cycle_id,
+                query="any bat files?",
+                plan=plan
+            )
+
+        fallback = summary["output_values"]["bat_files"]
+        self.assertIn("Tool run_command", fallback)
+        self.assertIn("find . -name '*.bat'", fallback)
+        self.assertTrue(summary["output_value_sources"]["bat_files"]["no_output"])
+        self.assertEqual(summary["output_value_types"]["bat_files"], "list")
+
     def test_agent_a_context_includes_recent_history(self):
         """Agent A context message lists up to five prior exchanges in newest-first order."""
         for idx in range(1, 6):

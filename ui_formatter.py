@@ -301,18 +301,21 @@ class UIFormatter:
         value_types = execution_result.get("output_value_types") or {}
 
         fmt = (value_types.get(key) or "").strip().lower()
+        source = value_sources.get(key) or {}
+        no_output_flag = bool(source.get("no_output"))
 
         inline_value: Optional[str] = None
         value = output_values.get(key)
-        if fmt in {"int", "float", "str", ""}:
+        if no_output_flag:
+            inline_value = str(value) if value is not None else ""
+        elif fmt in {"int", "float", "str", ""}:
             if value is not None:
                 inline_value = str(value)
         elif value is None and key not in value_sources:
             inline_value = f"[missing:{key}]"
 
         block_renderables: List[Any] = []
-        if key not in rendered_blocks:
-            source = value_sources.get(key)
+        if key not in rendered_blocks and not no_output_flag:
             block_tag, block_payload = self._resolve_block_payload(
                 fmt=fmt,
                 output_value=str(value) if value is not None else None,

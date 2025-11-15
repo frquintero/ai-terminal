@@ -24,7 +24,6 @@ class ShellIntegration:
         self._start_marker = f"__AI_START_{self._token}__"
         self._end_marker = f"__AI_END_{self._token}__"
         self._sudo_prompt = f"__AI_SUDO_{self._token}__"
-        
         self.shell = None
         self.isolation_requested = os.getenv("SANDBOX_ENABLE_ISOLATION") == "1"
         self.isolation_enabled = False
@@ -32,6 +31,9 @@ class ShellIntegration:
         self.rootfs_sha256: Optional[str] = None
         self.rootfs_path: Optional[Path] = None
         self.last_exit_code: Optional[int] = None  # Track last command exit code
+        self.last_command_raw_output: str = ""
+        self.last_command_normalized_output: str = ""
+        self.last_command_output_empty: bool = False
         
         # Set initial directory to working_dir if provided, otherwise home
         if working_dir and os.path.isdir(working_dir):
@@ -329,7 +331,12 @@ class ShellIntegration:
                     pass  # Non-critical if we already got the output
                 
                 # Normalize and clean the output
-                output = self._normalize_output(raw_output)
+                normalized_output = self._normalize_output(raw_output)
+                self.last_command_raw_output = raw_output or ""
+                self.last_command_normalized_output = normalized_output
+                self.last_command_output_empty = normalized_output.strip() == ""
+                
+                output = normalized_output
                 
                 # If command failed, include exit code info
                 if exit_code != 0 and output:
@@ -337,7 +344,7 @@ class ShellIntegration:
                 elif exit_code != 0:
                     output = f"Command failed with exit code {exit_code}"
                 
-                return output if output else "Command executed successfully."
+                return output
                 
             except pexpect.TIMEOUT:
                 # Try Ctrl-C recovery before hard reset

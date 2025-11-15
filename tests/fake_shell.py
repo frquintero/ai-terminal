@@ -18,6 +18,9 @@ class FakeShellIntegration:
         self.rootfs_sha256 = None
         self.rootfs_path = None
         self.last_exit_code = None
+        self.last_command_raw_output = ""
+        self.last_command_normalized_output = ""
+        self.last_command_output_empty = False
 
     def run_command(self, command: str, timeout: int = 60, reset_dir: str | None = None) -> str:
         """
@@ -38,22 +41,30 @@ class FakeShellIntegration:
             self._record_exit_code(124)
             if reset_dir:
                 self.current_dir = reset_dir
+            self.last_command_raw_output = ""
+            self.last_command_normalized_output = ""
+            self.last_command_output_empty = True
             return "Command timed out."
 
-        output = (completed.stdout or "").strip()
-        stderr = (completed.stderr or "").strip()
-        if stderr:
-            output = f"{output}\n{stderr}".strip()
-        if completed.returncode != 0:
-            if output:
-                output = f"{output}\n[Exit code: {completed.returncode}]"
-            else:
-                output = f"Command failed with exit code {completed.returncode}"
+        stdout_text = (completed.stdout or "").strip()
+        stderr_text = (completed.stderr or "").strip()
+        merged_output = "\n".join(
+            part for part in (stdout_text, stderr_text) if part
+        ).strip()
+        self.last_command_raw_output = merged_output
+        self.last_command_normalized_output = merged_output
+        self.last_command_output_empty = merged_output == ""
+        if completed.returncode != 0 and merged_output:
+            output = f"{merged_output}\n[Exit code: {completed.returncode}]"
+        elif completed.returncode != 0:
+            output = f"Command failed with exit code {completed.returncode}"
+        else:
+            output = merged_output
 
         self._record_exit_code(completed.returncode)
         if reset_dir:
             self.current_dir = reset_dir
-        return output or "Command executed successfully."
+        return output
 
     def get_current_dir(self) -> str:
         return self.current_dir
