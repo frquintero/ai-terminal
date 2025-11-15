@@ -365,6 +365,54 @@ class TestOrchestratorIntegration(unittest.TestCase):
         self.assertEqual(result.route, Route.PLANNER.value)
         self.assertEqual(result.agent_response, "Files: main.py")
 
+    @patch("orchestrator.orchestrator.LLMClient")
+    def test_planner_success_persists_chat_history(self, mock_llm_client):
+        """Successful planner runs store the final narration for future context."""
+        plan_dict = {
+            "response_type": "execution_plan",
+            "steps": [
+                {
+                    "id": 0,
+                    "tool_name": "run_command",
+                    "description": "List files",
+                    "output_keys": ["files"],
+                    "intent": "List files"
+                }
+            ],
+            "narration_template": "Files: {files}"
+        }
+        mock_llm_client.return_value.call.return_value = {
+            "error": None,
+            "message": SimpleNamespace(content=json.dumps(plan_dict))
+        }
+
+        cycle_id = self.memory.create_cycle(
+            session_id=self.orchestrator.session_id,
+            query="list files"
+        )
+
+        with patch.object(PlanValidator, "validate_with_hints", return_value=(plan_dict, None)), \
+             patch.object(Orchestrator, "_execute_plan", return_value={
+                 "success": True,
+                 "output_values": {"files": "main.py"},
+                 "output_value_types": {"files": "list"},
+                 "output_value_sources": {},
+                 "step_results": []
+             }), \
+             patch.object(Orchestrator, "_render_narration_template", return_value=("Files: main.py", [{"type": "text", "content": "Files: main.py"}])), \
+             patch.object(self.orchestrator.memory, "save_chat_exchange") as mock_save_chat:
+            self.orchestrator._run_agent_a_cycle(
+                cycle_id=cycle_id,
+                query="list files"
+            )
+
+        mock_save_chat.assert_called_once_with(
+            session_id=self.orchestrator.session_id,
+            cycle_id=cycle_id,
+            user_query="list files",
+            agent_response="Files: main.py"
+        )
+
 
 class TestAgentBOutputFormatValidation(unittest.TestCase):
     """Unit tests for Agent B payload normalization."""

@@ -568,6 +568,12 @@ Success: {success}
                         f"{execution_result.get('output_values', {})}"
                     )
                     response_segments = [{"type": "text", "content": final_response}]
+                self.memory.save_chat_exchange(
+                    session_id=self.session_id,
+                    cycle_id=cycle_id,
+                    user_query=query,
+                    agent_response=final_response
+                )
             else:
                 self._emit_status(
                     "preparing_response",
