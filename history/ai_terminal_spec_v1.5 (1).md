@@ -174,10 +174,15 @@ Each new cycle displays its **own unique ID**.
 
 ---
 
-## 9. Extensibility
+## 9. Empty Tool Output Narration
+
+- When a tool step succeeds but emits no stdout/stderr, the orchestrator inserts a plain-text sentence summarizing the tool and command, e.g., `Tool run_command (command: find . -type f -name '*.bat') completed with no output, which I interpret as zero results for "Search the workspace for BAT files".`
+- These sentences always appear **inline** (no fenced block) so the response stays readable.
+- The REPL never fabricates placeholder strings like “Command executed successfully.”; the inline summary is the only text users see for that placeholder.
+
+## 10. Extensibility
 
 New sub-block types may be added if:
 - They remain fenced blocks  
 - They appear inside the AI response  
 - They maintain backward compatibility
-

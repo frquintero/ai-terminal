@@ -82,6 +82,7 @@ Migration/testing checklist:
 
 - **Status: ✅** ToolExecutor now emits stdout/stderr/raw previews, `memory.step_outputs` stores structured blobs + `parsed_outputs`, `orchestrator/output_parser.py` materializes Agent B’s `output_format`, and template hydration is covered by parser + orchestrator tests.
 - **REPL rendering: ✅** The REPL keeps Agent A’s narration as plain text, replaces placeholders inline, and only emits fenced blocks (```output```, ```json```, ```md```, language fences) when a step returns structured stdout—exactly as mandated in `history/ai_terminal_spec_v1.5 (1).md`. No command headers or duplicate “stdout” labels are injected.
+- **Zero-output narration: ✅** Shell integrations now preserve truly empty stdout instead of returning “Command executed successfully,” and the orchestrator replaces those placeholders with an explicit message (`Tool run_command (command: …) completed with no output…`) so Agent A’s narration stays coherent without phantom data. The REPL detects the `no_output` flag and keeps the whole response inline (no redundant ANSI blocks).
 
 Migration/testing checklist:
 - Add golden-output tests that compare hydrated narrations versus templates for combinations of `int`, `list`, and `raw`.
