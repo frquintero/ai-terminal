@@ -7,6 +7,7 @@ direct responses or structured plans that Agent B executes.
 """
 
 import os
+import re
 import time
 import uuid
 from string import Formatter
@@ -380,21 +381,7 @@ Success: {success}
         system_prompt = system_context + "\n\n" + get_agent_a_prompt(available_tools)
         
         # Build context for Agent A: include last 3 chat interactions (Chat→Planner handoff)
-        context_msg = query
-        
-        chat_history = self.memory.get_chat_history(
-            session_id=self.session_id,
-            last_n=3
-        )
-        
-        if chat_history:
-            # Prepend previous chat context to help Agent A understand user intent
-            context_lines = ["Context from previous conversation:"]
-            for exchange in chat_history:
-                context_lines.append(f"User: {exchange['user_query']}")
-                context_lines.append(f"Assistant: {exchange['agent_response']}")
-            context_lines.append(f"\nNow, the user asks: {query}")
-            context_msg = "\n".join(context_lines)
+        context_msg = self._build_agent_a_context_message(query)
         
         # Retry loop
         messages = [
@@ -490,9 +477,9 @@ Success: {success}
                 "preparing_response",
                 {"route": "PLANNER", "direct_response": True}
             )
-            return OrchestratorResult(
-                cycle_id=cycle_id,
-                route=Route.CHAT.value,
+        return OrchestratorResult(
+            cycle_id=cycle_id,
+            route=Route.CHAT.value,
                 query=query,
                 agent_response=agent_response,
                 execution_result=None,
@@ -1251,6 +1238,58 @@ Step Results Summary:
         if missing:
             raise KeyError(missing[0])
         return template.format(**output_values), segments
+
+    def _build_agent_a_context_message(self, query: str) -> str:
+        """Construct the context message for Agent A with recent conversations."""
+        history = self.memory.get_chat_history(
+            session_id=self.session_id,
+            last_n=5
+        )
+        current_intent = self._normalize_intent_text(query)
+        if not history:
+            return f"Current intent: {current_intent}"
+
+        header = (
+            "These are the previous conversations with the user (newest to oldest)."
+        )
+        lines = [header]
+        ordered_history = sorted(
+            history,
+            key=lambda entry: (
+                entry.get("timestamp") or "",
+                entry.get("id", 0)
+            ),
+            reverse=True
+        )
+        for idx, exchange in enumerate(ordered_history, 1):
+            intent = self._normalize_intent_text(exchange.get("user_query", ""))
+            timestamp = exchange.get("timestamp", "unknown time")
+            cycle_id = exchange.get("cycle_id", "unknown-cycle")
+            response = self._sanitize_history_response(exchange.get("agent_response"))
+            lines.append(
+                f"{idx}. User query: {intent} — Cycle {cycle_id} — {timestamp}; Agent A response: {response}"
+            )
+        lines.append(f"User is now asking: {current_intent}")
+        return "\n".join(lines)
+
+    def _normalize_intent_text(self, text: Optional[str]) -> str:
+        """Normalize previous queries into an intent-style sentence."""
+        if not text:
+            return "(no intent captured)"
+        collapsed = " ".join(text.strip().split())
+        if not collapsed:
+            return "(no intent captured)"
+        if len(collapsed) == 1:
+            return collapsed.upper()
+        return collapsed[0].upper() + collapsed[1:]
+
+    def _sanitize_history_response(self, text: Optional[str]) -> str:
+        """Strip fenced blocks and condense whitespace for inline inclusion."""
+        if not text:
+            return "(no prior response captured)"
+        cleaned = text.replace("```", " ")
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned or "(no prior response captured)"
 
     def _record_step_outputs(
         self,

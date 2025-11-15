@@ -206,6 +206,27 @@ class TestOrchestratorIntegration(unittest.TestCase):
             {"files": ["main.py", "app.py", "count: 2"], "count": 2}
         )
 
+    def test_agent_a_context_includes_recent_history(self):
+        """Agent A context message lists up to five prior exchanges in newest-first order."""
+        for idx in range(1, 6):
+            cycle_id = self.memory.create_cycle(
+                session_id=self.orchestrator.session_id,
+                query=f"what is {idx}"
+            )
+            self.memory.save_chat_exchange(
+                session_id=self.orchestrator.session_id,
+                cycle_id=cycle_id,
+                user_query=f"what is {idx}",
+                agent_response=f"Answer {idx}\n```\nls\n```"
+            )
+
+        context = self.orchestrator._build_agent_a_context_message("latest request")
+
+        self.assertIn("These are the previous conversations", context)
+        self.assertIn("User is now asking: Latest request", context)
+        self.assertIn("1. User query: What is 5 — Cycle", context)
+        self.assertNotIn("```", context)
+
 
 class TestAgentBOutputFormatValidation(unittest.TestCase):
     """Unit tests for Agent B payload normalization."""

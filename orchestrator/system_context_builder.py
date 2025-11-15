@@ -34,22 +34,6 @@ class SystemContextBuilder:
     - Shell current directory (dynamic)
     """
     
-    # Database schema summary (terse, for search_db tool documentation)
-    DB_SCHEMA_SUMMARY = """
-**Central Memory Database** (logs/orchestrator.db):
-- `chat_history`: User-agent exchanges (FTS5: query, response)
-- `step_outputs`: Execution results (FTS5: intent, output_text) 
-- `task_state`: Plan tracking (status, steps)
-- `interactions`: Raw interaction logs (FTS5: user_query)
-- `router_decisions`: Route classifications
-
-**Key columns for queries**:
-- session_id: Group by session
-- cycle_id: Link tasks → steps
-- success: Filter successful/failed steps
-- created_at: Temporal filtering
-"""
-    
     def __init__(self, memory: Memory):
         """
         Initialize builder with memory access.
@@ -159,11 +143,7 @@ class SystemContextBuilder:
         if role == 'B':
             sections.append(self._build_interpreters_section(system_info))
 
-        # 5. Database schema (Agent A only - for search_db planning)
-        if role == 'A':
-            sections.append(self._build_db_schema_section())
-
-        # 6. Capabilities summary (Agent A only - for answering "can I...?" questions)
+        # 5. Capabilities summary (Agent A only - for answering "can I...?" questions)
         if role == 'A':
             sections.append(self._build_capabilities_section(system_info))
         
@@ -226,11 +206,6 @@ Each tool has a specific purpose - use the right tool for each step."""
         return f"""**Interpreters:**
 """ + "\n".join(interp_lines) + sandbox_note
     
-    def _build_db_schema_section(self) -> str:
-        """Build database schema section (Agent A only)."""
-        return f"""**Database Schema (for search_db tool):**
-{self.DB_SCHEMA_SUMMARY}"""
-    
     def _build_capabilities_section(self, system_info: Dict) -> str:
         """Build capabilities summary (Agent A only)."""
         interpreters = system_info.get('interpreters', {})
@@ -256,32 +231,21 @@ Each tool has a specific purpose - use the right tool for each step."""
         """
         Describe how the dual-agent architecture is wired so each role knows its neighbors.
         """
-        base_lines = [
-            "- User issues commands through the ai-terminal REPL.",
-            "- The Orchestrator receives each query, owns Memory, and decides which LLM role to invoke.",
-            "- Agent A (planner + narrator) designs strategies and is the only voice that addresses the user.",
+        shared_lines = [
+            "- The Orchestrator receives each query, owns Memory, and decides which role to invoke.",
             "- Agent B (command engineer) turns each Agent A step into concrete ToolExecutor commands.",
             "- ToolExecutor runs `run_command`/`run_interactive` in the sandbox and streams outputs back.",
             "- Memory (logs/orchestrator.db) records cycles, plans, Agent B calls, and parsed step outputs."
         ]
 
-        role_line = ""
         if role == "A":
-            role_line = (
-                "- You are Agent A: focus on planning + narration, never emit commands, and expect Agent B to "
-                "fulfill every tool call."
-            )
+            role_intro = "- You are Agent A: focus on planning + narration, never emit commands, and expect Agent B to fulfill every tool call."
         elif role == "B":
-            role_line = (
-                "- You are Agent B: generate commands + output schemas for ONE step at a time, never talk to the "
-                "user, and honor Agent A's declared output_keys."
-            )
+            role_intro = "- You are Agent B: generate commands + output schemas for ONE step at a time, never talk to the user, and honor Agent A's declared output_keys."
         else:
-            role_line = "- You are an orchestration helper role."
+            role_intro = "- You are an orchestration helper role."
 
-        principle_line = "- Guiding principles: In AI we trust. Remove obsolete/deprecated paths. Balance brevity with the best possible response."
-
-        lines = "\n".join(base_lines + [role_line, principle_line])
+        lines = "\n".join([role_intro] + shared_lines)
         return f"""**Architecture Snapshot:**
 {lines}"""
     
