@@ -98,11 +98,39 @@ def migrate_v3_to_v4(conn: sqlite3.Connection):
     conn.commit()
 
 
+def migrate_v4_to_v5(conn: sqlite3.Connection):
+    """Add cycle_failures table for unsuccessful cycle snapshots."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cycle_failures (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cycle_id TEXT NOT NULL UNIQUE,
+            session_id TEXT,
+            query_text TEXT,
+            route TEXT,
+            stage TEXT,
+            error_type TEXT,
+            error_message TEXT NOT NULL,
+            payload_json TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cycle_failures_created_at
+        ON cycle_failures(created_at DESC)
+        """
+    )
+    conn.commit()
+
+
 # Registry of all migrations (version, description, migration function)
 MIGRATIONS: List[Migration] = [
     (2, "Expand step_outputs for structured outputs", migrate_v1_to_v2),
     (3, "Create metrics tables in unified schema", migrate_v2_to_v3),
     (4, "Swap route_metrics for route-less cycle_metrics", migrate_v3_to_v4),
+    (5, "Add cycle_failures table for unsuccessful cycles", migrate_v4_to_v5),
 ]
 
 
@@ -164,6 +192,7 @@ def verify_schema(conn: sqlite3.Connection) -> bool:
         'schema_version',
         'sessions',
         'router_decisions',
+        'cycle_failures',
         'intention_cache',
         'intention_cache_fts',
         'interactions',
@@ -215,7 +244,8 @@ def verify_schema(conn: sqlite3.Connection) -> bool:
         'idx_router_decisions_cycle_id',
         'idx_interactions_cycle_id',
         'idx_task_state_cycle_id',
-        'idx_chat_history_session_id'
+        'idx_chat_history_session_id',
+        'idx_cycle_failures_created_at'
     ]
     
     missing_indexes = set(required_indexes) - set(indexes)

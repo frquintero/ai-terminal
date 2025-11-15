@@ -62,7 +62,7 @@ class TestMemorySchema:
     def test_schema_version(self, memory):
         """Verify schema version is tracked."""
         version = get_schema_version(memory.conn)
-        assert version == 3
+        assert version == 5
     
     def test_foreign_keys_enabled(self, memory):
         """Verify foreign key constraints are enabled."""
@@ -561,6 +561,56 @@ class TestCycleTransactions:
                 raise RuntimeError("fail after writes")
 
         assert memory.get_router_decision(cycle_id) is None
+
+
+class TestCycleFailures:
+    """Ensure failure snapshots persist outside success tables."""
+
+    def test_record_cycle_failure_persists_after_rollback(self, memory):
+        session_id = 'failure-session'
+        memory.create_session(session_id, 'gpt-4')
+
+        with memory.cycle_transaction():
+            cycle_id = memory.create_cycle(session_id, 'bad query')
+            # Exit scope without commit -> router_decisions row rolled back
+
+        assert memory.get_router_decision(cycle_id) is None
+
+        memory.record_cycle_failure(
+            cycle_id=cycle_id,
+            session_id=session_id,
+            query_text='bad query',
+            route='PLANNER',
+            stage='orchestrator',
+            error_type='RuntimeError',
+            error_message='Boom',
+            payload={'detail': 'trace'}
+        )
+
+        failure = memory.get_cycle_failure(cycle_id)
+        assert failure is not None
+        assert failure['cycle_id'] == cycle_id
+        assert failure['stage'] == 'orchestrator'
+        assert failure['payload']['detail'] == 'trace'
+
+    def test_delete_cycle_clears_failure_snapshot(self, memory):
+        session_id = 'failure-session-2'
+        memory.create_session(session_id, 'gpt-4')
+        cycle_id = memory.create_cycle(session_id, 'bad query')
+        memory.record_cycle_failure(
+            cycle_id=cycle_id,
+            session_id=session_id,
+            query_text='bad query',
+            route='PLANNER',
+            stage='orchestrator',
+            error_type='RuntimeError',
+            error_message='Boom'
+        )
+
+        assert memory.get_cycle_failure(cycle_id) is not None
+
+        memory.delete_cycle(cycle_id)
+        assert memory.get_cycle_failure(cycle_id) is None
 
 
 class TestMetricsRecording:

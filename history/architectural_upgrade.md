@@ -93,6 +93,7 @@ Migration/testing checklist:
    - Introduce `plans` (steps + narration template), `step_calls` (Agent B metadata), and richer `step_outputs`.
    - Ensure `chat_history` now reflects only direct `response`-type replies from Agent A (no Agent C echoes).
    - **Status: ✅** Enforce “success-only” retention via `Memory.cycle_transaction()` so failed cycles roll back automatically, and expose a purge utility for clean snapshots before upgrades.
+   - **Status: ✅** Add `cycle_failures` table + `Memory.record_cycle_failure` so unsuccessful runs are snapshotted outside the main transaction for debugging/telemetry.
 2. Revise metrics (`RouteMetrics`, `LLMMetrics`) to track Agent A/B latency, success/failure counts, retries, and parsing errors instead of route hit-rates.
 3. Ensure the unified SQLite schema keeps backward compatibility or offers a migration path that rewrites old sessions into the new format.
 4. Update Memory import/export routines so bd issues and orchestration history stay aligned after schema changes.

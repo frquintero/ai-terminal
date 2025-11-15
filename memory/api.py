@@ -308,7 +308,8 @@ class Memory:
             "llm_traces",
             "task_state",
             "step_outputs",
-            "chat_history"
+            "chat_history",
+            "cycle_failures"
         ]
         
         with self._lock:
@@ -326,6 +327,86 @@ class Memory:
             except sqlite3.Error:
                 self.conn.rollback()
                 raise
+
+    def record_cycle_failure(
+        self,
+        *,
+        cycle_id: str,
+        session_id: str,
+        query_text: str,
+        route: Optional[str],
+        stage: Optional[str],
+        error_type: Optional[str],
+        error_message: str,
+        payload: Optional[Dict[str, Any]] = None
+    ):
+        """
+        Persist failure snapshot outside the success-only transaction tables.
+        """
+        payload_json = json.dumps(payload) if payload is not None else None
+        self.conn.execute(
+            """
+            INSERT INTO cycle_failures (
+                cycle_id,
+                session_id,
+                query_text,
+                route,
+                stage,
+                error_type,
+                error_message,
+                payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(cycle_id) DO UPDATE SET
+                session_id=excluded.session_id,
+                query_text=excluded.query_text,
+                route=excluded.route,
+                stage=excluded.stage,
+                error_type=excluded.error_type,
+                error_message=excluded.error_message,
+                payload_json=excluded.payload_json
+            """,
+            (
+                cycle_id,
+                session_id,
+                query_text,
+                route,
+                stage,
+                error_type,
+                error_message,
+                payload_json
+            )
+        )
+        self._commit_or_defer()
+
+    def get_cycle_failure(self, cycle_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve logged failure details for debugging.
+        """
+        cursor = self.conn.execute(
+            """
+            SELECT cycle_id, session_id, query_text, route, stage,
+                   error_type, error_message, payload_json, created_at
+            FROM cycle_failures
+            WHERE cycle_id = ?
+            """,
+            (cycle_id,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+
+        return {
+            "cycle_id": row[0],
+            "session_id": row[1],
+            "query_text": row[2],
+            "route": row[3],
+            "stage": row[4],
+            "error_type": row[5],
+            "error_message": row[6],
+            "payload": json.loads(row[7]) if row[7] else None,
+            "created_at": row[8]
+        }
     
     def purge_all_data(
         self,
@@ -345,7 +426,8 @@ class Memory:
             "task_state",
             "step_outputs",
             "chat_history",
-            "router_decisions"
+            "router_decisions",
+            "cycle_failures"
         ]
         
         with self._lock:

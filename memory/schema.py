@@ -12,7 +12,7 @@ from typing import Optional
 
 DEFAULT_DB_PATH = Path("logs/orchestrator.db")
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 CREATE_TABLES = """
 -- Schema version tracking
@@ -44,6 +44,23 @@ CREATE TABLE IF NOT EXISTS router_decisions (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (session_id) REFERENCES sessions(session_id)
 );
+
+-- Failure snapshots (only unsuccessful cycles)
+CREATE TABLE IF NOT EXISTS cycle_failures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle_id TEXT NOT NULL UNIQUE,
+    session_id TEXT,
+    query_text TEXT,
+    route TEXT,
+    stage TEXT,
+    error_type TEXT,
+    error_message TEXT NOT NULL,
+    payload_json TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_cycle_failures_created_at
+    ON cycle_failures(created_at DESC);
 
 -- Intention cache (for CACHED route zero-LLM execution)
 CREATE TABLE IF NOT EXISTS intention_cache (

@@ -9,6 +9,7 @@ direct responses or structured plans that Agent B executes.
 import os
 import re
 import time
+import traceback
 import uuid
 from string import Formatter
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -178,6 +179,8 @@ class Orchestrator:
         route_value: str = Route.PLANNER.value
         cycle_id: Optional[str] = None
         session_activity_needed = False
+        cycle_success = False
+        failure_context: Optional[Dict[str, Any]] = None
 
         with self.memory.cycle_transaction() as txn:
             cycle_id = self.memory.create_cycle(
@@ -210,8 +213,20 @@ class Orchestrator:
 
                 session_activity_needed = True
 
-                if self._cycle_succeeded(route_value, result):
+                cycle_success = self._cycle_succeeded(route_value, result)
+
+                if cycle_success:
                     txn.commit()
+                else:
+                    failure_context = {
+                        "stage": "execution",
+                        "error_type": "CycleFailure",
+                        "error_message": result.error or "Cycle marked unsuccessful",
+                        "payload": {
+                            "execution_result": result.execution_result,
+                            "agent_response": result.agent_response
+                        }
+                    }
 
             except Exception as e:
                 latency_ms = int((time.time() - start_time) * 1000)
@@ -233,9 +248,35 @@ class Orchestrator:
                     error=str(e),
                     response_segments=[{"type": "text", "content": agent_response}]
                 )
+                failure_context = {
+                    "stage": "orchestrator",
+                    "error_type": e.__class__.__name__,
+                    "error_message": error_msg,
+                    "payload": {
+                        "traceback": traceback.format_exc()
+                    }
+                }
+                cycle_success = False
 
         if session_activity_needed:
             self.memory.update_session_activity(self.session_id)
+
+        if not cycle_success and cycle_id:
+            if failure_context is None:
+                failure_context = {
+                    "stage": "execution",
+                    "error_type": "CycleFailure",
+                    "error_message": result.error if result else "Cycle failed",
+                    "payload": {
+                        "execution_result": getattr(result, "execution_result", None)
+                    }
+                }
+            self._record_cycle_failure(
+                cycle_id=cycle_id,
+                query=query,
+                route_value=route_value,
+                failure_context=failure_context
+            )
 
         return result
 
@@ -477,9 +518,9 @@ Success: {success}
                 "preparing_response",
                 {"route": "PLANNER", "direct_response": True}
             )
-        return OrchestratorResult(
-            cycle_id=cycle_id,
-            route=Route.CHAT.value,
+            return OrchestratorResult(
+                cycle_id=cycle_id,
+                route=Route.CHAT.value,
                 query=query,
                 agent_response=agent_response,
                 execution_result=None,
@@ -1389,3 +1430,27 @@ Step Results Summary:
     def close(self):
         """Clean up resources"""
         self.memory.close(force=True)
+
+    def _record_cycle_failure(
+        self,
+        *,
+        cycle_id: str,
+        query: str,
+        route_value: str,
+        failure_context: Dict[str, Any]
+    ) -> None:
+        """Persist an unsuccessful cycle snapshot for debugging."""
+        try:
+            self.memory.record_cycle_failure(
+                cycle_id=cycle_id,
+                session_id=self.session_id,
+                query_text=query,
+                route=route_value,
+                stage=failure_context.get("stage"),
+                error_type=failure_context.get("error_type"),
+                error_message=failure_context.get("error_message") or "Cycle failed",
+                payload=failure_context.get("payload")
+            )
+        except Exception:
+            # Never let failure logging explode user experience
+            pass

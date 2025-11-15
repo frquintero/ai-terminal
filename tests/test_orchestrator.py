@@ -5,17 +5,22 @@ Focuses on Agent A prompts, Agent B normalization, plan execution, and
 handle_query bookkeeping without legacy CHAT/SHELL/CACHED branches.
 """
 
+import json
 import os
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import Mock, patch
+
+from types import SimpleNamespace
 
 import pytest
 
 from config import Config
 from memory.api import Memory
 from orchestrator.orchestrator import Orchestrator, OrchestratorResult
+from orchestrator.plan_validator import PlanValidator
 from orchestrator.prompts import (
     get_agent_a_narrator_prompt,
     get_agent_a_summarizer_prompt,
@@ -226,6 +231,83 @@ class TestOrchestratorIntegration(unittest.TestCase):
         self.assertIn("User is now asking: Latest request", context)
         self.assertIn("1. User query: What is 5 — Cycle", context)
         self.assertNotIn("```", context)
+
+    def test_exception_logs_failure_snapshot(self):
+        """Failures triggered by exceptions are persisted to cycle_failures."""
+        with patch.object(self.orchestrator, "_run_agent_a_cycle", side_effect=RuntimeError("boom")), \
+             patch.object(self.orchestrator, "_call_agent_a_narrator", return_value="fallback"):
+            result = self.orchestrator.handle_query("boom")
+
+        self.assertIsNotNone(result.error)
+        failure = self.memory.get_cycle_failure(result.cycle_id)
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure["error_type"], "RuntimeError")
+        self.assertEqual(failure["stage"], "orchestrator")
+
+    def test_unsuccessful_execution_logs_failure_snapshot(self):
+        """Planner cycles that finish with success=False are logged."""
+        failure_result = OrchestratorResult(
+            cycle_id="placeholder",
+            route=Route.PLANNER.value,
+            query="count files",
+            agent_response="Could not finish plan",
+            execution_result={"success": False, "error": "tool failed"},
+            error="Plan execution failed"
+        )
+
+        with patch.object(self.orchestrator, "_run_agent_a_cycle", return_value=failure_result):
+            result = self.orchestrator.handle_query("count files")
+
+        failure = self.memory.get_cycle_failure(result.cycle_id)
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure["stage"], "execution")
+        self.assertEqual(failure["error_type"], "CycleFailure")
+        self.assertIn("tool failed", failure["payload"]["execution_result"]["error"])
+
+    @patch("orchestrator.orchestrator.LLMClient")
+    def test_execution_plan_path_does_not_exit_early(self, mock_llm_client):
+        """Ensure execution-plan responses proceed without touching undefined agent_response."""
+        # Fake LLM returning a simple execution plan
+        plan_dict = {
+            "response_type": "execution_plan",
+            "steps": [
+                {
+                    "id": 0,
+                    "tool_name": "run_command",
+                    "description": "List files",
+                    "output_keys": ["files"],
+                    "intent": "List files"
+                }
+            ],
+            "narration_template": "Files: {files}"
+        }
+        mock_llm_client.return_value.call.return_value = {
+            "error": None,
+            "message": SimpleNamespace(content=json.dumps(plan_dict))
+        }
+
+        # Validator should accept our fake plan
+        cycle_id = self.memory.create_cycle(
+            session_id=self.orchestrator.session_id,
+            query="list files"
+        )
+
+        with patch.object(PlanValidator, "validate_with_hints", return_value=(plan_dict, None)), \
+             patch.object(Orchestrator, "_execute_plan", return_value={
+                 "success": True,
+                 "output_values": {"files": "main.py"},
+                 "output_value_types": {"files": "list"},
+                 "output_value_sources": {},
+                 "step_results": []
+             }), \
+             patch.object(Orchestrator, "_render_narration_template", return_value=("Files: main.py", [{"type": "text", "content": "Files: main.py"}])):
+            result = self.orchestrator._run_agent_a_cycle(
+                cycle_id=cycle_id,
+                query="list files"
+            )
+
+        self.assertEqual(result.route, Route.PLANNER.value)
+        self.assertEqual(result.agent_response, "Files: main.py")
 
 
 class TestAgentBOutputFormatValidation(unittest.TestCase):
