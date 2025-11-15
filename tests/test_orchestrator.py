@@ -285,7 +285,8 @@ class TestOrchestratorIntegration(unittest.TestCase):
 
         self.assertIn("These are the previous conversations", context)
         self.assertIn("User is now asking: Latest request", context)
-        self.assertIn("1. User query: What is 5 — Cycle", context)
+        self.assertIn("1. User query: What is 1 — Cycle", context)
+        self.assertIn("5. User query: What is 5 — Cycle", context)
         self.assertNotIn("```", context)
 
     def test_exception_logs_failure_snapshot(self):

@@ -1311,7 +1311,7 @@ Step Results Summary:
             return f"Current intent: {current_intent}"
 
         header = (
-            "These are the previous conversations with the user (newest to oldest)."
+            "These are the previous conversations with the user (oldest to newest)."
         )
         lines = [header]
         ordered_history = sorted(
@@ -1319,8 +1319,7 @@ Step Results Summary:
             key=lambda entry: (
                 entry.get("timestamp") or "",
                 entry.get("id", 0)
-            ),
-            reverse=True
+            )
         )
         for idx, exchange in enumerate(ordered_history, 1):
             intent = self._normalize_intent_text(exchange.get("user_query", ""))
