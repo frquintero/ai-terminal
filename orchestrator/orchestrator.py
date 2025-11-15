@@ -10,7 +10,7 @@ import os
 import time
 import uuid
 from string import Formatter
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from config import Config
 from llm_client import LLMClient
@@ -37,7 +37,8 @@ class OrchestratorResult:
         agent_response: str,
         execution_result: Optional[Dict[str, Any]] = None,
         latency_ms: int = 0,
-        error: Optional[str] = None
+        error: Optional[str] = None,
+        response_segments: Optional[List[Dict[str, Any]]] = None
     ):
         self.cycle_id = cycle_id
         self.route = route
@@ -46,6 +47,7 @@ class OrchestratorResult:
         self.execution_result = execution_result
         self.latency_ms = latency_ms
         self.error = error
+        self.response_segments = response_segments
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dict for testing/logging"""
@@ -56,7 +58,8 @@ class OrchestratorResult:
             "agent_response": self.agent_response,
             "execution_result": self.execution_result,
             "latency_ms": self.latency_ms,
-            "error": self.error
+            "error": self.error,
+            "response_segments": self.response_segments
         }
 
 
@@ -226,7 +229,8 @@ class Orchestrator:
                     query=query,
                     agent_response=agent_response,
                     latency_ms=latency_ms,
-                    error=str(e)
+                    error=str(e),
+                    response_segments=[{"type": "text", "content": agent_response}]
                 )
 
         if session_activity_needed:
@@ -465,7 +469,8 @@ Success: {success}
                 route=Route.PLANNER.value,
                 query=query,
                 agent_response=agent_response,
-                error=last_error
+                error=last_error,
+                response_segments=[{"type": "text", "content": agent_response}]
             )
         
         # Detect response type and handle accordingly
@@ -473,6 +478,7 @@ Success: {success}
         
         if response_type == "response":
             agent_response = response["response"]
+            response_segments = [{"type": "text", "content": agent_response}]
             # Treat as final answer without tool execution
             self.memory.save_chat_exchange(
                 session_id=self.session_id,
@@ -489,7 +495,8 @@ Success: {success}
                 route=Route.CHAT.value,
                 query=query,
                 agent_response=agent_response,
-                execution_result=None
+                execution_result=None,
+                response_segments=response_segments
             )
         
         if response_type != "execution_plan":
@@ -520,10 +527,11 @@ Success: {success}
                         "preparing_response",
                         {"route": "PLANNER", "success": True}
                     )
-                    final_response = self._render_narration_template(
+                    final_response, response_segments = self._render_narration_template(
                         template=plan["narration_template"],
                         output_values=execution_result.get("output_values", {})
                     )
+                    execution_result["narration_segments"] = response_segments
                 except KeyError as e:
                     final_response = (
                         "[Template rendering failed: "
@@ -531,6 +539,7 @@ Success: {success}
                         "Raw outputs:\n"
                         f"{execution_result.get('output_values', {})}"
                     )
+                    response_segments = [{"type": "text", "content": final_response}]
             else:
                 self._emit_status(
                     "preparing_response",
@@ -542,13 +551,17 @@ Success: {success}
                     plan=plan,
                     execution_result=execution_result
                 )
+                response_segments = [{"type": "text", "content": final_response}]
+
+            execution_result["narration_segments"] = response_segments
             
             return OrchestratorResult(
                 cycle_id=cycle_id,
                 route=Route.PLANNER.value,
                 query=query,
                 agent_response=final_response,
-                execution_result=execution_result
+                execution_result=execution_result,
+                response_segments=response_segments
             )
         
         except Exception as e:
@@ -573,7 +586,8 @@ Success: {success}
                 route=Route.PLANNER.value,
                 query=query,
                 agent_response=agent_response,
-                error=str(e)
+                error=str(e),
+                response_segments=[{"type": "text", "content": agent_response}]
             )
     
     def _execute_plan(
@@ -611,6 +625,8 @@ Success: {success}
         steps_completed = 0
         steps_failed = 0
         output_values: Dict[str, str] = {}
+        output_value_types: Dict[str, str] = {}
+        output_value_sources: Dict[str, Dict[str, Any]] = {}
         total_steps = len(plan["steps"])
         
         for step_id, step in enumerate(plan["steps"]):
@@ -799,11 +815,29 @@ Success: {success}
                 metrics = get_metrics()
                 metrics.record_step_metric(step_metric)
             
-            if step_success and rendered_values:
-                for key, value in rendered_values.items():
-                    output_values[key] = value
-            elif not step_output_format:
-                self._record_step_outputs(step, exec_result["result"], output_values)
+            if step_success:
+                source_metadata = self._build_output_source_metadata(
+                    step=step,
+                    step_id=step_id,
+                    description=description,
+                    tool_args=tool_args,
+                    exec_result=exec_result
+                )
+                if rendered_values:
+                    for key, value in rendered_values.items():
+                        output_values[key] = value
+                        fmt = (step_output_format or {}).get(key, "str")
+                        output_value_types[key] = fmt
+                        output_value_sources[key] = source_metadata
+                elif not step_output_format:
+                    recorded_keys = self._record_step_outputs(
+                        step=step,
+                        raw_output=exec_result.get("result"),
+                        output_values=output_values
+                    )
+                    for key in recorded_keys:
+                        output_value_types[key] = "str"
+                        output_value_sources[key] = source_metadata
             
             if step_success:
                 steps_completed += 1
@@ -818,7 +852,9 @@ Success: {success}
             "total_steps": len(plan["steps"]),
             "step_results": step_results,
             "success": steps_failed == 0,
-            "output_values": output_values
+            "output_values": output_values,
+            "output_value_types": output_value_types,
+            "output_value_sources": output_value_sources
         }
     
     def _call_agent_b(
@@ -1200,33 +1236,66 @@ Step Results Summary:
         self,
         template: str,
         output_values: Dict[str, str]
-    ) -> str:
-        """Fill narration template with collected output values."""
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """Fill narration template with collected output values and segments."""
         formatter = Formatter()
-        required_keys = {
-            field_name
-            for _, field_name, _, _ in formatter.parse(template)
-            if field_name
-        }
+        required_keys = set()
+        segments: List[Dict[str, Any]] = []
+        for literal, field_name, _, _ in formatter.parse(template):
+            if literal:
+                segments.append({"type": "text", "content": literal})
+            if field_name:
+                required_keys.add(field_name)
+                segments.append({"type": "output", "key": field_name})
         missing = [key for key in required_keys if key not in output_values]
         if missing:
             raise KeyError(missing[0])
-        return template.format(**output_values)
+        return template.format(**output_values), segments
 
     def _record_step_outputs(
         self,
         step: Dict[str, Any],
         raw_output: Optional[str],
         output_values: Dict[str, str]
-    ) -> None:
-        """Map each output key from the step to the raw output."""
+    ) -> List[str]:
+        """
+        Map each output key from the step to the raw output.
+        
+        Returns the list of keys that were populated.
+        """
         output_text = raw_output or ""
+        recorded: List[str] = []
         for key in step.get("output_keys", []):
             normalized = key.strip()
             if not normalized:
                 continue
             output_values[normalized] = output_text
-    
+            recorded.append(normalized)
+        return recorded
+
+    def _build_output_source_metadata(
+        self,
+        *,
+        step: Dict[str, Any],
+        step_id: int,
+        description: str,
+        tool_args: Dict[str, Any],
+        exec_result: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Capture metadata for output rendering in the REPL."""
+        return {
+            "step_id": step_id,
+            "tool_name": step.get("tool_name"),
+            "description": description,
+            "command": tool_args.get("command"),
+            "tool_args": tool_args,
+            "stdout": exec_result.get("stdout"),
+            "stderr": exec_result.get("stderr"),
+            "raw_stdout": exec_result.get("raw_stdout"),
+            "raw_stderr": exec_result.get("raw_stderr"),
+            "exit_code": exec_result.get("exit_code"),
+        }
+
     def _cache_execution(
         self,
         query: str,

@@ -211,13 +211,9 @@ def main():
                 finally:
                     ui.end_cycle()
 
-                # Display response
-                if result.error:
-                    ui.error(f"Error: {result.error}")
-                elif result.agent_response:
-                    # Convert latency from ms to seconds for UI
-                    elapsed_time = result.latency_ms / 1000.0 if result.latency_ms else None
-                    ui.ai_response(result.agent_response, elapsed_time, result.cycle_id)
+                # Display response (always render full cycle pane)
+                elapsed_time = result.latency_ms / 1000.0 if result.latency_ms else None
+                ui.render_cycle(query=user_input, result=result, elapsed_time=elapsed_time)
                 
                 console.print()  # Empty line for readability
 

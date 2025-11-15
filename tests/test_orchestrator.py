@@ -188,6 +188,16 @@ class TestOrchestratorIntegration(unittest.TestCase):
         self.assertEqual(summary["steps_failed"], 0)
         self.assertEqual(summary["output_values"]["files"], "main.py, app.py, count: 2")
         self.assertEqual(summary["output_values"]["count"], "2")
+        self.assertEqual(summary["output_value_types"]["files"], "list")
+        self.assertEqual(summary["output_value_types"]["count"], "int")
+        self.assertEqual(
+            summary["output_value_sources"]["files"]["command"],
+            "ls"
+        )
+        self.assertEqual(
+            summary["output_value_sources"]["count"]["tool_name"],
+            "run_command"
+        )
 
         stored_outputs = self.memory.get_step_outputs(cycle_id)
         self.assertEqual(len(stored_outputs), 1)
