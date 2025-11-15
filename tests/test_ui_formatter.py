@@ -1,4 +1,5 @@
 from ui_formatter import (
+    UIFormatter,
     infer_language_from_path,
     is_markdown_file,
     truncate_text,
@@ -34,3 +35,54 @@ def test_infer_language_from_path_respects_extension():
 def test_is_markdown_file_case_insensitive():
     assert is_markdown_file("README.MD") is True
     assert is_markdown_file("notes.txt") is False
+
+
+def test_render_output_placeholder_inlines_scalars():
+    formatter = UIFormatter()
+    execution_result = {
+        "output_values": {"count": "42"},
+        "output_value_types": {"count": "int"},
+        "output_value_sources": {}
+    }
+    rendered_blocks = set()
+
+    inline_value, blocks = formatter._render_output_placeholder(
+        key="count",
+        execution_result=execution_result,
+        rendered_blocks=rendered_blocks
+    )
+
+    assert inline_value == "42"
+    assert blocks == []
+    assert rendered_blocks == set()
+
+
+def test_render_output_placeholder_emits_output_block_for_lists():
+    formatter = UIFormatter()
+    execution_result = {
+        "output_values": {"files": "alpha.txt, beta.txt"},
+        "output_value_types": {"files": "list"},
+        "output_value_sources": {
+            "files": {
+                "tool_name": "run_command",
+                "command": "find . -name '*.txt'",
+                "stdout": "alpha.txt\nbeta.txt\n",
+                "raw_stdout": "alpha.txt\nbeta.txt\n",
+                "tool_args": {}
+            }
+        }
+    }
+    rendered_blocks = set()
+
+    inline_value, blocks = formatter._render_output_placeholder(
+        key="files",
+        execution_result=execution_result,
+        rendered_blocks=rendered_blocks
+    )
+
+    assert inline_value is None
+    assert len(blocks) == 1
+    assert "```output" in blocks[0].plain
+    assert "alpha.txt" in blocks[0].plain
+    assert "beta.txt" in blocks[0].plain
+    assert "files" in rendered_blocks

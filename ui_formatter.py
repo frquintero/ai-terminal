@@ -9,15 +9,13 @@ import os
 import time
 from pathlib import Path
 from textwrap import shorten
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from rich import box
 from rich.console import Console, Group
 from rich.live import Live
-from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.spinner import Spinner
-from rich.syntax import Syntax
 from rich.text import Text
 
 # Initialize Rich console
@@ -191,52 +189,206 @@ class UIFormatter:
         """Print info message in blue"""
         console.print(f"ℹ {message}", style="bold blue")
     
-    def ai_response(self, message: str, elapsed_time: Optional[float] = None, cycle_id: Optional[str] = None):
-        """Display AI response in a formatted panel"""
-        # Render markdown if message contains markdown syntax
-        if any(marker in message for marker in ['```', '**', '#', '-', '*', '`']):
-            content = Markdown(message)
-        else:
-            content = message
-        
-        # Add timing info if available
+    def render_cycle(
+        self,
+        *,
+        query: str,
+        result: Any,
+        elapsed_time: Optional[float] = None
+    ) -> None:
+        """Render the complete cycle (user query + narration + structured blocks)."""
+        agent_response = getattr(result, "agent_response", "")
+        segments = getattr(result, "response_segments", None) or [
+            {"type": "text", "content": agent_response}
+        ]
+        execution_result = getattr(result, "execution_result", None) or {}
+
+        renderables: List[Any] = []
+        if query:
+            renderables.append(Text("User Query:", style="bold cyan"))
+            renderables.append(Text(query))
+            renderables.append(Text(""))
+
+        narration_renderable = self._render_narration_with_segments(
+            segments=segments,
+            execution_result=execution_result
+        )
+        if narration_renderable:
+            renderables.append(Text("AI Response:", style="bold magenta"))
+            renderables.append(Text(""))
+            renderables.append(narration_renderable)
+        elif agent_response:
+            renderables.append(Text(agent_response))
+
+        content: Any = ""
+        if renderables:
+            content = Group(*renderables)
+
         title = "🤖 AI Assistant"
         if elapsed_time:
             title += f" ({elapsed_time:.2f}s)"
-        
-        # Add cycle ID as subtitle (bottom right of panel) if available
+
+        cycle_id = getattr(result, "cycle_id", None)
         subtitle = None
         if cycle_id:
             short_id = cycle_id[:8] if len(cycle_id) > 8 else cycle_id
-            subtitle = f"Cycle: {short_id}"
-        
+            subtitle = f"Cycle ID: {short_id}"
+
         panel = Panel(
             content,
             title=title,
             subtitle=subtitle,
             subtitle_align="right",
-            border_style="cyan",
+            border_style="red" if getattr(result, "error", None) else "cyan",
             box=box.ROUNDED,
             padding=(1, 2)
         )
         console.print(panel)
-    
-    def command_output(self, output: str, command: str = "", elapsed_time: Optional[float] = None):
-        """Display command output in a formatted panel"""
-        title = "📟 Output"
-        if command:
-            title = f"📟 Output: {command}"
-        if elapsed_time:
-            title += f" ({elapsed_time:.2f}s)"
-        
-        panel = Panel(
-            output.strip() if output else "[No output]",
-            title=title,
-            border_style="green",
-            box=box.ROUNDED,
-            padding=(1, 2)
-        )
-        console.print(panel)
+
+    def _render_narration_with_segments(
+        self,
+        *,
+        segments: List[Dict[str, Any]],
+        execution_result: Dict[str, Any]
+    ) -> Optional[Any]:
+        if not segments:
+            return None
+
+        renderables: List[Any] = []
+        current_text = Text()
+        rendered_blocks: Set[str] = set()
+
+        for segment in segments:
+            seg_type = segment.get("type")
+            if seg_type == "text":
+                text_value = segment.get("content", "")
+                if text_value is None:
+                    continue
+                current_text.append(text_value)
+            elif seg_type == "output":
+                inline_value, block_renderables = self._render_output_placeholder(
+                    key=segment.get("key"),
+                    execution_result=execution_result,
+                    rendered_blocks=rendered_blocks
+                )
+                if inline_value is not None:
+                    current_text.append(inline_value)
+                if block_renderables:
+                    if current_text.plain:
+                        renderables.append(current_text.copy())
+                        current_text = Text()
+                    renderables.extend(block_renderables)
+
+        if current_text.plain:
+            renderables.append(current_text)
+
+        if not renderables:
+            return None
+        return Group(*renderables)
+
+    def _render_output_placeholder(
+        self,
+        *,
+        key: Optional[str],
+        execution_result: Dict[str, Any],
+        rendered_blocks: Set[str]
+    ) -> Tuple[Optional[str], List[Any]]:
+        if not key:
+            return "", []
+
+        output_values = execution_result.get("output_values") or {}
+        value_sources = execution_result.get("output_value_sources") or {}
+        value_types = execution_result.get("output_value_types") or {}
+
+        fmt = (value_types.get(key) or "").strip().lower()
+
+        inline_value: Optional[str] = None
+        value = output_values.get(key)
+        if fmt in {"int", "float", "str", ""}:
+            if value is not None:
+                inline_value = str(value)
+        elif value is None and key not in value_sources:
+            inline_value = f"[missing:{key}]"
+
+        block_renderables: List[Any] = []
+        if key not in rendered_blocks:
+            source = value_sources.get(key)
+            block_tag, block_payload = self._resolve_block_payload(
+                fmt=fmt,
+                output_value=str(value) if value is not None else None,
+                source=source
+            )
+            if block_tag and block_payload:
+                block_renderables.append(
+                    self._build_fenced_block(block_tag, block_payload)
+                )
+
+            if block_renderables:
+                rendered_blocks.add(key)
+
+        return inline_value, block_renderables
+
+    def _resolve_block_payload(
+        self,
+        *,
+        fmt: str,
+        output_value: Optional[str],
+        source: Optional[Dict[str, Any]]
+    ) -> Tuple[Optional[str], Optional[str]]:
+        if fmt not in {"list", "raw", "table", "json"}:
+            return None, None
+
+        payload_source: Optional[str] = None
+        if source:
+            raw_stdout = source.get("raw_stdout")
+            stdout = source.get("stdout")
+            payload_source = raw_stdout if raw_stdout not in (None, "") else stdout
+
+        if not payload_source:
+            payload_source = output_value
+
+        if payload_source is None:
+            return None, None
+
+        payload_text = str(payload_source)
+
+        if fmt == "json":
+            pretty = try_pretty_json(payload_text)
+            candidate = pretty or payload_text
+            trimmed, truncated = truncate_text(
+                candidate,
+                max_chars=JSON_MAX_CHARS,
+                max_lines=MAX_PREVIEW_LINES
+            )
+            if truncated:
+                trimmed = trimmed.rstrip() + "\n[output truncated]"
+            return "json", trimmed
+
+        block_tag = "output"
+        if source and source.get("tool_name") == "read_file":
+            tool_args = source.get("tool_args") or {}
+            file_path = tool_args.get("file_path")
+            language = infer_language_from_path(file_path)
+            if language == "markdown":
+                block_tag = "md"
+            elif language:
+                block_tag = language
+
+        trimmed, truncated = truncate_text(payload_text)
+        if truncated:
+            trimmed = trimmed.rstrip() + "\n[output truncated]"
+        return block_tag, trimmed
+
+    def _build_fenced_block(self, tag: str, content: str) -> Text:
+        normalized_tag = tag or "output"
+        normalized_content = content.rstrip() if content else ""
+        block = Text()
+        block.append(f"```{normalized_tag}\n")
+        if normalized_content:
+            block.append(normalized_content)
+            block.append("\n")
+        block.append("```\n")
+        return block
     
     def step_indicator(self, current: int, total: int, description: str = ""):
         """Display step progress indicator"""
@@ -294,168 +446,6 @@ class UIFormatter:
         payload = payload or {}
         if event_type == "status":
             self.status_line.update(payload.get("phase"), payload)
-        elif event_type == "tool_output":
-            self._render_tool_output(payload)
-
-    def _render_tool_output(self, payload: dict) -> None:
-        """Render tool output as ANSI-styled panels."""
-        tool_name = payload.get("tool_name")
-        if not tool_name:
-            return
-
-        command = payload.get("command")
-        if not command:
-            tool_args = payload.get("tool_args") or {}
-            command = tool_args.get("command") or tool_args.get("file_path")
-
-        stdout = payload.get("stdout") or ""
-        stderr = payload.get("stderr") or ""
-        raw_stdout = payload.get("raw_stdout") or stdout
-        raw_stderr = payload.get("raw_stderr") or stderr
-
-        if not any((command, stdout.strip(), stderr.strip(), raw_stdout.strip(), raw_stderr.strip())):
-            return
-        total_steps = payload.get("total_steps")
-        step_id = payload.get("step_id")
-        subtitle = None
-        if total_steps and step_id is not None:
-            subtitle = f"Step {step_id + 1}/{total_steps}"
-        description = payload.get("description")
-        self.render_command_panel(
-            tool_name=tool_name,
-            command=command,
-            stdout=stdout,
-            raw_stdout=raw_stdout,
-            stderr=stderr,
-            raw_stderr=raw_stderr,
-            success=payload.get("success", False),
-            subtitle=subtitle,
-            description=description,
-            tool_args=payload.get("tool_args") or {}
-        )
-
-    def render_command_panel(
-        self,
-        *,
-        tool_name: Optional[str],
-        command: Optional[str],
-        stdout: Optional[str],
-        raw_stdout: Optional[str],
-        stderr: Optional[str],
-        raw_stderr: Optional[str],
-        success: bool,
-        subtitle: Optional[str] = None,
-        description: Optional[str] = None,
-        tool_args: Optional[Dict[str, Any]] = None
-    ) -> None:
-        """Render a dedicated panel for tool output."""
-        display_command = command or description or (tool_name or "Tool output")
-        title = f"🛠 {shorten(str(display_command).strip(), width=80, placeholder='…')}"
-        panel_style = "green" if success else "red"
-
-        sections = []
-        if description and description.strip() and description.strip() not in display_command:
-            meta = Text(description.strip(), style="dim")
-            sections.append(meta)
-
-        stdout_section = self._build_stdout_section(
-            tool_name=tool_name,
-            tool_args=tool_args or {},
-            stdout=stdout,
-            raw_stdout=raw_stdout
-        )
-        if stdout_section:
-            sections.append(stdout_section)
-
-        stderr_section = self._build_stderr_section(stderr=stderr, raw_stderr=raw_stderr)
-        if stderr_section:
-            sections.append(stderr_section)
-
-        if not sections:
-            sections.append(Text("[No output]", style="dim"))
-
-        body = Group(*sections) if len(sections) > 1 else sections[0]
-        panel = Panel(
-            body,
-            title=title,
-            subtitle=subtitle,
-            subtitle_align="right",
-            border_style=panel_style,
-            box=box.SQUARE,
-            padding=(1, 2)
-        )
-        console.print(panel)
-
-    def _build_stdout_section(
-        self,
-        *,
-        tool_name: Optional[str],
-        tool_args: Dict[str, Any],
-        stdout: Optional[str],
-        raw_stdout: Optional[str]
-    ) -> Optional[Group]:
-        text = raw_stdout if raw_stdout not in (None, "") else stdout
-        if not text or not text.strip():
-            return None
-        specialized = self._build_specialized_stdout_renderable(
-            tool_name=tool_name,
-            tool_args=tool_args,
-            text=text
-        )
-        label = Text("stdout:\n", style="bold green")
-        if specialized:
-            return Group(label, specialized)
-        fallback = Text.from_ansi(text.rstrip())
-        return Group(label, fallback)
-
-    def _build_specialized_stdout_renderable(
-        self,
-        *,
-        tool_name: Optional[str],
-        tool_args: Dict[str, Any],
-        text: str
-    ) -> Optional[Any]:
-        if tool_name == "read_file":
-            return self._render_file_preview(
-                file_path=tool_args.get("file_path"),
-                text=text
-            )
-        pretty_json = try_pretty_json(text)
-        if pretty_json:
-            return Syntax(pretty_json, "json", theme="monokai", word_wrap=True)
-        return None
-
-    def _render_file_preview(self, *, file_path: Optional[str], text: str) -> Optional[Any]:
-        preview, truncated = truncate_text(text)
-        if not preview:
-            return None
-        if is_markdown_file(file_path):
-            rendered = Markdown(preview)
-        else:
-            language = infer_language_from_path(file_path)
-            if language == "markdown":
-                rendered = Markdown(preview)
-            elif language:
-                rendered = Syntax(preview, language, theme="monokai", word_wrap=False)
-            else:
-                rendered = Text.from_ansi(preview)
-        if truncated:
-            notice = Text("[truncated preview]", style="dim")
-            return Group(rendered, notice)
-        return rendered
-
-    def _build_stderr_section(
-        self,
-        *,
-        stderr: Optional[str],
-        raw_stderr: Optional[str]
-    ) -> Optional[Group]:
-        text = raw_stderr if raw_stderr not in (None, "") else stderr
-        if not text or not text.strip():
-            return None
-        label = Text("stderr:\n", style="bold red")
-        body = Text.from_ansi(text.rstrip())
-        return Group(label, body)
 
     def update_status_line(self, phase: str, payload: Optional[dict] = None) -> None:
         """Compatibility shim if status updates are triggered externally."""
