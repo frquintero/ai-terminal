@@ -6,6 +6,7 @@ Every user query now enters through Agent A, which decides between
 direct responses or structured plans that Agent B executes.
 """
 
+import json
 import os
 import re
 import time
@@ -17,7 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from config import Config
 from llm_client import LLMClient
 from memory.api import Memory
-from orchestrator.prompts import get_agent_a_prompt, get_agent_b_prompt, get_agent_a_narrator_prompt, get_agent_a_summarizer_prompt
+from orchestrator.prompts import get_agent_a_system_prompt, get_agent_b_prompt
 from orchestrator.metrics import CycleMetrics, StepMetrics, LLMMetrics, get_metrics
 from orchestrator.system_context_builder import SystemContextBuilder
 from orchestrator.plan_validator import PlanValidator, PlanValidationError
@@ -231,12 +232,20 @@ class Orchestrator:
             except Exception as e:
                 latency_ms = int((time.time() - start_time) * 1000)
                 error_msg = f"Error during orchestration: {str(e)}"
-                agent_response = self._call_agent_a_narrator(
+                fallback_context = f"""The user asked: {query}
+
+A fatal orchestrator error occurred before the cycle could finish.
+
+Stage: orchestrator
+Success: False
+
+Details:
+{error_msg}
+
+Explain what happened and advise the user to retry after checking logs."""
+                agent_response = self._call_agent_a_direct_response(
                     cycle_id=cycle_id,
-                    query=query,
-                    tool_name="orchestrator",
-                    tool_output=error_msg,
-                    success=False
+                    user_context=fallback_context
                 )
 
                 result = OrchestratorResult(
@@ -320,71 +329,60 @@ class Orchestrator:
             metrics = get_metrics()
             metrics.record_cycle_metric(cycle_metric)
     
-    def _call_agent_a_narrator(
+    def _call_agent_a_direct_response(
         self,
         cycle_id: str,
-        query: str,
-        tool_name: str,
-        tool_output: str,
-        success: bool,
-        exit_code: Optional[int] = None
+        user_context: str
     ) -> str:
         """
-        Call Agent A in narrator mode to present tool results conversationally.
+        Call Agent A once with the unified system prompt and ask for a direct response.
         
         Args:
             cycle_id: Cycle ID for logging
-            query: User's original query
-            tool_name: Tool that was executed
-            tool_output: Raw tool output
-            success: Whether execution succeeded
-            exit_code: Exit code (if applicable)
+            user_context: Instructional payload describing what to explain to the user
         
         Returns:
-            Conversational response from Agent A
+            Final narration content extracted from Agent A's {"response": "..."} JSON payload
         """
-        # Build context message for Agent A
-        context = f"""User Query: {query}
-
-Tool Executed: {tool_name}
-Success: {success}
-"""
-        
-        if exit_code is not None:
-            context += f"Exit Code: {exit_code}\n"
-        
-        context += f"\nTool Output:\n{tool_output}"
-        
-        # Build system context for Agent A
+        available_tools = sorted(TOOLS.keys())
         system_context = self.context_builder.build_for_role(
             role="A",
             session_id=self.session_id,
             tool_registry=TOOLS,
             shell_cwd=self._get_effective_shell_cwd()
         )
+        system_prompt = system_context + "\n\n" + get_agent_a_system_prompt(available_tools)
+        
+        user_prompt = (
+            f"{user_context.strip()}\n\n"
+            "Respond with a direct JSON object {\"response\": \"...\"} for the user. "
+            "Do not propose a new tool plan."
+        )
         
         messages = [
-            {"role": "system", "content": system_context + "\n\n" + get_agent_a_narrator_prompt()},
-            {"role": "user", "content": context}
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
         ]
         
-        # Call LLM in Agent A role
         llm_client = LLMClient(
             config=self.config,
             role="A",
             memory=self.memory
         )
-        
-        llm_result = llm_client.call(
-            messages=messages,
-            cycle_id=cycle_id
-        )
+        llm_result = llm_client.call(messages=messages, cycle_id=cycle_id)
         
         if llm_result["error"]:
-            # Fallback to raw output if Agent A fails
-            return f"[Agent A narrator failed: {llm_result['error']}]\n\n{tool_output}"
+            return f"[Agent A response failed: {llm_result['error']}]\n\n{user_context}"
         
-        return llm_result["message"].content or tool_output
+        content = llm_result["message"].content or ""
+        try:
+            payload = json.loads(content)
+            if isinstance(payload, dict) and "response" in payload:
+                return payload["response"]
+        except json.JSONDecodeError:
+            pass
+        
+        return content or user_context
     
     def _run_agent_a_cycle(self, cycle_id: str, query: str) -> OrchestratorResult:
         """
@@ -419,7 +417,7 @@ Success: {success}
         )
         
         # Build Agent A prompt
-        system_prompt = system_context + "\n\n" + get_agent_a_prompt(available_tools)
+        system_prompt = system_context + "\n\n" + get_agent_a_system_prompt(available_tools)
         
         # Build context for Agent A: include last 3 chat interactions (Chat→Planner handoff)
         context_msg = self._build_agent_a_context_message(query)
@@ -484,12 +482,17 @@ Success: {success}
                 "preparing_response",
                 {"route": "PLANNER", "error": True}
             )
-            agent_response = self._call_agent_a_narrator(
+            fallback_context = f"""The user asked: {query}
+
+Agent A could not produce valid planner JSON after {self.MAX_PLAN_RETRIES + 1} attempts.
+
+Last validation hint:
+{last_error}
+
+Explain the failure to the user and suggest trying again."""
+            agent_response = self._call_agent_a_direct_response(
                 cycle_id=cycle_id,
-                query=query,
-                tool_name="agent_a_planner",
-                tool_output=f"Failed to generate valid response after {self.MAX_PLAN_RETRIES + 1} attempts.\n\n{last_error}",
-                success=False
+                user_context=fallback_context
             )
             
             return OrchestratorResult(
@@ -555,9 +558,10 @@ Success: {success}
                         "preparing_response",
                         {"route": "PLANNER", "success": True}
                     )
+                    template_values = self._build_template_value_map(execution_result)
                     final_response, response_segments = self._render_narration_template(
                         template=plan["narration_template"],
-                        output_values=execution_result.get("output_values", {})
+                        output_values=template_values
                     )
                     execution_result["narration_segments"] = response_segments
                 except KeyError as e:
@@ -579,11 +583,36 @@ Success: {success}
                     "preparing_response",
                     {"route": "PLANNER", "success": False}
                 )
-                final_response = self._call_agent_a_summarizer(
+                summary_lines = [
+                    f"The user asked: {query}",
+                    "",
+                    "A multi-step plan was executed but did not fully succeed.",
+                    f"Plan steps: {len(plan['steps'])}",
+                    f"Steps completed: {execution_result['steps_completed']}",
+                    f"Steps failed: {execution_result['steps_failed']}",
+                    f"Overall success flag: {execution_result['success']}",
+                    "",
+                    "Step details:"
+                ]
+                for result in execution_result["step_results"]:
+                    status = "PASS" if result["success"] else "FAIL"
+                    summary_lines.append(
+                        f"- [{status}] Step {result['step_id']}: {result['description']}"
+                    )
+                    if result["success"]:
+                        output_preview = result["output"][:200]
+                        if len(result["output"]) > 200:
+                            output_preview += "..."
+                        summary_lines.append(f"  Output preview: {output_preview}")
+                    else:
+                        summary_lines.append(f"  Error: {result['error']}")
+                summary_lines.append("")
+                summary_lines.append(
+                    "Explain the outcome to the user and mention what succeeded or failed."
+                )
+                final_response = self._call_agent_a_direct_response(
                     cycle_id=cycle_id,
-                    query=query,
-                    plan=plan,
-                    execution_result=execution_result
+                    user_context="\n".join(summary_lines)
                 )
                 response_segments = [{"type": "text", "content": final_response}]
 
@@ -607,12 +636,17 @@ Success: {success}
             )
             
             # Call Agent A to explain error
-            agent_response = self._call_agent_a_narrator(
+            error_context = f"""The user asked: {query}
+
+A failure occurred while executing the plan steps.
+
+Error:
+{str(e)}
+
+Describe the failure and tell the user what to do next."""
+            agent_response = self._call_agent_a_direct_response(
                 cycle_id=cycle_id,
-                query=query,
-                tool_name="plan_executor",
-                tool_output=f"Execution failed: {str(e)}",
-                success=False
+                user_context=error_context
             )
             
             return OrchestratorResult(
@@ -659,6 +693,7 @@ Success: {success}
         steps_completed = 0
         steps_failed = 0
         output_values: Dict[str, str] = {}
+        template_values: Dict[str, Any] = {}
         output_value_types: Dict[str, str] = {}
         output_value_sources: Dict[str, Dict[str, Any]] = {}
         total_steps = len(plan["steps"])
@@ -863,6 +898,7 @@ Success: {success}
                         fmt = (step_output_format or {}).get(key, "str")
                         final_value = value
                         source_for_key = dict(source_metadata) if source_metadata else {}
+                        typed_candidate = parsed_for_step.get(key)
                         if self._should_use_no_output_message(
                             fmt=fmt,
                             rendered_value=value,
@@ -874,9 +910,15 @@ Success: {success}
                                 tool_args=tool_args
                             )
                             source_for_key["no_output"] = True
+                            typed_value_for_template = final_value
+                        elif fmt in {"int", "float"} and typed_candidate is not None:
+                            typed_value_for_template = typed_candidate
+                        else:
+                            typed_value_for_template = final_value
                         output_values[key] = final_value
                         output_value_types[key] = fmt
                         output_value_sources[key] = source_for_key
+                        template_values[key] = typed_value_for_template
                 elif not step_output_format:
                     recorded_keys = self._record_step_outputs(
                         step=step,
@@ -886,6 +928,7 @@ Success: {success}
                     for key in recorded_keys:
                         output_value_types[key] = "str"
                         output_value_sources[key] = source_metadata
+                        template_values[key] = output_values.get(key)
             
             if step_success:
                 steps_completed += 1
@@ -901,6 +944,7 @@ Success: {success}
             "step_results": step_results,
             "success": steps_failed == 0,
             "output_values": output_values,
+            "template_values": template_values,
             "output_value_types": output_value_types,
             "output_value_sources": output_value_sources
         }
@@ -1207,83 +1251,28 @@ Success: {success}
         # Recursively substitute variables
         return substitute_in_value(result)
     
-    def _call_agent_a_summarizer(
+    def _build_template_value_map(
         self,
-        cycle_id: str,
-        query: str,
-        plan: Dict[str, Any],
-        execution_result: Dict[str, Any]
-    ) -> str:
-        """
-        Call Agent A in summarizer mode to present execution results.
-        
-        Args:
-            cycle_id: Cycle ID for logging
-            query: User's original query
-            plan: The plan that was executed
-            execution_result: Results from _execute_plan
-        
-        Returns:
-            Conversational summary from Agent A
-        """
-        # Build context for Agent A
-        context = f"""User Query: {query}
-
-Plan Executed: {len(plan['steps'])} steps
-- Steps completed: {execution_result['steps_completed']}
-- Steps failed: {execution_result['steps_failed']}
-- Overall success: {execution_result['success']}
-
-Step Results Summary:
-"""
-        
-        for result in execution_result["step_results"]:
-            status = "✓" if result["success"] else "✗"
-            context += f"\n{status} Step {result['step_id']}: {result['description']}"
-            if result["success"]:
-                # Include output preview
-                output_preview = result["output"][:200]
-                if len(result["output"]) > 200:
-                    output_preview += "..."
-                context += f"\n  Output: {output_preview}"
-            else:
-                context += f"\n  Error: {result['error']}"
-                
-        # Build system context for Agent A
-        system_context = self.context_builder.build_for_role(
-            role="A",
-            session_id=self.session_id,
-            tool_registry=TOOLS,
-            shell_cwd=self._get_effective_shell_cwd()
-        )
-        
-        messages = [
-            {"role": "system", "content": system_context + "\n\n" + get_agent_a_summarizer_prompt()},
-            {"role": "user", "content": context}
-        ]
-
-        # Call LLM in Agent A role
-        llm_client = LLMClient(
-            config=self.config,
-            role="A",
-            memory=self.memory
-        )
-        
-        llm_result = llm_client.call(
-            messages=messages,
-            cycle_id=cycle_id
-        )
-        
-        if llm_result["error"]:
-            # Fallback to raw summary if Agent A fails
-            return f"[Agent A summarizer failed: {llm_result['error']}]\n\n{context}"
-        
-        return llm_result["message"].content or context
+        execution_result: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Combine typed template values with rendered fallbacks."""
+        if not execution_result:
+            return {}
+        template_values = execution_result.get("template_values") or {}
+        rendered_values = execution_result.get("output_values") or {}
+        if not template_values:
+            return rendered_values
+        merged: Dict[str, Any] = dict(rendered_values)
+        for key, value in template_values.items():
+            if value is None and key in merged:
+                continue
+            merged[key] = value
+        return merged
 
     def _render_narration_template(
         self,
         template: str,
-        output_values: Dict[str, str]
+        output_values: Dict[str, Any]
     ) -> Tuple[str, List[Dict[str, Any]]]:
         """Fill narration template with collected output values and segments."""
         formatter = Formatter()

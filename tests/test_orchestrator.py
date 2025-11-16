@@ -21,26 +21,18 @@ from config import Config
 from memory.api import Memory
 from orchestrator.orchestrator import Orchestrator, OrchestratorResult
 from orchestrator.plan_validator import PlanValidator
-from orchestrator.prompts import (
-    get_agent_a_narrator_prompt,
-    get_agent_a_summarizer_prompt,
-)
+from orchestrator.prompts import get_agent_a_system_prompt
 from orchestrator.routes import Route
 
 
 class TestOrchestratorPrompts(unittest.TestCase):
-    """Test Agent A prompt generation modes."""
+    """Test Agent A unified system prompt."""
     
-    def test_get_agent_a_narrator_prompt(self):
-        prompt = get_agent_a_narrator_prompt()
-        self.assertIn("narrator", prompt.lower())
-        self.assertIn("conversational", prompt.lower())
-        self.assertIn("Tool Executed", prompt)
-    
-    def test_get_agent_a_summarizer_prompt(self):
-        prompt = get_agent_a_summarizer_prompt()
-        self.assertIn("summarizer", prompt.lower())
-        self.assertIn("multi-step plan", prompt.lower())
+    def test_get_agent_a_system_prompt_lists_tools(self):
+        prompt = get_agent_a_system_prompt(["run_command", "read_file"])
+        self.assertIn("run_command", prompt)
+        self.assertIn("read_file", prompt)
+        self.assertIn("One-Shot Planner", prompt)
 
 
 class TestHandleQueryRouterless(unittest.TestCase):
@@ -193,6 +185,8 @@ class TestOrchestratorIntegration(unittest.TestCase):
         self.assertEqual(summary["steps_failed"], 0)
         self.assertEqual(summary["output_values"]["files"], "main.py, app.py, count: 2")
         self.assertEqual(summary["output_values"]["count"], "2")
+        self.assertEqual(summary["template_values"]["files"], "main.py, app.py, count: 2")
+        self.assertEqual(summary["template_values"]["count"], 2)
         self.assertEqual(summary["output_value_types"]["files"], "list")
         self.assertEqual(summary["output_value_types"]["count"], "int")
         self.assertEqual(
@@ -210,6 +204,13 @@ class TestOrchestratorIntegration(unittest.TestCase):
             stored_outputs[0]["parsed_outputs"],
             {"files": ["main.py", "app.py", "count: 2"], "count": 2}
         )
+
+        template_values = self.orchestrator._build_template_value_map(summary)
+        formatted, _ = self.orchestrator._render_narration_template(
+            "Found {count:.1f} files",
+            template_values
+        )
+        self.assertEqual(formatted, "Found 2.0 files")
 
     def test_execute_plan_injects_no_output_message(self):
         """When stdout is empty, the orchestrator replaces values with a helpful note."""
@@ -266,6 +267,7 @@ class TestOrchestratorIntegration(unittest.TestCase):
         self.assertIn("find . -name '*.bat'", fallback)
         self.assertTrue(summary["output_value_sources"]["bat_files"]["no_output"])
         self.assertEqual(summary["output_value_types"]["bat_files"], "list")
+        self.assertEqual(summary["template_values"]["bat_files"], fallback)
 
     def test_agent_a_context_includes_recent_history(self):
         """Agent A context message lists up to five prior exchanges in newest-first order."""
@@ -292,7 +294,7 @@ class TestOrchestratorIntegration(unittest.TestCase):
     def test_exception_logs_failure_snapshot(self):
         """Failures triggered by exceptions are persisted to cycle_failures."""
         with patch.object(self.orchestrator, "_run_agent_a_cycle", side_effect=RuntimeError("boom")), \
-             patch.object(self.orchestrator, "_call_agent_a_narrator", return_value="fallback"):
+             patch.object(self.orchestrator, "_call_agent_a_direct_response", return_value="fallback"):
             result = self.orchestrator.handle_query("boom")
 
         self.assertIsNotNone(result.error)
