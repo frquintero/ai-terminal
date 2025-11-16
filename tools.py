@@ -2832,7 +2832,9 @@ except Exception as _e:
             for a in artifacts:
                 parts.append(f"- {a['path']} ({a['size']} bytes)")
         
-        parts.append(f"Manifest: {run_dir / 'manifest.json'}")
+        manifest_path = run_dir / "manifest.json"
+        parts.append(f"Manifest: {manifest_path}")
+        summary = "\n".join(parts)
         
         # Cleanup old runs to prevent unbounded disk usage
         try:
@@ -2841,7 +2843,25 @@ except Exception as _e:
             max_runs = 10
         self._cleanup_old_runs(base_path / "runs", max_runs)
         
-        return "\n".join(parts)
+        stdout_text = out or ""
+        stderr_text = err or ""
+        return {
+            "stdout": stdout_text,
+            "stderr": stderr_text,
+            "raw_stdout": out,
+            "raw_stderr": err,
+            "metadata": {
+                "run_id": run_id,
+                "interpreter": py,
+                "project_mount": str(project_mount),
+                "timeout_s": timeout,
+                "timed_out": timed_out,
+                "exit_code": manifest["exit_code"],
+                "artifacts": artifacts,
+                "manifest_path": str(manifest_path),
+            },
+            "summary": summary,
+        }
     
     def _cleanup_old_runs(self, runs_root: Path, keep: int):
         """Remove old sandbox run directories, keeping most recent N."""

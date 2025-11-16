@@ -153,11 +153,19 @@ class SystemContextBuilder:
         """Build basic environment section."""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         cwd = shell_cwd if shell_cwd else system_info.get('cwd', system_info.get('working_directory', 'unknown'))
+        python_version = system_info.get('python_version')
+        if python_version and python_version not in ("unknown", ""):
+            python_line = f"- Python: Python {python_version}"
+        elif python_version == "unknown":
+            python_line = "- Python: detected but version unavailable"
+        else:
+            python_line = "- Python is not installed in this system"
         
         return f"""**Current Environment:**
 - Date/Time: {timestamp}
 - OS: {system_info.get('os_name', 'unknown')} {system_info.get('os_version', '')}
-- Working Directory: {cwd}"""
+- Working Directory: {cwd}
+{python_line}"""
     
     def _build_tools_section(self, role: str, tool_registry: Dict[str, Any]) -> str:
         """Build tools section (different for A vs B)."""

@@ -34,9 +34,10 @@ print(f"Sum: {sum(x)}")
 """
         result = self.sandbox_tool.execute(code=code)
         
-        self.assertIn("exit code: 0", result.lower())
-        self.assertIn("Hello from sandbox", result)
-        self.assertIn("Sum: 15", result)
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["metadata"]["exit_code"], 0)
+        self.assertIn("Hello from sandbox", result["stdout"])
+        self.assertIn("Sum: 15", result["stdout"])
     
     def test_timeout_enforcement(self):
         """Test that long-running code is terminated"""
@@ -48,8 +49,9 @@ print("This should not print")
 """
         result = self.sandbox_tool.execute(code=code, timeout=2)
         
-        self.assertIn("timed_out=True", result)
-        self.assertIn("exit code: none", result.lower())
+        self.assertIsInstance(result, dict)
+        self.assertTrue(result["metadata"]["timed_out"])
+        self.assertIsNone(result["metadata"]["exit_code"])
     
     def test_file_path_execution(self):
         """Test executing Python from a file"""
@@ -60,9 +62,10 @@ print("This should not print")
         
         result = self.sandbox_tool.execute(file_path=script_path)
         
-        self.assertIn("exit code: 0", result.lower())
-        self.assertIn("Executed from file", result)
-        self.assertIn("4", result)
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["metadata"]["exit_code"], 0)
+        self.assertIn("Executed from file", result["stdout"])
+        self.assertIn("4", result["stdout"])
     
     def test_invalid_code(self):
         """Test handling of syntax errors"""
@@ -72,7 +75,8 @@ print("Invalid syntax"
 """
         result = self.sandbox_tool.execute(code=code)
         
-        self.assertIn("SyntaxError", result)
+        self.assertIsInstance(result, dict)
+        self.assertIn("SyntaxError", result["stderr"])
     
     def test_runtime_error(self):
         """Test handling of runtime errors"""
@@ -81,7 +85,8 @@ x = 1 / 0  # Division by zero
 """
         result = self.sandbox_tool.execute(code=code)
         
-        self.assertIn("ZeroDivisionError", result)
+        self.assertIsInstance(result, dict)
+        self.assertIn("ZeroDivisionError", result["stderr"])
     
     def test_missing_parameters(self):
         """Test error when neither code nor file_path provided"""
@@ -102,12 +107,8 @@ x = 1 / 0  # Division by zero
         code = "print('Test')"
         result = self.sandbox_tool.execute(code=code)
         
-        # Extract run_id from result
-        import re
-        match = re.search(r'run_id=([a-f0-9-]+)', result)
-        self.assertIsNotNone(match)
-        
-        run_id = match.group(1)
+        self.assertIsInstance(result, dict)
+        run_id = result["metadata"]["run_id"]
         artifacts_dir = Path(self.test_dir) / "runs" / run_id / "artifacts"
         self.assertTrue(artifacts_dir.exists())
     
@@ -116,12 +117,8 @@ x = 1 / 0  # Division by zero
         code = "print('Test')"
         result = self.sandbox_tool.execute(code=code)
         
-        # Extract run_id from result
-        import re
-        match = re.search(r'run_id=([a-f0-9-]+)', result)
-        self.assertIsNotNone(match)
-        
-        run_id = match.group(1)
+        self.assertIsInstance(result, dict)
+        run_id = result["metadata"]["run_id"]
         manifest_path = Path(self.test_dir) / "runs" / run_id / "manifest.json"
         self.assertTrue(manifest_path.exists())
         
@@ -148,7 +145,8 @@ except RuntimeError as e:
     print(f"Network blocked: {e}")
 """
         result = self.sandbox_tool.execute(code=code)
-        self.assertIn("Network blocked", result)
+        self.assertIsInstance(result, dict)
+        self.assertIn("Network blocked", result["stdout"])
     
     def test_output_capture(self):
         """Test that stdout and stderr are captured"""
@@ -159,10 +157,9 @@ print("stderr message", file=sys.stderr)
 """
         result = self.sandbox_tool.execute(code=code)
         
-        self.assertIn("Stdout:", result)
-        self.assertIn("stdout message", result)
-        self.assertIn("Stderr:", result)
-        self.assertIn("stderr message", result)
+        self.assertIsInstance(result, dict)
+        self.assertIn("stdout message", result["stdout"])
+        self.assertIn("stderr message", result["stderr"])
     
     def test_graceful_matplotlib_handling(self):
         """Test that code works without matplotlib installed"""
@@ -174,8 +171,9 @@ print(f"Pi: {math.pi}")
         result = self.sandbox_tool.execute(code=code)
         
         # Should succeed even if matplotlib not available
-        self.assertIn("exit code: 0", result.lower())
-        self.assertIn("Pi: 3.14", result)
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["metadata"]["exit_code"], 0)
+        self.assertIn("Pi: 3.14", result["stdout"])
     
     def test_project_file_read(self):
         """Test reading project files via SANDBOX_PROJECT"""
@@ -203,8 +201,8 @@ else:
 """
             result = self.sandbox_tool.execute(code=code)
             
-            self.assertIn("exit code: 0", result.lower())
-            self.assertIn("Read from project: Hello from project directory", result)
+            self.assertEqual(result["metadata"]["exit_code"], 0)
+            self.assertIn("Read from project: Hello from project directory", result["stdout"])
         finally:
             os.chdir(original_cwd)
     
@@ -224,7 +222,7 @@ with open('number_roots.csv', 'r') as f:
     print('Loaded:', f.read().strip())
 """
             result = self.sandbox_tool.execute(code=code)
-            self.assertIn("Loaded: 42", result)
+            self.assertIn("Loaded: 42", result["stdout"])
         finally:
             os.chdir(original_cwd)
     
@@ -248,7 +246,7 @@ with open('{file_name}', 'r') as f:
 """
         try:
             result = self.sandbox_tool.execute(code=code)
-            self.assertIn("Workdir content: workdir content", result)
+            self.assertIn("Workdir content: workdir content", result["stdout"])
         finally:
             if target.exists():
                 target.unlink()
@@ -273,7 +271,7 @@ print("Allowed file exists:", target.exists())
 """
         try:
             result = self.sandbox_tool.execute(code=code)
-            self.assertIn("Allowed file exists: True", result)
+            self.assertIn("Allowed file exists: True", result["stdout"])
         finally:
             if previous is None:
                 os.environ.pop('SANDBOX_ALLOW_PROJECT_WRITES', None)
@@ -310,8 +308,8 @@ if project_dir:
 """
             result = self.sandbox_tool.execute(code=code)
             
-            self.assertIn("exit code: 0", result.lower())
-            self.assertIn("Write blocked as expected", result)
+            self.assertEqual(result["metadata"]["exit_code"], 0)
+            self.assertIn("Write blocked as expected", result["stdout"])
             
             # Verify file was not modified
             with open(test_file, 'r') as f:
@@ -343,7 +341,7 @@ except PermissionError as exc:
     print(f"Remove blocked: {exc}")
 """
             result = self.sandbox_tool.execute(code=code)
-            self.assertIn("Remove blocked", result)
+            self.assertIn("Remove blocked", result["stdout"])
             
             with open(test_file, 'r') as f:
                 self.assertEqual(f.read(), "Protected data")
