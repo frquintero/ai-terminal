@@ -282,28 +282,6 @@ $PYTHON -m pytest tests/test_e2e_*.py tests/test_cross_*.py -v
 # Memory API tests (database operations)
 $PYTHON -m pytest tests/test_memory.py -v
 
-# System context builder (Phase 4: Lean prompts)
-$PYTHON -m pytest tests/test_system_context_builder.py -v
-```
-
-**Note:** Some legacy v1.3 tests and environment-specific tests may fail. Focus on the core integration tests above for v2.0 validation.
-
----
-
-## Architecture Decisions
-
-### Why Unified Memory?
-
-v1.3 had fragmented memory stores (5+ files, multiple databases). v2.0 uses **one orchestrator.db** for:
-- Single source of truth
-- Transactional consistency
-- Easier debugging and metrics
-- No data sync issues
-
-### Why Shell-First?
-
-Shell commands are ~50% of real interactions. Executing them immediately (not through planner) preserves the feel of a real terminal. Interactive commands (vim, top) must have TTY access anyway.
-
 ### Why FTS5 for Cache?
 
 SQLite FTS5 is zero-dependency, fast enough for MVP, and improves naturally with data. ML classifier deferred to Phase 6.
@@ -311,24 +289,6 @@ SQLite FTS5 is zero-dependency, fast enough for MVP, and improves naturally with
 ### Why Conservative Fallback?
 
 Better to over-plan an ambiguous query than misroute it. PLANNER confidence defaults to 0.6; user can always interrupt.
-
----
-
-## Known Limitations
-
-### Phase 2 (Current)
-
-- ⏭️ **Streaming**: Long-running commands not yet streamed (full output returned)
-- ⏭️ **Session Persistence**: Each orchestrator instance creates a new session (no resumption)
-- ⏭️ **Artifact Storage**: Large outputs (>1000 chars) stored as preview only
-- ⏭️ **ML Router**: Regex+cache only; ML classifier deferred to Phase 6
-
-### Not in Scope
-
-- Multi-user or tenant support
-- Distributed execution
-- Background/scheduled tasks
-- Custom agent roles beyond A/B
 
 ---
 
@@ -391,5 +351,3 @@ bd create "Question: How do I...?" -t task -p 2 --json
 For debugging issues, see [DEBUGGING_V2.md](history/DEBUGGING_V2.md). For analyzing execution cycles, see [cycles_debug_guide.md](cycles_debug_guide.md). For classifier or architecture details, read [history/architectural_upgrade.md](history/architectural_upgrade.md).
 
 ---
-
-**Built with [Amp](https://ampcode.com) using GPT-4 Turbo + Oracle reasoning.**
