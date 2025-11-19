@@ -426,8 +426,11 @@ class Memory:
             "task_state",
             "step_outputs",
             "chat_history",
-            "router_decisions",
-            "cycle_failures"
+            "cycle_failures",
+            "cycle_metrics",
+            "step_metrics",
+            "llm_metrics",
+            "router_decisions"
         ]
         
         with self._lock:

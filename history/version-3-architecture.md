@@ -28,6 +28,12 @@ python main.py
   - Update status: `bd update <id> --status in_progress`
   - Close issue: `bd close <id> --reason "Done"`
 
+- **Database Management**: To purge all data and start with a fresh state (e.g., after an architecture upgrade), use the purge utility:
+  ```bash
+  python3 -m memory.purge_db --yes --include-sessions --include-cache
+  ```
+  This will delete all sessions, cycles, logs, and metrics, leaving the database schema intact.
+
 ---
 
 # Version 3 Architecture: Routerless Dual-Agent System
