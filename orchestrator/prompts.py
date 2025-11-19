@@ -13,67 +13,48 @@ from typing import List
 # Agent A: Unified system prompt (planning + narration)
 # ============================================================================
 
-AGENT_A_SYSTEM_PROMPT = """**Role: Agent A (Planner & Narrator)**
-You are the strategic brain of the terminal. Your job is to analyze the user's request and decide on the best course of action.
+AGENT_A_SYSTEM_PROMPT = """**Role: Agent A (Strategic Intent)**
+You are the strategic brain of the terminal. Your job is to analyze the user's request and either answer directly or delegate the **User Intent** to Agent B (the Engineer).
 
 **CRITICAL: NO THINKING TAGS**
 Do NOT output `<think>` tags or any internal monologue. Your output must be PURE JSON.
 
-**Core Principles:**
-1. **Shell First:** Prefer shell commands (`grep`, `awk`, `sed`, `sort`, `uniq`, `bc`) over writing Python scripts. Shell pipelines are faster, more efficient, and can handle complex text processing in a single step.
-2. **Inline Python:** If you need advanced logic (math, plotting, JSON parsing) that shell tools can't handle easily, use `python3 -c "..."` within a `run_command` step instead of creating a temporary file.
-   - Example (Pipeline): `seq 1 10 | python3 -c "import sys; [print(i.strip()) for i in sys.stdin if int(i.strip()) % 2 == 0]" | sort -n`
-   - Example: `python3 -c "import math; print(math.sqrt(12345))"`
-   - Example: `python3 -c "import sys, json; print(json.load(sys.stdin)['key'])"`
-3. **Python Sandbox:** Reserved for complex scripts involving specific data processing, machine learning modules (like `scikit-learn`, `pandas`), or data visualization (`matplotlib`). Use this only when the logic is too complex for a shell pipeline.
-
-**Available Tools:**
-{available_tools}
 
 **Decision Logic:**
-1. **Direct Response:** Use this ONLY for general knowledge, simple math, or questions that DO NOT require running any tools/commands. NEVER use this to "pretend" to run code. It cannot execute anything.
-2. **Execution Plan:** Use this for ANY request that requires system access, file operations, or running commands (even simple ones like `ls` or `pwd`).
+Before responding, decide between TWO options:
+1. **Direct Response:** Use this ONLY for general knowledge, simple math, or questions that DO NOT require running any tools/commands.
+2. **Delegate to Engineer:** Use this for ANY request that you visualize will require system access, file operations, or running shell or python commands.
 
-
-**Output Format (JSON Only):**
 
 **Option 1: Direct Response**
 {{
-  "response": "Your natural language answer here."
+  "response": "Your natural language answer here. Be sure to fully address the user's request. Be specific and complete."
 }}
 
-**Option 2: Execution Plan (1-3 Steps)**
-Prefer a single-step shell pipeline over multiple steps whenever possible. It is more efficient, reduces state management complexity, and minimizes failure points.
+**Option 2: Delegate to Engineer**
+
+Intent Only: You define **WHAT** needs to be done to achieve the user's intent.
+Examples:
+1. If the infer the user intent is to analyze disk usage and create a report, you simply state the intent and success criteria without any steps or tools.
 {{
-  "steps": [
-    {{
-      "tool_name": "read_file",
-      "intent": "Step 1: Read the source file",
-      "description": "Read content of data.txt",
-      "output_keys": ["content"]
-    }},
-    {{
-      "tool_name": "run_command",
-      "intent": "Step 2: Process the content",
-      "description": "Process the content from Step 1",
-      "specifics": {{ "input_data": "$PREVIOUS_OUTPUT" }},
-      "output_keys": ["result"]
-    }}
-  ],
-  "narration_template": "I read the file and processed it. Result: {{result}}"
+  "intent": "Analyze disk usage and create a report",
+  "success_criteria": ["disk usage analyzed", "report file created"]
 }}
 
-**Data Handoff & Variables:**
-- You must plan ALL steps (1-3) upfront. You cannot see Step 1's output before planning Step 2.
-- To use data from a previous step, mention it in `description` or `specifics` using:
-  - `$PREVIOUS_OUTPUT`: The output of the immediately preceding step.
-  - `$STEP_N_OUTPUT`: The output of a specific step (e.g., `$STEP_0_OUTPUT`).
+2. If the user intent is related with any shell command of filesystem operations you simply:
+{{
+  "intent": "List all Python files in the current directory",
+  "success_criteria": ["list of Python files displayed"]
+}}
+
+3. If the user intent requires to be accomplished in multiple steps, you clearly narrate the user intent sequentially, for example:
+{{
+  "intent": "create a txt file and add 10 lines to it related to capital cities in the world",
+  "success_criteria": ["a txt file created", "10 lines added to the file with capital cities"]
+}}
 
 **Rules & Constraints:**
-1. **One-Shot Planning:** You get one chance per cycle. Design the full plan (1-3 steps) now.
-2. **Intent vs. Description:** `intent` is the user-facing goal (what); `description` is the technical instruction (how).
-3. **Narration:** The `narration_template` is what the user sees. It MUST use placeholders `{{key}}` that correspond exactly to `output_keys`.
-4. **JSON Strictness:** Respond with ONLY valid JSON. No markdown formatting, no `<think>` tags, no preamble.
+1. **JSON Strictness:** Respond with ONLY valid JSON. No markdown formatting, no `<think>` tags.
 """
 
 AGENT_A_USER_TEMPLATE = """**Context:**
@@ -84,50 +65,69 @@ AGENT_A_USER_TEMPLATE = """**Context:**
 # Agent B: Executor (for PLANNER route - step execution)
 # ============================================================================
 
-AGENT_B_SYSTEM_PROMPT = """**Role: Agent B (Command Engineer)**
-You are the tactical executor. You receive a single step from Agent A's plan and generate the precise tool arguments to execute it.
+AGENT_B_SYSTEM_PROMPT = """**Role: Agent B (Command Engineer & Narrator)**
+You are the tactical executor. You receive a **High-Level Intent** from Agent A and must:
+1. **Operationalize** it into a concrete execution manifest (steps & tools).
+2. **Narrate** the final outcome to the user.
+
+**Your Authority:**
+Agent A provides the **What** (Intent). You provide the **How** (Tools, Commands, Steps) and the **Explanation**.
+
+**Engineering Principles:**
+1. **Shell First:** Prefer `run_command` for text processing (`grep`, `awk`, `sed`) over `read_file` + Python.
+2. **Inline Python:** For logic not easily done in shell, use `run_command` with `python3 -c "..."`.
+3. **Python Sandbox:** Use `run_python_sandbox` ONLY for data science, plotting, or algorithmic tasks.
+4. **Efficiency:** If Agent A suggests `read_file` for a directory or large file, switch to `run_command` with `ls`, `head`, or `grep`.
 
 **Your Task:**
-1. Analyze the Input Context (Goal, Description, Previous Results) provided in the user message.
-2. Review the Tool Schema provided in the user message.
-3. Construct the `tool_args` (or `command` for shell tools) to achieve the Goal.
-4. Define the `output_format` to tell the system how to parse the tool's output into the Required Outputs.
+1. Analyze the **Intent** and **Success Criteria**.
+2. Review the Tool Schema to see what tools are available.
+3. **Generate the Execution Manifest**: A list of concrete tool calls.
+4. **Define Narration**: Create a `narration_template` that uses the outputs of your steps to explain the result.
 
-**Output Format (JSON Only):**
-
-**For Shell Tools (`run_command`, `run_interactive`):**
-{{
-  "command": "ls -la",
-  "output_format": {{
-    "key1": "list",
-    "key2": "int"
-  }}
-}}
-
-**For Other Tools:**
-{{
-  "tool_args": {{ "arg": "value" }},
-  "output_format": {{ "key1": "str" }}
-}}
-
-**Critical Constraints:**
-1. **Output Keys:** Your `output_format` dictionary MUST contain EXACTLY the keys listed in **Required Outputs**. No more, no less.
-2. **Data Types:** Map each key to one of: `int`, `float`, `str`, `list`, `raw`, `table`, `json`.
-3. **JSON Strictness:** Respond with ONLY valid JSON. No markdown formatting.
-"""
-
-AGENT_B_USER_TEMPLATE = """**Input Context:**
-- **Goal:** {intent}
-- **Description:** {description}
-- **Specifics:** {specifics}
-- **Required Outputs:** {output_keys}
-- **Previous Results:**
-{previous_outputs}
+**Variable System:**
+- `$PREVIOUS_OUTPUT`: The output of the immediately preceding step.
+- `$STEP_N_OUTPUT`: The output of a specific step (e.g., `$STEP_0_OUTPUT`).
+- **Structured Data Access**: Tools now return structured JSON. Access fields using dot notation: `$PREVIOUS_OUTPUT.stdout`.
 
 **Tool Schema:**
 {tool_schemas}
 
-Generate the tool arguments for this step.
+**Output Format (JSON Only):**
+{{
+  "execution_steps": [
+    {{
+      "step_id": 0,
+      "tool_name": "run_command",
+      "tool_args": {{
+        "command": "find . -name '*.py' | head -n 5"
+      }},
+      "output_format": {{ "files": "list" }}
+    }},
+    {{
+      "step_id": 1,
+      "tool_name": "run_command",
+      "tool_args": {{
+        "command": "wc -l $PREVIOUS_OUTPUT.stdout",
+        "input_data": "$PREVIOUS_OUTPUT.stdout"
+      }},
+      "output_format": {{ "counts": "str" }}
+    }}
+  ],
+  "narration_template": "I found the following files:\\n{{files}}\\n\\nTotal line counts:\\n{{counts}}"
+}}
+
+**Critical Constraints:**
+1. **One-Shot Generation**: You must generate the FULL list of steps AND the narration template now.
+2. **Output Keys**: Your `narration_template` MUST use placeholders `{{key}}` that correspond to keys defined in your `output_format`s.
+3. **JSON Strictness**: Respond with ONLY valid JSON. No markdown formatting.
+"""
+
+AGENT_B_USER_TEMPLATE = """**User Intent:**
+{plan_json}
+
+
+Generate the complete execution manifest and narration template.
 """
 
 def get_system_context():
@@ -151,16 +151,15 @@ def get_agent_a_system_prompt(available_tools: List[str]) -> str:
     Get Agent A unified system prompt (static).
     
     Args:
-        available_tools: List of available tool names
+        available_tools: List of available tool names (Ignored for Agent A now)
     
     Returns:
         Static system prompt
     """
     context = get_system_context()
     
-    # Format tools list for prompt
-    tools_formatted = "\n".join(f"- {tool}" for tool in sorted(available_tools))
-    context["available_tools"] = tools_formatted
+    # Tools list is no longer injected into Agent A prompt
+    # context["available_tools"] = ... 
     
     return AGENT_A_SYSTEM_PROMPT.format_map(_SafeFormatDict(context))
 
@@ -180,79 +179,39 @@ def get_agent_a_user_message(context_msg: str) -> str:
     )
 
 
-def get_agent_b_system_prompt() -> str:
+def get_agent_b_system_prompt(tool_schemas: List[dict]) -> str:
     """
     Get Agent B (Executor) static system prompt.
     
+    Args:
+        tool_schemas: List of tool schema dicts
+
     Returns:
         Static system prompt string
     """
+    import json
     context = get_system_context()
+    context["tool_schemas"] = json.dumps(tool_schemas, indent=2)
     return AGENT_B_SYSTEM_PROMPT.format(**context)
 
 
 def get_agent_b_user_message(
-    plan: dict,
-    current_step_id: int,
-    previous_outputs: List[dict],
-    tool_schemas: List[dict]
+    plan: dict
 ) -> str:
     """
-    Get Agent B (Executor) dynamic user message with step context.
+    Get Agent B (Executor) dynamic user message with full plan context.
     
     Args:
         plan: Complete plan dict with steps array
-        current_step_id: Index of current step to execute
-        previous_outputs: List of previous step outputs
-        tool_schemas: List of tool schema dicts from get_tool_schemas()
     
     Returns:
-        Formatted user message with step context and tool schemas
+        Formatted user message with plan context
     """
     import json
     
     context = {}
     
-    # Get current step
-    current_step = plan["steps"][current_step_id]
-    
-    # Format plan summary
-    plan_summary = f"{len(plan['steps'])} steps total"
-    
-    # Format current step info
-    context["plan_summary"] = plan_summary
-    context["current_step_id"] = str(current_step_id)
-    context["tool_name"] = current_step["tool_name"]
-    context["intent"] = current_step["intent"]
-    context["description"] = current_step.get("description", "(no description)")
-    
-    # Format specifics
-    specifics = current_step.get("specifics")
-    if specifics:
-        context["specifics"] = json.dumps(specifics, indent=2)
-    else:
-        context["specifics"] = "(none provided)"
-
-    output_keys = current_step.get("output_keys", [])
-    if output_keys:
-        context["output_keys"] = ", ".join(output_keys)
-    else:
-        context["output_keys"] = "(none declared)"
-    
-    # Format previous outputs
-    if previous_outputs:
-        outputs_formatted = []
-        for idx, output in enumerate(previous_outputs):
-            outputs_formatted.append(
-                f"Step {idx}: {output['tool_name']} - "
-                f"{'Success' if output['success'] else 'Failed'}\n"
-                f"Output preview: {output.get('output', '')[:200]}..."
-            )
-        context["previous_outputs"] = "\n\n".join(outputs_formatted)
-    else:
-        context["previous_outputs"] = "(No previous outputs - this is the first step)"
-    
-    # Format tool schemas as JSON
-    context["tool_schemas"] = json.dumps(tool_schemas, indent=2)
+    # Format plan as JSON
+    context["plan_json"] = json.dumps(plan, indent=2)
     
     return AGENT_B_USER_TEMPLATE.format(**context)

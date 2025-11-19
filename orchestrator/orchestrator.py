@@ -1008,13 +1008,10 @@ Describe the failure and tell the user what to do next."""
         )
         
         # Build Agent B prompt
-        system_prompt = system_context + "\n\n" + get_agent_b_system_prompt()
+        system_prompt = system_context + "\n\n" + get_agent_b_system_prompt(tool_schemas)
         
         user_message = get_agent_b_user_message(
-            plan=plan,
-            current_step_id=step_id,
-            previous_outputs=previous_results,
-            tool_schemas=tool_schemas  # Pass ALL schemas
+            plan=plan
         )
         
         messages = [
