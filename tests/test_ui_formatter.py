@@ -82,9 +82,9 @@ def test_render_output_placeholder_emits_output_block_for_lists():
 
     assert inline_value is None
     assert len(blocks) == 1
-    assert "```output" in blocks[0].plain
-    assert "alpha.txt" in blocks[0].plain
-    assert "beta.txt" in blocks[0].plain
+    assert "```output" in blocks[0].markup
+    assert "alpha.txt" in blocks[0].markup
+    assert "beta.txt" in blocks[0].markup
     assert "files" in rendered_blocks
 
 

@@ -13,48 +13,64 @@ from typing import List
 # Agent A: Unified system prompt (planning + narration)
 # ============================================================================
 
+AGENT_A_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "delegate_to_agent_b",
+            "description": "Delegate a complex task to Agent B (the Engineer). Use this when the user's request requires running commands, file operations, or system access.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "intent": {
+                        "type": "string",
+                        "description": "High-level goal for Agent B. Be specific."
+                    },
+                    "success_criteria": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of measurable conditions for success."
+                    }
+                },
+                "required": ["intent", "success_criteria"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "respond_to_user",
+            "description": "Provide a direct natural language response to the user. Use this for general knowledge, simple math, or questions that DO NOT require running tools/commands.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "response": {
+                        "type": "string",
+                        "description": "The natural language response to the user."
+                    }
+                },
+                "required": ["response"]
+            }
+        }
+    }
+]
+
 AGENT_A_SYSTEM_PROMPT = """**Role: Agent A (Strategic Intent)**
 You are the strategic brain of the terminal. Your job is to analyze the user's request and either answer directly or delegate the **User Intent** to Agent B (the Engineer).
 
-**CRITICAL: NO THINKING TAGS**
-Do NOT output `<think>` tags or any internal monologue. Your output must be PURE JSON.
-
+**System Context:**
+- OS: {os_info}
+- CWD: {cwd}
+- Time: {timestamp}
 
 **Decision Logic:**
-Before responding, decide between TWO options:
-1. **Direct Response:** Use this ONLY for general knowledge, simple math, or questions that DO NOT require running any tools/commands.
-2. **Delegate to Engineer:** Use this for ANY request that you visualize will require system access, file operations, or running shell or python commands.
+Decide between TWO options:
+1. **Direct Response:** Use `respond_to_user` for general knowledge, simple math, or questions that DO NOT require running any tools/commands.
+2. **Delegate to Engineer:** Use `delegate_to_agent_b` for ANY request that you visualize will require system access, file operations, or running shell or python commands.
 
-
-**Option 1: Direct Response**
-{{
-  "response": "Your natural language answer here. Be sure to fully address the user's request. Be specific and complete."
-}}
-
-**Option 2: Delegate to Engineer**
-
-Intent Only: You define **WHAT** needs to be done to achieve the user's intent.
-Examples:
-1. If the infer the user intent is to analyze disk usage and create a report, you simply state the intent and success criteria without any steps or tools.
-{{
-  "intent": "Analyze disk usage and create a report",
-  "success_criteria": ["disk usage analyzed", "report file created"]
-}}
-
-2. If the user intent is related with any shell command of filesystem operations you simply:
-{{
-  "intent": "List all Python files in the current directory",
-  "success_criteria": ["list of Python files displayed"]
-}}
-
-3. If the user intent requires to be accomplished in multiple steps, you clearly narrate the user intent sequentially, for example:
-{{
-  "intent": "create a txt file and add 10 lines to it related to capital cities in the world",
-  "success_criteria": ["a txt file created", "10 lines added to the file with capital cities"]
-}}
-
-**Rules & Constraints:**
-1. **JSON Strictness:** Respond with ONLY valid JSON. No markdown formatting, no `<think>` tags.
+**Rules:**
+- Do NOT output XML tags or markdown.
+- You MUST use one of the provided tools to respond.
 """
 
 AGENT_A_USER_TEMPLATE = """**Context:**

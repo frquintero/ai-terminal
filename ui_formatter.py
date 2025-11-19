@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from rich import box
 from rich.console import Console, Group
 from rich.live import Live
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.spinner import Spinner
 from rich.text import Text
@@ -218,7 +219,7 @@ class UIFormatter:
             renderables.append(Text(""))
             renderables.append(narration_renderable)
         elif agent_response:
-            renderables.append(Text(agent_response))
+            renderables.append(Markdown(agent_response))
 
         content: Any = ""
         if renderables:
@@ -255,7 +256,7 @@ class UIFormatter:
             return None
 
         renderables: List[Any] = []
-        current_text = Text()
+        current_text_buffer: str = ""
         rendered_blocks: Set[str] = set()
 
         for segment in segments:
@@ -264,7 +265,7 @@ class UIFormatter:
                 text_value = segment.get("content", "")
                 if text_value is None:
                     continue
-                current_text.append(text_value)
+                current_text_buffer += text_value
             elif seg_type == "output":
                 inline_value, block_renderables = self._render_output_placeholder(
                     key=segment.get("key"),
@@ -272,15 +273,15 @@ class UIFormatter:
                     rendered_blocks=rendered_blocks
                 )
                 if inline_value is not None:
-                    current_text.append(inline_value)
+                    current_text_buffer += inline_value
                 if block_renderables:
-                    if current_text.plain:
-                        renderables.append(current_text.copy())
-                        current_text = Text()
+                    if current_text_buffer:
+                        renderables.append(Markdown(current_text_buffer))
+                        current_text_buffer = ""
                     renderables.extend(block_renderables)
 
-        if current_text.plain:
-            renderables.append(current_text)
+        if current_text_buffer:
+            renderables.append(Markdown(current_text_buffer))
 
         if not renderables:
             return None
@@ -382,16 +383,11 @@ class UIFormatter:
             trimmed = trimmed.rstrip() + "\n[output truncated]"
         return block_tag, trimmed
 
-    def _build_fenced_block(self, tag: str, content: str) -> Text:
+    def _build_fenced_block(self, tag: str, content: str) -> Markdown:
         normalized_tag = tag or "output"
         normalized_content = content.rstrip() if content else ""
-        block = Text()
-        block.append(f"```{normalized_tag}\n")
-        if normalized_content:
-            block.append(normalized_content)
-            block.append("\n")
-        block.append("```\n")
-        return block
+        md_content = f"```{normalized_tag}\n{normalized_content}\n```"
+        return Markdown(md_content)
     
     def step_indicator(self, current: int, total: int, description: str = ""):
         """Display step progress indicator"""

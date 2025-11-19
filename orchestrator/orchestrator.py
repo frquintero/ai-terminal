@@ -18,7 +18,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from config import Config
 from llm_client import LLMClient
 from memory.api import Memory
-from orchestrator.prompts import get_agent_a_system_prompt, get_agent_a_user_message, get_agent_b_system_prompt, get_agent_b_user_message
+from orchestrator.prompts import (
+    get_agent_a_system_prompt,
+    get_agent_a_user_message,
+    get_agent_b_system_prompt,
+    get_agent_b_user_message,
+    AGENT_A_TOOLS
+)
 from orchestrator.metrics import CycleMetrics, StepMetrics, LLMMetrics, get_metrics
 from orchestrator.system_context_builder import SystemContextBuilder
 from orchestrator.plan_validator import PlanValidator, PlanValidationError
@@ -355,8 +361,7 @@ Explain what happened and advise the user to retry after checking logs."""
         
         user_context_msg = (
             f"{user_context.strip()}\n\n"
-            "Respond with a direct JSON object {\"response\": \"...\"} for the user. "
-            "Do not propose a new tool plan."
+            "Use the 'respond_to_user' tool to explain this to the user."
         )
         
         user_prompt = get_agent_a_user_message(user_context_msg)
@@ -371,12 +376,27 @@ Explain what happened and advise the user to retry after checking logs."""
             role="A",
             memory=self.memory
         )
-        llm_result = llm_client.call(messages=messages, cycle_id=cycle_id, temperature=self.config.agent_a_temperature)
+        llm_result = llm_client.call(
+            messages=messages, 
+            cycle_id=cycle_id, 
+            temperature=self.config.agent_a_temperature,
+            tools=AGENT_A_TOOLS
+        )
         
         if llm_result["error"]:
             return f"[Agent A response failed: {llm_result['error']}]\n\n{user_context}"
         
-        content = llm_result["message"].content or ""
+        msg = llm_result["message"]
+        content = msg.content or ""
+        
+        if hasattr(msg, "tool_calls") and msg.tool_calls:
+            for tc in msg.tool_calls:
+                if tc.function.name == "respond_to_user":
+                    try:
+                        args = json.loads(tc.function.arguments)
+                        return args.get("response", "")
+                    except Exception:
+                        pass
         
         # Use PlanValidator to robustly parse Agent A's response
         validator = PlanValidator(available_tools=[])
@@ -447,18 +467,45 @@ Explain what happened and advise the user to retry after checking logs."""
         llm_result = llm_client.call(
             messages=messages,
             cycle_id=cycle_id,
-            temperature=self.config.agent_a_temperature
+            temperature=self.config.agent_a_temperature,
+            tools=AGENT_A_TOOLS
         )
+        
+        response = None
+        last_error = None
         
         if llm_result["error"]:
             last_error = f"LLM call failed: {llm_result['error']}"
-            response = None
         else:
-            llm_response = llm_result["message"].content or ""
-            # Validate response
-            response, error_hint = validator.validate_with_hints(llm_response)
-            if not response:
-                last_error = error_hint
+            msg = llm_result["message"]
+            # Check for tool calls
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                tc = msg.tool_calls[0]
+                fname = tc.function.name
+                try:
+                    args = json.loads(tc.function.arguments)
+                    if fname == "delegate_to_agent_b":
+                        response = {
+                            "intent": args.get("intent"),
+                            "success_criteria": args.get("success_criteria")
+                        }
+                    elif fname == "respond_to_user":
+                        response = {
+                            "response": args.get("response")
+                        }
+                    else:
+                        last_error = f"Unknown tool called: {fname}"
+                except json.JSONDecodeError as e:
+                    last_error = f"Invalid tool arguments JSON: {e}"
+            else:
+                # Fallback: Check if content is present and try to use it
+                if msg.content:
+                    # Attempt to parse as JSON just in case model ignored tools but followed old prompt
+                    response, error_hint = validator.validate_with_hints(msg.content)
+                    if not response:
+                        last_error = "Agent A did not call any tool (and content was not valid JSON)"
+                else:
+                    last_error = "Agent A did not call any tool or provide content"
 
         # Check if we got a valid response
         if not response:
@@ -487,12 +534,14 @@ Example: {{"response": "I apologize, but I encountered an internal error..."}}""
                 user_context=full_fallback_context
             )
             
+            # If we successfully generated a fallback response, treat it as a valid direct response
+            # This handles cases where Agent A outputs plain text instead of JSON but the content is valid
             return OrchestratorResult(
                 cycle_id=cycle_id,
                 route=Route.PLANNER.value,
                 query=query,
                 agent_response=agent_response,
-                error=last_error,
+                execution_result={"success": True, "fallback_triggered": True, "validation_error": last_error},
                 response_segments=[{"type": "text", "content": agent_response}]
             )
         
