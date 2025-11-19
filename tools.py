@@ -517,12 +517,12 @@ class BaseTool(ABC):
         return None
 
     @abstractmethod
-    def execute(self, **kwargs) -> str:
+    def execute(self, **kwargs) -> Any:
         """
         Execute the tool's action.
         
         Returns:
-            String result to be passed back to the LLM
+            String result or Dict with structured data
         """
         pass
 
@@ -572,7 +572,7 @@ class ReadFileTool(BaseTool):
             }
         }
 
-    def execute(self, file_path: str) -> str:
+    def execute(self, file_path: str) -> Dict[str, Any]:
         """
         Read and return file contents.
         
@@ -597,25 +597,47 @@ class ReadFileTool(BaseTool):
         elif os.path.exists(app_dir_path):
             target_path = app_dir_path
         else:
-            return f"Error: File not found in working directory or app directory: {file_path}"
+            return {
+                "success": False,
+                "error": f"File not found in working directory or app directory: {file_path}",
+                "path": file_path
+            }
         
         try:
             # Check file size before reading
             size = os.path.getsize(target_path)
             if size > self.MAX_BYTES:
-                return (
-                    f"File is {size} bytes; exceeds READ_FILE_MAX_BYTES={self.MAX_BYTES}. "
-                    f"Use run_command with head/tail/less for large files."
-                )
+                return {
+                    "success": False,
+                    "error": (
+                        f"File is {size} bytes; exceeds READ_FILE_MAX_BYTES={self.MAX_BYTES}. "
+                        f"Use run_command with head/tail/less for large files."
+                    ),
+                    "path": target_path,
+                    "size": size
+                }
             
             with open(target_path, 'r', encoding='utf-8') as f:
                 content = f.read()
             _record_file_event("read", file_path, "read_file", absolute_path=target_path)
-            return content
+            return {
+                "success": True,
+                "content": content,
+                "path": target_path,
+                "size": size
+            }
         except UnicodeDecodeError:
-            return f"Error: File is not valid UTF-8 text. Use run_command with cat/hexdump for binary files."
+            return {
+                "success": False,
+                "error": "File is not valid UTF-8 text. Use run_command with cat/hexdump for binary files.",
+                "path": target_path
+            }
         except Exception as e:
-            return f"Error reading file: {str(e)}"
+            return {
+                "success": False,
+                "error": f"Error reading file: {str(e)}",
+                "path": target_path
+            }
 
 
 class WriteFileTool(BaseTool):
@@ -666,7 +688,7 @@ class WriteFileTool(BaseTool):
             "write_file('output/results.txt', 'Analysis complete\\nTotal: 100')"
         ]
 
-    def execute(self, file_path: str, content: str) -> str:
+    def execute(self, file_path: str, content: str) -> Dict[str, Any]:
         """
         Write content to file in isolated working directory, creating parent directories if needed.
         
@@ -692,9 +714,18 @@ class WriteFileTool(BaseTool):
             _RECENT_WRITES.append(file_path)
             _record_file_event("write", file_path, "write_file", absolute_path=isolated_path)
             
-            return f"File written successfully: {isolated_path}"
+            return {
+                "success": True,
+                "path": isolated_path,
+                "size": len(content),
+                "message": f"File written successfully: {isolated_path}"
+            }
         except Exception as e:
-            return f"Error writing file: {str(e)}"
+            return {
+                "success": False,
+                "error": f"Error writing file: {str(e)}",
+                "path": isolated_path
+            }
 
 
 class HttpRequestTool(BaseTool):
@@ -1030,7 +1061,7 @@ class HttpRequestTool(BaseTool):
                 exit_code=envelope.get("curl_exit_code"),
                 error=envelope.get("error")
             )
-            return json.dumps(envelope, indent=2)
+            return envelope
         except Exception as exc:
             _SESSION_STATE.record_tool_call(
                 self.name,
@@ -2076,6 +2107,10 @@ class RunCommandTool(BaseTool):
                         "command": {
                             "type": "string",
                             "description": "The shell command to execute"
+                        },
+                        "input_data": {
+                            "type": "string",
+                            "description": "Optional data to pass to stdin"
                         }
                     },
                     "required": ["command"]
@@ -2109,7 +2144,7 @@ class RunCommandTool(BaseTool):
         else:
             return self.working_dir
 
-    def execute(self, command: str) -> str:
+    def execute(self, command: str, input_data: str = None) -> Dict[str, Any]:
         """
         Execute shell command with safety guards.
         
@@ -2121,7 +2156,11 @@ class RunCommandTool(BaseTool):
             # Parse command tokens
             tokens = shlex.split(command) if command.strip() else []
             if not tokens:
-                return "Error: Empty command"
+                return {
+                    "stdout": "",
+                    "stderr": "Error: Empty command",
+                    "exit_code": 1
+                }
             
             # Control operators that delimit simple commands in a pipeline
             CONTROL_OPS = {'|', '||', '&&', ';'}
@@ -2134,7 +2173,11 @@ class RunCommandTool(BaseTool):
                 first_cmd_tokens.append(t)
             
             if not first_cmd_tokens:
-                return "Error: Empty command"
+                return {
+                    "stdout": "",
+                    "stderr": "Error: Empty command",
+                    "exit_code": 1
+                }
             
             # Identify the actual command being executed
             base = first_cmd_tokens[0]
@@ -2152,42 +2195,45 @@ class RunCommandTool(BaseTool):
                 except:
                     cmd_name = "command"
                 
-                return (
-                    f"Error: Interactive command detected - {reason}. "
-                    f"Use run_interactive tool to avoid timeout."
-                )
+                return {
+                    "stdout": "",
+                    "stderr": f"Error: Interactive command detected - {reason}. Use run_interactive tool to avoid timeout.",
+                    "exit_code": 126
+                }
             
             # Execute command via shell integration
             # Force reset to working directory before each command (stateless cwd)
             # If isolation is enabled, shell mounts working_dir to /workspace, so use that
             if self.shell.isolation_enabled:
                 reset_dir = "/workspace"
-                cwd_prefix = "cd /workspace"
             else:
                 reset_dir = self.working_dir
-                cwd_prefix = f"cd {shlex.quote(self.working_dir)}"
-            wrapped = f"{cwd_prefix}; {command}"
-            result = self.shell.run_command(wrapped, reset_dir=reset_dir)
-            normalized_stdout = getattr(self.shell, "last_command_normalized_output", result)
-            raw_stdout = getattr(self.shell, "last_command_raw_output", normalized_stdout)
-            exit_code = getattr(self.shell, "last_exit_code", None)
+            
+            # ShellIntegration.run_command now returns a Dict
+            result = self.shell.run_command(command, input_data=input_data, reset_dir=reset_dir)
+            
+            # Result is already a dict with stdout, stderr, exit_code, cwd
+            # We can return it directly or wrap it if needed.
+            # The ToolExecutor expects a dict, so this is perfect.
+            
             try:
                 _record_shell_snapshot(
                     command=command,
-                    exit_code=getattr(self.shell, "last_exit_code", None),
-                    shell_cwd=self.shell.get_current_dir(),
+                    exit_code=result.get("exit_code"),
+                    shell_cwd=result.get("cwd"),
                     working_dir=self.working_dir,
                 )
             except Exception:
                 pass
-            return {
-                "stdout": result,
-                "raw_stdout": raw_stdout if raw_stdout is not None else normalized_stdout,
-                "exit_code": exit_code
-            }
+                
+            return result
             
         except Exception as e:
-            return f"Error executing command: {str(e)}"
+            return {
+                "stdout": "",
+                "stderr": f"Error executing command: {str(e)}",
+                "exit_code": 1
+            }
 
 
 
@@ -2244,7 +2290,7 @@ class InteractiveCommandTool(BaseTool):
             "htop"
         ]
     
-    def execute(self, command: str) -> str:
+    def execute(self, command: str) -> Dict[str, Any]:
         """
         Pass full terminal control to the command.
         
@@ -2256,7 +2302,10 @@ class InteractiveCommandTool(BaseTool):
         try:
             # Verify TTY availability
             if not sys.stdin.isatty() or not sys.stdout.isatty():
-                return "Interactive commands require a TTY; cannot run in non-interactive environment."
+                return {
+                    "success": False,
+                    "error": "Interactive commands require a TTY; cannot run in non-interactive environment."
+                }
             
             # Execute with full terminal control - stdin/stdout/stderr connected
             result = subprocess.run(
@@ -2269,14 +2318,28 @@ class InteractiveCommandTool(BaseTool):
             
             # Report exit status
             if result.returncode == 0:
-                return f"Interactive command '{command}' completed successfully."
+                return {
+                    "success": True,
+                    "exit_code": 0,
+                    "message": f"Interactive command '{command}' completed successfully."
+                }
             else:
-                return f"Interactive command '{command}' exited with code {result.returncode}."
+                return {
+                    "success": False,
+                    "exit_code": result.returncode,
+                    "error": f"Interactive command '{command}' exited with code {result.returncode}."
+                }
                 
         except KeyboardInterrupt:
-            return f"Interactive command '{command}' was interrupted by user."
+            return {
+                "success": False,
+                "error": f"Interactive command '{command}' was interrupted by user."
+            }
         except Exception as e:
-            return f"Error executing interactive command: {str(e)}"
+            return {
+                "success": False,
+                "error": f"Error executing interactive command: {str(e)}"
+            }
 
 
 # ============================================================================
@@ -2966,7 +3029,7 @@ class HistorySQLTool(BaseTool):
         try:
             executor = self._executor_factory()
             result = executor.execute(statement, params=bindings, max_rows=max_rows)
-            return json.dumps(result, ensure_ascii=False, indent=2)
+            return result
         except HistorySQLExecutionError as exc:
             return f"History SQL error: {exc}"
         except Exception as exc:
@@ -3030,9 +3093,9 @@ class HistorySchemaTool(BaseTool):
                 if not table:
                     raise HistorySQLExecutionError("table is required for describe_table")
                 columns = executor.describe_table(table)
-                return json.dumps({"table": table, "columns": columns}, ensure_ascii=False, indent=2)
+                return {"table": table, "columns": columns}
             tables = executor.list_tables()
-            return json.dumps({"tables": tables}, ensure_ascii=False, indent=2)
+            return {"tables": tables}
         except HistorySQLExecutionError as exc:
             return f"History schema error: {exc}"
         except Exception as exc:
@@ -3081,7 +3144,7 @@ class GetContextTool(BaseTool):
             }
         }
     
-    def execute(self) -> str:
+    def execute(self) -> Dict[str, Any]:
         """Return comprehensive execution context as JSON"""
         working_dir = _get_working_dir_path()
         
@@ -3224,7 +3287,7 @@ class GetContextTool(BaseTool):
             except Exception:
                 pass
         
-        return json.dumps(context, indent=2)
+        return context
 
 
 # ============================================================================
@@ -3268,7 +3331,7 @@ class FilesystemSnapshotTool(BaseTool):
             }
         }
 
-    def execute(self, limit: int = 15) -> str:
+    def execute(self, limit: int = 15) -> Dict[str, Any]:
         store = _get_fs_store()
         if not store or not _SESSION_STATE.session_id:
             fallback = list(_RECENT_FILE_EVENTS)[-limit:]
@@ -3277,7 +3340,7 @@ class FilesystemSnapshotTool(BaseTool):
                 "snapshot": None,
                 "recent_events": fallback
             }
-            return json.dumps(payload, ensure_ascii=False, indent=2)
+            return payload
         try:
             limit = int(limit)
         except (TypeError, ValueError):
@@ -3292,7 +3355,7 @@ class FilesystemSnapshotTool(BaseTool):
             "snapshot": snapshot,
             "recent_events": events
         }
-        return json.dumps(payload, ensure_ascii=False, indent=2)
+        return payload
 
 
 # ============================================================================
@@ -3377,7 +3440,7 @@ class SearchDBTool(BaseTool):
         tool_filter: Optional[str] = None,
         role_filter: Optional[str] = None,
         success_only: bool = False
-    ) -> str:
+    ) -> Dict[str, Any]:
         """
         Execute institutional memory search.
         
@@ -3390,16 +3453,16 @@ class SearchDBTool(BaseTool):
         # Validate inputs
         valid_targets = ["chat_history", "step_outputs", "interactions", "intention_cache"]
         if target not in valid_targets:
-            return json.dumps({
+            return {
                 "success": False,
                 "error": f"Invalid target '{target}'. Must be one of: {', '.join(valid_targets)}"
-            }, indent=2)
+            }
         
         if not query or not query.strip():
-            return json.dumps({
+            return {
                 "success": False,
                 "error": "Query cannot be empty"
-            }, indent=2)
+            }
         
         # Enforce limit bounds
         limit = max(1, min(50, limit))
@@ -3444,25 +3507,25 @@ class SearchDBTool(BaseTool):
                 formatted = self._format_intention_results(results)
             
             else:
-                return json.dumps({"success": False, "error": f"Unknown target: {target}"}, indent=2)
+                return {"success": False, "error": f"Unknown target: {target}"}
             
             elapsed_ms = int((time.time() - start_time) * 1000)
             
             # Return success response
-            return json.dumps({
+            return {
                 "success": True,
                 "target": target,
                 "query": query,
                 "result_count": len(results),
                 "latency_ms": elapsed_ms,
                 "results": formatted
-            }, indent=2)
+            }
         
         except Exception as e:
-            return json.dumps({
+            return {
                 "success": False,
                 "error": f"Search failed: {str(e)}"
-            }, indent=2)
+            }
     
     def _search_intention_cache(self, memory: Any, query: str, limit: int) -> List[Dict[str, Any]]:
         """Search intention_cache table using FTS5."""

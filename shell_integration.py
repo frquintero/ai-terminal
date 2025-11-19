@@ -4,7 +4,7 @@ import re
 import atexit
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any, Tuple
 
 class ShellIntegration:
     """
@@ -15,6 +15,7 @@ class ShellIntegration:
     - Robust ANSI/control sequence stripping
     - Graceful timeout recovery with Ctrl-C
     - Exit code and PWD tracking
+    - Separation of STDOUT and STDERR
     """
     
     def __init__(self, working_dir: str = None):
@@ -254,11 +255,16 @@ class ShellIntegration:
         result = '\n'.join(normalized_lines)
         return result.strip()  # Final strip of whitespace
     
-    def run_command(self, command: str, timeout: int = 60, reset_dir: str = None) -> str:
+    def run_command(self, command: str, input_data: str = None, timeout: int = 60, reset_dir: str = None) -> Dict[str, Any]:
         """
         Execute a command with robust output parsing using start/end markers.
         
-        Returns the command output as a clean string.
+        Returns a dictionary containing:
+        - stdout: Cleaned standard output
+        - stderr: Cleaned standard error
+        - exit_code: Integer exit code
+        - cwd: Resulting working directory
+        
         Captures exit code and updates current directory automatically.
         If reset_dir is provided, sets current_dir to reset_dir after command.
         
@@ -272,15 +278,35 @@ class ShellIntegration:
             else:
                 cwd_reset = f"cd {self._shq(self.current_dir)}"
             
+            # Prepare temporary files for I/O redirection
+            stdout_file = f"/tmp/ai_stdout_{self._token}"
+            stderr_file = f"/tmp/ai_stderr_{self._token}"
+            stdin_file = f"/tmp/ai_stdin_{self._token}"
+            
+            # Prepare stdin setup if needed
+            stdin_setup = ""
+            stdin_redirect = ""
+            if input_data is not None:
+                # Write input data to temp file using cat with heredoc to avoid quoting hell
+                # Use a random delimiter for heredoc
+                heredoc_delim = f"EOF_{self._token}"
+                stdin_setup = f"cat > {stdin_file} << '{heredoc_delim}'\n{input_data}\n{heredoc_delim}\n"
+                stdin_redirect = f"< {stdin_file}"
+            
+            # Separator for stdout/stderr in the raw stream
+            stream_sep = f"__AI_SEP_{self._token}__"
+            
             # Wrap command with markers and capture exit code + PWD
-            # Format: START_MARKER\nCOMMAND_OUTPUT\nEND_MARKER<exitcode>:<pwd>
-            # Use echo instead of printf for simplicity and compatibility
+            # Format: START_MARKER\n...setup...\nCOMMAND... >out 2>err\n...readback...\nEND_MARKER<exitcode>:<pwd>
             wrapped = (
                 f'PS1={self._shq(self.PROMPT)}; '
-                f'{cwd_reset}; '  # Reset to working directory (stateless)
+                f'{cwd_reset}; '
                 f'echo {self._shq(self._start_marker)}; '
-                f'{command}; '
+                f'{stdin_setup}'
+                f'{{ {command}; }} {stdin_redirect} > {stdout_file} 2> {stderr_file}; '
                 f'__S=$?; '
+                f'cat {stdout_file}; echo "{stream_sep}"; cat {stderr_file}; '
+                f'rm -f {stdout_file} {stderr_file} {stdin_file}; '
                 f'echo {self._shq(self._end_marker)}$__S:$PWD'
             )
             
@@ -291,7 +317,12 @@ class ShellIntegration:
                 self.shell.expect_exact(self._start_marker, timeout=5)
             except pexpect.TIMEOUT:
                 self._resync()
-                return "Error: Failed to start command execution (shell desync)"
+                return {
+                    "stdout": "",
+                    "stderr": "Error: Failed to start command execution (shell desync)",
+                    "exit_code": 127,
+                    "cwd": self.current_dir
+                }
             
             # Step 2: Wait for end marker with exit code and PWD
             # Pattern: END_MARKER<exitcode>:<pwd> followed by newline
@@ -303,8 +334,8 @@ class ShellIntegration:
             try:
                 self.shell.expect(end_pattern, timeout=timeout)
                 
-                # Extract command output (everything between markers)
-                raw_output = self.shell.before or ""
+                # Extract raw output (everything between markers)
+                raw_combined = self.shell.before or ""
                 
                 # Extract exit code and PWD from marker
                 exit_code = int(self.shell.match.group(1))
@@ -330,31 +361,49 @@ class ShellIntegration:
                 except pexpect.TIMEOUT:
                     pass  # Non-critical if we already got the output
                 
-                # Normalize and clean the output
-                normalized_output = self._normalize_output(raw_output)
-                self.last_command_raw_output = raw_output or ""
-                self.last_command_normalized_output = normalized_output
-                self.last_command_output_empty = normalized_output.strip() == ""
+                # Split stdout and stderr using the separator
+                if stream_sep in raw_combined:
+                    raw_stdout, raw_stderr = raw_combined.split(stream_sep, 1)
+                else:
+                    # Fallback if separator missing (shouldn't happen unless cat failed)
+                    raw_stdout = raw_combined
+                    raw_stderr = ""
                 
-                output = normalized_output
+                # Normalize and clean the outputs
+                stdout = self._normalize_output(raw_stdout)
+                stderr = self._normalize_output(raw_stderr)
                 
-                # If command failed, include exit code info
-                if exit_code != 0 and output:
-                    output += f"\n[Exit code: {exit_code}]"
-                elif exit_code != 0:
-                    output = f"Command failed with exit code {exit_code}"
+                self.last_command_raw_output = raw_stdout
+                self.last_command_normalized_output = stdout
+                self.last_command_output_empty = (stdout.strip() == "" and stderr.strip() == "")
                 
-                return output
+                return {
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "exit_code": exit_code,
+                    "cwd": self.current_dir
+                }
                 
             except pexpect.TIMEOUT:
                 # Try Ctrl-C recovery before hard reset
-                return self._handle_timeout(command, timeout)
+                error_msg = self._handle_timeout(command, timeout)
+                return {
+                    "stdout": "",
+                    "stderr": error_msg,
+                    "exit_code": 124, # Timeout exit code
+                    "cwd": self.current_dir
+                }
             
             except pexpect.EOF:
                 # Shell died - reinitialize
                 self.close()
                 self._init_shell()
-                return "Shell session ended unexpectedly (reinitialized)"
+                return {
+                    "stdout": "",
+                    "stderr": "Shell session ended unexpectedly (reinitialized)",
+                    "exit_code": 137,
+                    "cwd": self.current_dir
+                }
         
         except Exception as e:
             # Attempt recovery
@@ -363,7 +412,12 @@ class ShellIntegration:
             except:
                 self.close()
                 self._init_shell()
-            return f"Error executing command: {str(e)}"
+            return {
+                "stdout": "",
+                "stderr": f"Error executing command: {str(e)}",
+                "exit_code": 1,
+                "cwd": self.current_dir
+            }
     
     def _handle_timeout(self, command: str, timeout: int) -> str:
         """

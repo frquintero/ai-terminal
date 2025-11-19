@@ -18,7 +18,9 @@ class TestFileTools(unittest.TestCase):
 
         try:
             result = self.read_tool.execute(file_path=temp_file_path)
-            self.assertEqual(result, test_content)
+            self.assertTrue(result["success"])
+            self.assertEqual(result["content"], test_content)
+            self.assertEqual(result["path"], temp_file_path)
         finally:
             os.unlink(temp_file_path)
 
@@ -26,7 +28,8 @@ class TestFileTools(unittest.TestCase):
         """Test handling of a non-existent file."""
         nonexistent_path = "/tmp/nonexistent_file.txt"
         result = self.read_tool.execute(file_path=nonexistent_path)
-        self.assertIn("File not found in working directory or app directory", result)
+        self.assertFalse(result["success"])
+        self.assertIn("File not found in working directory or app directory", result["error"])
 
     def test_write_file_create_new(self):
         """Test successful creation and writing to a new file."""
@@ -35,7 +38,9 @@ class TestFileTools(unittest.TestCase):
             test_content = "This is new content."
 
             result = self.write_tool.execute(file_path=file_path, content=test_content)
-            self.assertEqual(result, f"File written successfully: {file_path}")
+            self.assertTrue(result["success"])
+            self.assertEqual(result["path"], file_path)
+            self.assertIn("File written successfully", result["message"])
 
             # Verify the file was created and has correct content
             with open(file_path, 'r') as f:
@@ -49,7 +54,8 @@ class TestFileTools(unittest.TestCase):
             test_content = "Content in nested directory."
 
             result = self.write_tool.execute(file_path=file_path, content=test_content)
-            self.assertEqual(result, f"File written successfully: {file_path}")
+            self.assertTrue(result["success"])
+            self.assertEqual(result["path"], file_path)
 
             # Verify directories were created
             self.assertTrue(os.path.exists(nested_dir))
@@ -68,7 +74,8 @@ class TestFileTools(unittest.TestCase):
         try:
             new_content = "New content overwriting the old."
             result = self.write_tool.execute(file_path=temp_file_path, content=new_content)
-            self.assertEqual(result, f"File written successfully: {temp_file_path}")
+            self.assertTrue(result["success"])
+            self.assertEqual(result["path"], temp_file_path)
 
             # Verify the content was overwritten
             with open(temp_file_path, 'r') as f:

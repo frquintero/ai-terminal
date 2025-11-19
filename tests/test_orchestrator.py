@@ -30,9 +30,10 @@ class TestOrchestratorPrompts(unittest.TestCase):
     
     def test_get_agent_a_system_prompt_lists_tools(self):
         prompt = get_agent_a_system_prompt(["run_command", "read_file"])
-        self.assertIn("run_command", prompt)
-        self.assertIn("read_file", prompt)
-        self.assertIn("One-Shot Planning", prompt)
+        # Agent A no longer lists tools, but should mention "Agent A" and "Strategic Intent"
+        self.assertIn("Agent A", prompt)
+        self.assertIn("Strategic Intent", prompt)
+        self.assertNotIn("run_command", prompt)
 
 
 class TestHandleQueryRouterless(unittest.TestCase):
@@ -155,11 +156,17 @@ class TestOrchestratorIntegration(unittest.TestCase):
         }
         self.memory.save_plan(cycle_id, plan, status="in_progress")
 
-        agent_b_payload = {
+        manifest_payload = {
             "success": True,
-            "tool_args": {"command": "ls"},
-            "command": "ls",
-            "output_format": {"files": "list", "count": "int"}
+            "execution_steps": [
+                {
+                    "step_id": 0,
+                    "tool_name": "run_command",
+                    "tool_args": {"command": "ls"},
+                    "output_format": {"files": "list", "count": "int"}
+                }
+            ],
+            "error": None
         }
 
         tool_result = {
@@ -175,7 +182,7 @@ class TestOrchestratorIntegration(unittest.TestCase):
             "latency_ms": 15
         }
 
-        with patch.object(self.orchestrator, "_call_agent_b", return_value=agent_b_payload), \
+        with patch.object(self.orchestrator, "_get_execution_manifest", return_value=manifest_payload), \
              patch.object(self.orchestrator, "tool_executor") as mock_executor:
             mock_executor.execute.return_value = tool_result
 
@@ -236,11 +243,17 @@ class TestOrchestratorIntegration(unittest.TestCase):
         }
         self.memory.save_plan(cycle_id, plan, status="in_progress")
 
-        agent_b_payload = {
+        manifest_payload = {
             "success": True,
-            "tool_args": {"command": "find . -name '*.bat'"},
-            "command": "find . -name '*.bat'",
-            "output_format": {"bat_files": "list"}
+            "execution_steps": [
+                {
+                    "step_id": 0,
+                    "tool_name": "run_command",
+                    "tool_args": {"command": "find . -name '*.bat'"},
+                    "output_format": {"bat_files": "list"}
+                }
+            ],
+            "error": None
         }
 
         tool_result = {
@@ -256,7 +269,7 @@ class TestOrchestratorIntegration(unittest.TestCase):
             "latency_ms": 5
         }
 
-        with patch.object(self.orchestrator, "_call_agent_b", return_value=agent_b_payload), \
+        with patch.object(self.orchestrator, "_get_execution_manifest", return_value=manifest_payload), \
              patch.object(self.orchestrator, "tool_executor") as mock_executor:
             mock_executor.execute.return_value = tool_result
 
@@ -330,19 +343,10 @@ class TestOrchestratorIntegration(unittest.TestCase):
     @patch("orchestrator.orchestrator.LLMClient")
     def test_execution_plan_path_does_not_exit_early(self, mock_llm_client):
         """Ensure execution-plan responses proceed without touching undefined agent_response."""
-        # Fake LLM returning a simple execution plan
+        # Fake LLM returning a simple execution plan (Agent A format)
         plan_dict = {
-            "response_type": "execution_plan",
-            "steps": [
-                {
-                    "id": 0,
-                    "tool_name": "run_command",
-                    "description": "List files",
-                    "output_keys": ["files"],
-                    "intent": "List files"
-                }
-            ],
-            "narration_template": "Files: {files}"
+            "intent": "List files",
+            "success_criteria": ["files listed"]
         }
         mock_llm_client.return_value.call.return_value = {
             "error": None,
@@ -361,9 +365,9 @@ class TestOrchestratorIntegration(unittest.TestCase):
                  "output_values": {"files": "main.py"},
                  "output_value_types": {"files": "list"},
                  "output_value_sources": {},
-                 "step_results": []
-             }), \
-             patch.object(Orchestrator, "_render_narration_template", return_value=("Files: main.py", [{"type": "text", "content": "Files: main.py"}])):
+                 "step_results": [],
+                 "narration_template": "Files: {files}"
+             }):
             result = self.orchestrator._run_agent_a_cycle(
                 cycle_id=cycle_id,
                 query="list files"
@@ -376,17 +380,8 @@ class TestOrchestratorIntegration(unittest.TestCase):
     def test_planner_success_persists_chat_history(self, mock_llm_client):
         """Successful planner runs store the final narration for future context."""
         plan_dict = {
-            "response_type": "execution_plan",
-            "steps": [
-                {
-                    "id": 0,
-                    "tool_name": "run_command",
-                    "description": "List files",
-                    "output_keys": ["files"],
-                    "intent": "List files"
-                }
-            ],
-            "narration_template": "Files: {files}"
+            "intent": "List files",
+            "success_criteria": ["files listed"]
         }
         mock_llm_client.return_value.call.return_value = {
             "error": None,
@@ -404,9 +399,9 @@ class TestOrchestratorIntegration(unittest.TestCase):
                  "output_values": {"files": "main.py"},
                  "output_value_types": {"files": "list"},
                  "output_value_sources": {},
-                 "step_results": []
+                 "step_results": [],
+                 "narration_template": "Files: {files}"
              }), \
-             patch.object(Orchestrator, "_render_narration_template", return_value=("Files: main.py", [{"type": "text", "content": "Files: main.py"}])), \
              patch.object(self.orchestrator.memory, "save_chat_exchange") as mock_save_chat:
             self.orchestrator._run_agent_a_cycle(
                 cycle_id=cycle_id,

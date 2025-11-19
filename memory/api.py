@@ -708,6 +708,10 @@ class Memory:
             """
             INSERT INTO task_state (cycle_id, plan_json, status)
             VALUES (?, ?, ?)
+            ON CONFLICT(cycle_id) DO UPDATE SET
+                plan_json = excluded.plan_json,
+                status = excluded.status,
+                updated_at = CURRENT_TIMESTAMP
             """,
             (cycle_id, plan_json, status)
         )
