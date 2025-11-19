@@ -46,16 +46,11 @@ if first_token in InteractiveCommandTool.INTERACTIVE_COMMANDS:
     return f"Error: '{first_token}' is an interactive command. Use run_interactive tool instead to avoid timeout."
 ```
 
-### 4. 🔴 **run_interactive missing TTY check**
-**Issue**: Confusing failures when run in non-TTY environments  
-**Impact**: Unclear error messages  
-**Fix**: Explicit TTY check before execution  
-**File**: `tools.py:253-275`
-
-```python
-if not sys.stdin.isatty() or not sys.stdout.isatty():
-    return "Interactive commands require a TTY; cannot run in non-interactive environment."
-```
+### 4. 🔴 **run_interactive unusable in headless environments**
+**Issue**: The legacy TTY requirement blocked all interactive commands inside the orchestrator loop.  
+**Impact**: Agent B could not inspect pagers/REPLs; commands like `man` failed outright.  
+**Fix**: Replace the TTY check with a PTY-backed executor that streams output, detects prompts, and keeps a `session_id` so Agent B can reply.  
+**File**: `tools.py` (`InteractiveSession` + `InteractiveCommandTool`) now handles prompt detection and structured JSON events.
 
 ---
 

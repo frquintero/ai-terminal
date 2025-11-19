@@ -55,6 +55,10 @@ All state is **transactional** with `session_id` + `cycle_id` tracking per orche
 
 After ToolExecutor runs a command, the orchestrator captures full stdout/stderr (normalized + raw), computes a 1 KB preview, and runs it through `orchestrator/output_parser.py`. The parser materializes Agent B’s declared `output_format` into typed Python values (`int`, `float`, `list`, `raw`, `table`, `json`, `str`). Those parsed values are persisted to `memory.step_outputs` and fed into Agent A’s `narration_template`, so templates can safely reference `{count}`, `{files}`, etc. without brittle string slicing.
 
+### Interactive Sessions (PTY-backed)
+
+For pagers, REPLs, or TUI apps that cannot be coerced into plain stdout, Agent B uses `run_interactive`. The tool spins up a PTY-backed session (powered by `pexpect`), streams output in real time, and emits structured JSON describing each prompt (`status`, `session_id`, `events`, suggested actions). Agent B reads that JSON in the next turn and decides whether to send input (`run_interactive(session_id=..., input_text='q\\n')`), continue reading, or abort—keeping Agent A out of the loop while still honoring the routerless design.
+
 ---
 
 ## Project Structure

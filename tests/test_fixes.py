@@ -6,7 +6,10 @@ Test script to verify the regression fixes
 import os
 import sys
 import tempfile
+import json
+
 from tools import WriteFileTool, RunCommandTool, InteractiveCommandTool
+from command_parser import parse_command
 
 def test_write_file_in_cwd():
     """Test that write_file works for files in current directory"""
@@ -16,9 +19,10 @@ def test_write_file_in_cwd():
     with tempfile.TemporaryDirectory() as tmpdir:
         os.chdir(tmpdir)
         result = tool.execute("test.txt", "Hello World")
-        assert "successfully" in result, f"Failed: {result}"
-        assert os.path.exists("test.txt"), "File was not created"
-        with open("test.txt", "r") as f:
+        assert result["success"], f"Failed: {result}"
+        assert "successfully" in result["message"].lower()
+        assert os.path.exists(result["path"]), "File was not created in sandbox"
+        with open(result["path"], "r") as f:
             assert f.read() == "Hello World"
     print("✓ write_file in CWD works correctly")
 
@@ -29,8 +33,9 @@ def test_write_file_with_dirs():
     with tempfile.TemporaryDirectory() as tmpdir:
         os.chdir(tmpdir)
         result = tool.execute("subdir/test.txt", "Hello World")
-        assert "successfully" in result, f"Failed: {result}"
-        assert os.path.exists("subdir/test.txt"), "File was not created"
+        assert result["success"], f"Failed: {result}"
+        assert "successfully" in result["message"].lower()
+        assert os.path.exists(result["path"]), "File was not created in sandbox"
     print("✓ write_file with subdirectories works correctly")
 
 def test_run_command_blocks_interactive():
@@ -39,34 +44,50 @@ def test_run_command_blocks_interactive():
     
     # Test blocking vim
     result = tool.execute("vim test.txt")
-    assert "interactive command" in result.lower(), f"Should block vim: {result}"
-    assert "run_interactive" in result.lower(), f"Should suggest run_interactive: {result}"
+    stderr = (result.get("stderr") or "").lower()
+    assert "interactive command" in stderr, f"Should block vim: {result}"
+    assert "run_interactive" in stderr, f"Should suggest run_interactive: {result}"
     
     # Test blocking nano
     result = tool.execute("nano test.txt")
-    assert "interactive command" in result.lower(), f"Should block nano: {result}"
+    assert "interactive command" in (result.get("stderr") or "").lower(), f"Should block nano: {result}"
     
     # Test blocking top
     result = tool.execute("top")
-    assert "interactive command" in result.lower(), f"Should block top: {result}"
+    assert "interactive command" in (result.get("stderr") or "").lower(), f"Should block top: {result}"
     
     print("✓ run_command correctly blocks interactive commands")
 
-def test_interactive_tool_tty_check():
-    """Test that run_interactive checks for TTY"""
+def test_run_command_allows_man_with_cat_pager():
+    """Verify MANPAGER=cat man ... is treated as non-interactive."""
+    interactive, reason = parse_command("MANPAGER=cat man printf")
+    assert not interactive, f"MANPAGER=cat should disable pager detection (reason={reason})"
+    print("✓ MANPAGER=cat man ... allowed by command parser")
+
+
+def test_run_interactive_session_flow():
+    """Ensure run_interactive sessions emit prompts and can be completed."""
     tool = InteractiveCommandTool()
+    command = "python3 -c \"print('start'); input('Press y to continue: '); print('done')\""
+    result = tool.execute(command=command, timeout=1.0)
+    assert result["success"], f"Session should start: {result}"
+    assert result["status"] in {"waiting_for_input", "awaiting_output"}, "Should await input after prompt"
+    assert result.get("session_id"), "Session id required"
+    agent_message = json.loads(result.get("agent_message"))
+    assert agent_message["status"] in {"waiting_for_input", "awaiting_output"}
+    session_id = result["session_id"]
     
-    # This test will pass if running in a TTY, or fail with the right message if not
-    result = tool.execute("echo test")
-    
-    if sys.stdin.isatty():
-        # Should execute
-        assert "successfully" in result.lower() or "completed" in result.lower(), f"Should execute: {result}"
-        print("✓ run_interactive executes when TTY available")
+    # Respond to prompt
+    follow_up = tool.execute(session_id=session_id, input_text="y\n", timeout=1.0)
+    assert follow_up["success"], f"Follow-up failed: {follow_up}"
+    assert follow_up["status"] in {"completed", "awaiting_output"}, "Should progress after sending input"
+    if follow_up["status"] == "completed":
+        assert "done" in follow_up["stdout"], "Should capture final output"
     else:
-        # Should fail with TTY error
-        assert "tty" in result.lower(), f"Should require TTY: {result}"
-        print("✓ run_interactive correctly checks for TTY")
+        # Send another newline to finish
+        final = tool.execute(session_id=session_id, input_text="\n", timeout=1.0)
+        assert final["status"] == "completed", "Session should complete after newline"
+    print("✓ run_interactive PTY session lifecycle works")
 
 if __name__ == "__main__":
     print("Testing regression fixes...\n")
@@ -75,7 +96,8 @@ if __name__ == "__main__":
         test_write_file_in_cwd()
         test_write_file_with_dirs()
         test_run_command_blocks_interactive()
-        test_interactive_tool_tty_check()
+        test_run_command_allows_man_with_cat_pager()
+        test_run_interactive_session_flow()
         
         print("\n✓ All regression fixes verified!")
         sys.exit(0)

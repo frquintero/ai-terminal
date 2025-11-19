@@ -190,6 +190,12 @@ class UIFormatter:
         """Print info message in blue"""
         console.print(f"ℹ {message}", style="bold blue")
     
+    def _create_markdown(self, content: str) -> Markdown:
+        """Create a Markdown object with consistent styling."""
+        # Use monokai theme to ensure code blocks have a dark background
+        # which prevents "scattered letters" on matching backgrounds.
+        return Markdown(content, code_theme="monokai")
+
     def render_cycle(
         self,
         *,
@@ -219,7 +225,7 @@ class UIFormatter:
             renderables.append(Text(""))
             renderables.append(narration_renderable)
         elif agent_response:
-            renderables.append(Markdown(agent_response))
+            renderables.append(self._create_markdown(agent_response))
 
         content: Any = ""
         if renderables:
@@ -276,12 +282,12 @@ class UIFormatter:
                     current_text_buffer += inline_value
                 if block_renderables:
                     if current_text_buffer:
-                        renderables.append(Markdown(current_text_buffer))
+                        renderables.append(self._create_markdown(current_text_buffer))
                         current_text_buffer = ""
                     renderables.extend(block_renderables)
 
         if current_text_buffer:
-            renderables.append(Markdown(current_text_buffer))
+            renderables.append(self._create_markdown(current_text_buffer))
 
         if not renderables:
             return None
@@ -387,7 +393,7 @@ class UIFormatter:
         normalized_tag = tag or "output"
         normalized_content = content.rstrip() if content else ""
         md_content = f"```{normalized_tag}\n{normalized_content}\n```"
-        return Markdown(md_content)
+        return self._create_markdown(md_content)
     
     def step_indicator(self, current: int, total: int, description: str = ""):
         """Display step progress indicator"""

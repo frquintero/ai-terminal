@@ -88,6 +88,10 @@ A dedicated component for safely executing the steps defined by Agent B.
     *   Capturing `stdout`, `stderr`, and exit codes.
     *   Formatting outputs for the database.
 
+#### PTY-Backed Interactive Sessions
+
+Version 3 adds a PTY-backed execution path for commands that expect live dialogue (`man`, pagers, password prompts, repls). `run_interactive` (see `tools.py`) now launches an `InteractiveSession` powered by `pexpect`, which streams output incrementally, detects prompts with regex patterns, and keeps a `session_id` so the Tool Executor and orchestrator can resume the same conversation. The orchestrator forwards those structured prompt events directly to Agent B, allowing it to decide when to send keystrokes, exit, or continue piping additional commands without involving Agent A. The command parser also understands env overrides such as `MANPAGER=cat`, ensuring non-interactive variants continue to flow through the standard `run_command` path. This tighter integration eliminates TTY deadlocks and gives users real-time feedback during complex interactive workflows.
+
 ### 4. Memory System (`memory/api.py`, `memory/schema.py`)
 A unified interface for persistent state, backed by SQLite (`logs/orchestrator.db`).
 *   **Key Tables**:
@@ -176,3 +180,6 @@ Parsing natural language or semi-structured text with Regular Expressions is a l
 
 ### 4. Always Test for Regressions
 Reliability is paramount. Every architectural change or prompt adjustment must be verified against our comprehensive test suite. We maintain a rigorous set of integration and end-to-end tests (`tests/`) to ensure that improvements in one area do not degrade performance or accuracy in another.
+
+### Engineering Principle
+Prefer piping commands together instead of multiple separate tool calls. Agent B should default to composing rich shell pipelines (e.g., `awk ... | sort | uniq -c | head`) so each execution step captures the full data flow, reserving multi-command sequences only for cases where a single pipeline cannot express the intent. This keeps the system instructions aligned with the Agent B prompt and reinforces our emphasis on efficient, atomic tool usage.

@@ -849,7 +849,8 @@ Describe the failure and tell the user what to do next."""
                     "tool_args": args,
                     "stdout": exec_result.get("stdout"),
                     "stderr": exec_result.get("stderr"),
-                    "success": success
+                    "success": success,
+                    "events": exec_result.get("events")
                  })
                  
                  # Save step output
@@ -866,16 +867,22 @@ Describe the failure and tell the user what to do next."""
                     raw_stdout=exec_result.get("raw_stdout"),
                     raw_stderr=exec_result.get("raw_stderr"),
                     output_format=None,
-                    parsed_outputs=None,
+                    parsed_outputs=exec_result.get("events"),
                     artifact_path=exec_result.get("artifact_path")
                  )
 
                  # Append tool result to messages for next turn
+                 tool_content = (
+                    exec_result.get("agent_message")
+                    or exec_result.get("stdout")
+                    or exec_result.get("stderr")
+                    or "Success"
+                 )
                  messages.append({
-                     "role": "tool",
-                     "tool_call_id": tc.id,
-                     "name": tool_name,
-                     "content": exec_result.get("stdout") or exec_result.get("stderr") or "Success"
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "name": tool_name,
+                    "content": tool_content
                  })
         
         return {

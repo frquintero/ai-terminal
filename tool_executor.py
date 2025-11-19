@@ -116,6 +116,11 @@ class ToolExecutor:
             primary_text = normalized["stdout"] if normalized["stdout"] is not None else (
                 normalized["stderr"] or ""
             )
+            agent_message = None
+            events = None
+            if isinstance(result, dict):
+                agent_message = result.get("agent_message")
+                events = result.get("events")
             
             return {
                 "success": True,
@@ -127,7 +132,9 @@ class ToolExecutor:
                 "exit_code": exit_code,
                 "output_preview": preview,
                 "data": result if isinstance(result, (dict, list)) else None,
-                "error": None
+                "error": None,
+                "agent_message": agent_message,
+                "events": events
             }
         
         except Exception as e:

@@ -182,7 +182,7 @@ Also applied to `run_sudo_command()` with Ctrl+C cancellation on password prompt
 ✓ write_file in CWD works correctly
 ✓ write_file with subdirectories works correctly
 ✓ run_command correctly blocks interactive commands
-✓ run_interactive correctly checks for TTY
+✓ run_interactive PTY session lifecycle works
 ```
 
 ### Latent Bug Tests (`test_latent_bugs.py`)

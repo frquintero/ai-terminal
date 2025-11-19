@@ -8,7 +8,7 @@ Philosophy: Fail-safe by blocking when ambiguous.
 import os
 import re
 import shlex
-from typing import Tuple, List, Set
+from typing import Tuple, List, Set, Dict
 
 
 # ============================================================================
@@ -23,6 +23,62 @@ def is_assignment(token: str) -> bool:
 def basename(token: str) -> str:
     """Extract basename from path"""
     return os.path.basename(token)
+
+
+NONINTERACTIVE_PAGERS = {
+    "cat",
+    "/bin/cat",
+    "cat -n",
+    "cat -v",
+}
+
+
+def _is_noninteractive_pager(pager: str) -> bool:
+    normalized = pager.strip().lower()
+    if not normalized:
+        return False
+    if normalized in NONINTERACTIVE_PAGERS:
+        return True
+    if normalized.startswith("cat "):
+        return True
+    if normalized.startswith("/bin/cat"):
+        return True
+    return False
+
+
+def _extract_man_pager(args: List[str], env_vars: Dict[str, str]) -> str:
+    """Return pager override from args/env if present."""
+    i = 0
+    while i < len(args):
+        token = args[i]
+        if token == '-P' and i + 1 < len(args):
+            return args[i + 1]
+        if token.startswith('-P') and len(token) > 2:
+            return token[2:]
+        if token == '--pager' and i + 1 < len(args):
+            return args[i + 1]
+        if token.startswith('--pager='):
+            return token.split('=', 1)[1]
+        i += 1
+    for key in ('MANPAGER', 'PAGER'):
+        if key in env_vars:
+            return env_vars[key]
+    return ""
+
+
+def parse_env_assignments(env_tokens: List[str]) -> Dict[str, str]:
+    """
+    Convert NAME=VALUE tokens into dict.
+    Supports NAME+=VALUE by stripping '+='.
+    """
+    env = {}
+    for token in env_tokens:
+        if '=' not in token:
+            continue
+        name, value = token.split('=', 1)
+        name = name.rstrip('+')
+        env[name] = value
+    return env
 
 
 # ============================================================================
@@ -254,17 +310,41 @@ NODES = {'node', 'nodejs'}
 RUBIES = {'ruby', 'irb'}
 
 
-def is_interactive_command(cmd: str, args: List[str]) -> Tuple[bool, str]:
+def parse_env_assignments(env_tokens: List[str]) -> Dict[str, str]:
+    """
+    Convert NAME=VALUE tokens into dict.
+    Supports NAME+=VALUE by stripping '+='.
+    """
+    env = {}
+    for token in env_tokens:
+        if '=' not in token:
+            continue
+        name, value = token.split('=', 1)
+        name = name.rstrip('+')
+        env[name] = value
+    return env
+
+
+def is_interactive_command(cmd: str, args: List[str], env_vars: Dict[str, str] = None) -> Tuple[bool, str]:
     """
     Determine if command is interactive based on command name and arguments.
     
     Returns: (is_interactive, reason)
     """
+    env_vars = env_vars or {}
     cmd_base = basename(cmd)
     
-    # Always interactive commands
+    # Context-aware overrides for commands typically interactive
     if cmd_base in ALWAYS_INTERACTIVE:
-        return True, f"'{cmd_base}' is an editor/pager/monitor"
+        if cmd_base == 'man':
+            pager = _extract_man_pager(args, env_vars)
+            if pager and _is_noninteractive_pager(pager):
+                # Allow if pager forced to cat-like program
+                pass
+            else:
+                return True, f"'{cmd_base}' uses a pager by default"
+        else:
+            return True, f"'{cmd_base}' is an editor/pager/monitor"
     
     # Shells - interactive unless -c is present
     if cmd_base in SHELLS:
@@ -363,9 +443,12 @@ def parse_command(cmd_str: str) -> Tuple[bool, str]:
         return True, "Empty command (blocking by default)"
     
     # Skip leading environment assignments
+    env_tokens = []
     i = 0
     while i < len(tokens) and is_assignment(tokens[i]):
+        env_tokens.append(tokens[i])
         i += 1
+    env_vars = parse_env_assignments(env_tokens)
     
     if i >= len(tokens):
         return False, "Assignment-only command (allowed)"
@@ -402,4 +485,4 @@ def parse_command(cmd_str: str) -> Tuple[bool, str]:
     args = tokens[i+1:]
     
     # Detect interactive command
-    return is_interactive_command(cmd, args)
+    return is_interactive_command(cmd, args, env_vars)

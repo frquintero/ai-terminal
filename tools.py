@@ -23,8 +23,10 @@ import subprocess
 import sys
 import textwrap
 import time
+import threading
 from uuid import uuid4
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse, quote_plus
+import pexpect
 
 from shell_integration import ShellIntegration
 from command_parser import parse_command
@@ -80,6 +82,8 @@ def _get_working_dir_path() -> str:
 # Track recently written files for context awareness
 _RECENT_WRITES: deque = deque(maxlen=100)
 _RECENT_FILE_EVENTS: deque = deque(maxlen=200)
+_INTERACTIVE_SESSIONS: Dict[str, "InteractiveSession"] = {}
+_INTERACTIVE_LOCK = threading.Lock()
 
 def _get_fs_store():
     try:
@@ -2261,120 +2265,310 @@ class RunCommandTool(BaseTool):
 
 
 
+class InteractiveSession:
+    """
+    Manage PTY-backed interactive subprocesses.
+    """
+
+    DEFAULT_TIMEOUT = 2.0
+
+    def __init__(self, command: str, working_dir: str, env: Optional[Dict[str, str]] = None):
+        self.command = command
+        self.working_dir = working_dir
+        self.id = str(uuid4())
+        self.env = env or os.environ.copy()
+        self.child = pexpect.spawn(
+            "/bin/bash",
+            ["-lc", command],
+            cwd=working_dir,
+            env=self.env,
+            encoding="utf-8",
+            timeout=self.DEFAULT_TIMEOUT,
+            echo=False
+        )
+        self.child.delaybeforesend = 0
+        self.closed = False
+        self.collected_output = ""
+
+    def send(self, text: Optional[str]):
+        if not text:
+            return
+        self.child.send(text)
+
+    def close(self, force: bool = True):
+        if self.closed:
+            return
+        try:
+            if self.child.isalive():
+                self.child.close(force=force)
+        except Exception:
+            pass
+        self.closed = True
+
+    def read(self, compiled_patterns: List[Tuple[re.Pattern, str]], timeout: float) -> Tuple[str, Optional[Dict[str, str]], str]:
+        if timeout <= 0:
+            timeout = self.DEFAULT_TIMEOUT
+        expect_list = [pexpect.TIMEOUT, pexpect.EOF] + [pattern for pattern, _ in compiled_patterns]
+        try:
+            idx = self.child.expect_list(expect_list, timeout=timeout)
+        except pexpect.ExceptionPexpect as exc:
+            self.close()
+            raise RuntimeError(f"Interactive session error: {exc}") from exc
+
+        chunk = self.child.before or ""
+        if chunk in (pexpect.EOF, pexpect.TIMEOUT):
+            chunk = ""
+        elif not isinstance(chunk, str):
+            chunk = str(chunk)
+        if chunk:
+            self.collected_output += chunk
+
+        if idx == 0:
+            return chunk, {"type": "idle", "text": "No new output before timeout"}, "awaiting_output"
+
+        if idx == 1:
+            after = self.child.after or ""
+            if after in (pexpect.EOF, pexpect.TIMEOUT):
+                after = ""
+            elif not isinstance(after, str):
+                after = str(after)
+            if after:
+                self.collected_output += after
+            self.close(force=False)
+            return chunk + after, None, "completed"
+
+        pattern_idx = idx - 2
+        _, label = compiled_patterns[pattern_idx]
+        prompt_text = self.child.after or ""
+        if prompt_text in (pexpect.EOF, pexpect.TIMEOUT):
+            prompt_text = ""
+        elif not isinstance(prompt_text, str):
+            prompt_text = str(prompt_text)
+        return chunk, {"type": label, "text": prompt_text}, "waiting_for_input"
+
+
+DEFAULT_PROMPT_PATTERNS: List[Tuple[re.Pattern, str]] = [
+    (re.compile(r"--more--|\(end\)", re.IGNORECASE), "pager"),
+    (re.compile(r"press\s+(?:enter|return|any key)[^\n]*", re.IGNORECASE), "press_key"),
+    (re.compile(r"\[sudo\]\s+password.*:", re.IGNORECASE), "password"),
+    (re.compile(r"password\s+for\s+.*:", re.IGNORECASE), "password"),
+    (re.compile(r"\(yes/no\)\?", re.IGNORECASE), "confirm"),
+]
+
+
+def _register_session(session: InteractiveSession):
+    with _INTERACTIVE_LOCK:
+        _INTERACTIVE_SESSIONS[session.id] = session
+
+
+def _get_session(session_id: str) -> Optional[InteractiveSession]:
+    with _INTERACTIVE_LOCK:
+        return _INTERACTIVE_SESSIONS.get(session_id)
+
+
+def _remove_session(session_id: str):
+    with _INTERACTIVE_LOCK:
+        session = _INTERACTIVE_SESSIONS.pop(session_id, None)
+    if session:
+        session.close(force=False)
+
+
 class InteractiveCommandTool(BaseTool):
     """
-    Execute interactive programs that require TTY (terminal control).
-    
-    Use for: Text editors (vim, nano), TUI programs (top, htop), interactive shells
-    Requires: TTY-enabled environment (won't work in background/cron jobs)
-    Note: Agent cannot interact with the program - user controls it directly
+    Execute interactive commands inside PTY sessions with prompt detection.
     """
-    
-    # Commands known to require full terminal control
-    INTERACTIVE_COMMANDS = {
-        'vim', 'vi', 'nano', 'emacs', 'less', 'more', 'top', 'htop', 
-        'man', 'ssh', 'mysql', 'psql', 'mongo', 'python', 'python3',
-        'node', 'irb', 'ruby', 'bash', 'zsh', 'sh', 'tmux', 'screen'
+
+    PROMPT_SUGGESTIONS = {
+        "pager": ["send ' ' to continue", "send 'q' to quit"],
+        "press_key": ["send '\\n'"],
+        "confirm": ["send 'y' or 'n'"],
+        "password": ["request credentials or abort"],
+        "idle": ["send input or close the session"],
     }
-    
+
     @property
     def name(self) -> str:
         return "run_interactive"
-    
+
     @property
     def description(self) -> str:
-        return "Execute an interactive command that requires full terminal control (vim, nano, top, etc.)"
-    
+        return (
+            "Run interactive commands via PTY sessions. Start with `command`, then reuse "
+            "the returned session_id with `input_text` to respond to prompts until completion."
+        )
+
     @property
     def schema(self) -> Dict[str, Any]:
         return {
             "type": "function",
             "function": {
                 "name": "run_interactive",
-                "description": "Execute an interactive command that requires full terminal control (vim, nano, top, etc.)",
+                "description": self.description,
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "command": {
                             "type": "string",
-                            "description": "The interactive command to execute (e.g., 'vim file.txt', 'top', 'nano config.py')"
+                            "description": "Interactive command to start (omit when continuing a session)."
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": "Existing session identifier."
+                        },
+                        "input_text": {
+                            "type": "string",
+                            "description": "Input to send to the interactive program (e.g., 'q\n')."
+                        },
+                        "expect_patterns": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Additional regex prompts to watch for."
+                        },
+                        "timeout": {
+                            "type": "number",
+                            "description": "Seconds to wait for output or prompts (default 2s)."
+                        },
+                        "close_session": {
+                            "type": "boolean",
+                            "description": "Terminate the session without sending input."
                         }
                     },
-                    "required": ["command"]
+                    "anyOf": [
+                        {"required": ["command"]},
+                        {"required": ["session_id"]}
+                    ]
                 }
             }
         }
-    
+
     @property
     def usage_examples(self) -> List[str]:
         return [
-            "vim /etc/hosts",
-            "nano ~/.bashrc",
-            "top",
-            "htop"
+            "run_interactive(command=\"man ls\")  # start pager session",
+            "run_interactive(session_id=\"abc\", input_text=\"q\\n\")  # quit pager",
+            "run_interactive(session_id=\"abc\", close_session=True)  # force close"
         ]
-    
-    def execute(self, command: str) -> Dict[str, Any]:
-        """
-        Pass full terminal control to the command.
-        
-        Limitations:
-        - Requires TTY (fails in non-interactive contexts)
-        - Agent cannot see or control the program
-        - User must interact directly
-        """
+
+    def _build_prompt_patterns(self, custom: Optional[List[str]]) -> List[Tuple[re.Pattern, str]]:
+        patterns = list(DEFAULT_PROMPT_PATTERNS)
+        if custom:
+            for pattern in custom:
+                try:
+                    patterns.append((re.compile(pattern), "custom_prompt"))
+                except re.error:
+                    continue
+        return patterns
+
+    def _suggest_actions(self, prompt_event: Optional[Dict[str, str]]) -> List[str]:
+        if not prompt_event:
+            return []
+        prompt_type = prompt_event.get("type")
+        return self.PROMPT_SUGGESTIONS.get(prompt_type, [])
+
+    def execute(
+        self,
+        command: Optional[str] = None,
+        session_id: Optional[str] = None,
+        input_text: Optional[str] = None,
+        expect_patterns: Optional[List[str]] = None,
+        timeout: float = 2.0,
+        close_session: bool = False
+    ) -> Dict[str, Any]:
         try:
-            # Verify TTY availability
-            if not sys.stdin.isatty() or not sys.stdout.isatty():
+            if not command and not session_id:
                 return {
                     "success": False,
-                    "error": "Interactive commands require a TTY; cannot run in non-interactive environment."
+                    "stderr": "Either 'command' or 'session_id' is required.",
+                    "exit_code": 1
                 }
-            
-            # Execute with full terminal control - stdin/stdout/stderr connected
-            result = subprocess.run(
-                command,
-                shell=True,
-                stdin=sys.stdin,
-                stdout=sys.stdout,
-                stderr=sys.stderr
-            )
-            
-            # Report exit status
-            if result.returncode == 0:
-                msg = f"Interactive command '{command}' completed successfully."
+
+            if command and session_id:
+                return {
+                    "success": False,
+                    "stderr": "Provide either 'command' to start or 'session_id' to continue, not both.",
+                    "exit_code": 1
+                }
+
+            session = None
+            if session_id:
+                session = _get_session(session_id)
+                if not session:
+                    return {
+                        "success": False,
+                        "stderr": f"Session '{session_id}' not found or already closed.",
+                        "exit_code": 1
+                    }
+            else:
+                session = InteractiveSession(command=command, working_dir=_get_working_dir_path())
+                _register_session(session)
+
+            if close_session:
+                _remove_session(session.id)
+                agent_payload = {
+                    "tool": "run_interactive",
+                    "status": "terminated",
+                    "session_id": session.id,
+                    "latest_output": "",
+                    "prompt": None,
+                    "events": [{"type": "terminated", "text": "Session closed"}],
+                    "instructions": []
+                }
                 return {
                     "success": True,
-                    "exit_code": 0,
-                    "message": msg,
-                    "stdout": msg,
-                    "raw_stdout": msg
+                    "stdout": "",
+                    "stderr": "",
+                    "status": "terminated",
+                    "session_id": session.id,
+                    "events": agent_payload["events"],
+                    "agent_message": json.dumps(agent_payload, ensure_ascii=False)
                 }
-            else:
-                error_msg = f"Interactive command '{command}' exited with code {result.returncode}."
-                return {
-                    "success": False,
-                    "exit_code": result.returncode,
-                    "error": error_msg,
-                    "stderr": error_msg,
-                    "raw_stderr": error_msg
-                }
-                
-        except KeyboardInterrupt:
-            error_msg = f"Interactive command '{command}' was interrupted by user."
-            return {
-                "success": False,
-                "error": error_msg,
-                "stderr": error_msg,
-                "raw_stderr": error_msg
+
+            patterns = self._build_prompt_patterns(expect_patterns)
+            if input_text:
+                session.send(input_text)
+
+            chunk, prompt_event, status = session.read(patterns, timeout)
+
+            if status == "completed":
+                _remove_session(session.id)
+
+            events = []
+            if chunk:
+                events.append({"type": "output", "text": chunk})
+            if prompt_event:
+                events.append({"type": prompt_event.get("type"), "text": prompt_event.get("text")})
+
+            agent_payload = {
+                "tool": "run_interactive",
+                "session_id": session.id,
+                "status": status,
+                "latest_output": chunk,
+                "prompt": prompt_event,
+                "events": events,
+                "instructions": self._suggest_actions(prompt_event)
             }
-        except Exception as e:
-            error_msg = f"Error executing interactive command: {str(e)}"
+
+            stdout_payload = chunk
+            exit_code = None
+            if status == "completed":
+                stdout_payload = session.collected_output
+                exit_code = session.child.exitstatus if session.child.exitstatus is not None else 0
+
+            return {
+                "success": True,
+                "stdout": stdout_payload,
+                "stderr": "",
+                "exit_code": exit_code,
+                "session_id": session.id,
+                "status": status,
+                "events": events,
+                "agent_message": json.dumps(agent_payload, ensure_ascii=False)
+            }
+        except Exception as exc:
             return {
                 "success": False,
-                "error": error_msg,
-                "stderr": error_msg,
-                "raw_stderr": error_msg
+                "stderr": f"Error executing interactive command: {exc}",
+                "exit_code": 1
             }
 
 
