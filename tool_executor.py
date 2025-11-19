@@ -34,15 +34,19 @@ class ToolExecutor:
     
     MAX_OUTPUT_PREVIEW = 1000  # Characters to store in step_outputs
     
-    def __init__(self, **_unused):
+    def __init__(self, strict_mode: bool = False, **_unused):
         """
         Initialize tool executor.
+        
+        Args:
+            strict_mode: If True, enforce explicit stdout/stderr in tool returns.
+                         If False (default), fallback to JSON dumping dicts.
         
         Note: ToolExecutor does NOT access memory directly.
         The orchestrator is responsible for persisting all execution results.
         ToolExecutor only returns structured data.
         """
-        pass
+        self.strict_mode = strict_mode
     
     def execute(
         self,
@@ -103,7 +107,7 @@ class ToolExecutor:
         # Execute tool
         try:
             result = tool.execute(**tool_args)
-            normalized = self._normalize_tool_result(result)
+            normalized = self._normalize_tool_result(tool_name, result)
             
             # Extract exit code if available
             # Note: Some tools set exit code in _SESSION_STATE, but we'll track it separately
@@ -237,8 +241,9 @@ class ToolExecutor:
         except jsonschema.ValidationError as e:
             return f"Invalid tool arguments: {e.message}"
         except Exception as e:
-            # Silently allow execution if validation fails for other reasons
-            # (malformed schema, etc.)
+            # In strict mode, schema errors are fatal
+            if self.strict_mode:
+                return f"Tool schema error for {tool.name}: {str(e)}"
             return None
     
     def get_available_tools(self) -> List[str]:
@@ -262,9 +267,12 @@ class ToolExecutor:
                 return exit_code
         return None
 
-    def _normalize_tool_result(self, value: Any) -> Dict[str, Optional[str]]:
+    def _normalize_tool_result(self, tool_name: str, value: Any) -> Dict[str, Optional[str]]:
         """
         Normalize tool return value into stdout/stderr/raw fields.
+        
+        In strict_mode, raises ValueError if tool returns a dict without explicit
+        stdout/stderr/result fields.
         """
         stdout = None
         stderr = None
@@ -276,11 +284,21 @@ class ToolExecutor:
             stderr = value.get("stderr")
             raw_stdout = value.get("raw_stdout", stdout)
             raw_stderr = value.get("raw_stderr", stderr)
-            # Fallback to generic payload string if no stdout provided
+            
+            # Legacy: allow "result" only as a bridge (optional)
             if stdout is None and "result" in value:
                 stdout = str(value["result"])
+                if raw_stdout is None:
+                    raw_stdout = stdout
             
-            # If still no stdout, and it's a dict, dump it as JSON
+            if self.strict_mode and stdout is None and stderr is None:
+                # Hard fail: tool contract is broken
+                raise ValueError(
+                    f"Tool '{tool_name}' returned dict without stdout/stderr/result; "
+                    "fix the tool to provide explicit output fields."
+                )
+
+            # Fallback for non-strict mode
             if stdout is None and stderr is None:
                 try:
                     stdout = json.dumps(value, indent=2, ensure_ascii=False)
@@ -316,7 +334,7 @@ class ToolExecutor:
         if not source:
             return None
         return source[: self.MAX_OUTPUT_PREVIEW]
-    
+
 
 def format_observation_content(
     tool_name: str,

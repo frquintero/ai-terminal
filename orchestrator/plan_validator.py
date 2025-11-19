@@ -79,9 +79,14 @@ class PlanValidator:
             if matches:
                 json_text = matches[-1].strip()
             else:
-                # Try to parse the raw text if it looks like JSON
-                json_text = clean_text.strip()
-                if not (json_text.startswith('{') and json_text.endswith('}')):
+                # Try to find the JSON object within the text
+                # This handles cases where there is leading/trailing text outside <think> blocks
+                start = clean_text.find('{')
+                end = clean_text.rfind('}')
+                
+                if start != -1 and end != -1 and end > start:
+                    json_text = clean_text[start:end+1]
+                else:
                      raise ValueError("No JSON object found in response (must start with { and end with })")
 
         return json.loads(json_text)

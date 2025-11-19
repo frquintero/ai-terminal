@@ -624,19 +624,27 @@ class ReadFileTool(BaseTool):
                 "success": True,
                 "content": content,
                 "path": target_path,
-                "size": size
+                "size": size,
+                "stdout": content,
+                "raw_stdout": content
             }
         except UnicodeDecodeError:
+            error_msg = "File is not valid UTF-8 text. Use run_command with cat/hexdump for binary files."
             return {
                 "success": False,
-                "error": "File is not valid UTF-8 text. Use run_command with cat/hexdump for binary files.",
-                "path": target_path
+                "error": error_msg,
+                "path": target_path,
+                "stderr": error_msg,
+                "raw_stderr": error_msg
             }
         except Exception as e:
+            error_msg = f"Error reading file: {str(e)}"
             return {
                 "success": False,
-                "error": f"Error reading file: {str(e)}",
-                "path": target_path
+                "error": error_msg,
+                "path": target_path,
+                "stderr": error_msg,
+                "raw_stderr": error_msg
             }
 
 
@@ -714,17 +722,23 @@ class WriteFileTool(BaseTool):
             _RECENT_WRITES.append(file_path)
             _record_file_event("write", file_path, "write_file", absolute_path=isolated_path)
             
+            msg = f"File written successfully: {isolated_path}"
             return {
                 "success": True,
                 "path": isolated_path,
                 "size": len(content),
-                "message": f"File written successfully: {isolated_path}"
+                "message": msg,
+                "stdout": msg,
+                "raw_stdout": msg
             }
         except Exception as e:
+            error_msg = f"Error writing file: {str(e)}"
             return {
                 "success": False,
-                "error": f"Error writing file: {str(e)}",
-                "path": isolated_path
+                "error": error_msg,
+                "path": isolated_path,
+                "stderr": error_msg,
+                "raw_stderr": error_msg
             }
 
 
@@ -2225,13 +2239,22 @@ class RunCommandTool(BaseTool):
                 )
             except Exception:
                 pass
+            
+            # Ensure raw_stdout/raw_stderr are present for strict mode
+            if "raw_stdout" not in result:
+                result["raw_stdout"] = result.get("stdout", "")
+            if "raw_stderr" not in result:
+                result["raw_stderr"] = result.get("stderr", "")
                 
             return result
             
         except Exception as e:
+            error_msg = f"Error executing command: {str(e)}"
             return {
                 "stdout": "",
-                "stderr": f"Error executing command: {str(e)}",
+                "stderr": error_msg,
+                "raw_stdout": "",
+                "raw_stderr": error_msg,
                 "exit_code": 1
             }
 
@@ -2318,27 +2341,39 @@ class InteractiveCommandTool(BaseTool):
             
             # Report exit status
             if result.returncode == 0:
+                msg = f"Interactive command '{command}' completed successfully."
                 return {
                     "success": True,
                     "exit_code": 0,
-                    "message": f"Interactive command '{command}' completed successfully."
+                    "message": msg,
+                    "stdout": msg,
+                    "raw_stdout": msg
                 }
             else:
+                error_msg = f"Interactive command '{command}' exited with code {result.returncode}."
                 return {
                     "success": False,
                     "exit_code": result.returncode,
-                    "error": f"Interactive command '{command}' exited with code {result.returncode}."
+                    "error": error_msg,
+                    "stderr": error_msg,
+                    "raw_stderr": error_msg
                 }
                 
         except KeyboardInterrupt:
+            error_msg = f"Interactive command '{command}' was interrupted by user."
             return {
                 "success": False,
-                "error": f"Interactive command '{command}' was interrupted by user."
+                "error": error_msg,
+                "stderr": error_msg,
+                "raw_stderr": error_msg
             }
         except Exception as e:
+            error_msg = f"Error executing interactive command: {str(e)}"
             return {
                 "success": False,
-                "error": f"Error executing interactive command: {str(e)}"
+                "error": error_msg,
+                "stderr": error_msg,
+                "raw_stderr": error_msg
             }
 
 
@@ -3387,47 +3422,50 @@ class SearchDBTool(BaseTool):
     @property
     def schema(self) -> Dict[str, Any]:
         return {
-            "name": self.name,
-            "description": self.description,
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "target": {
-                        "type": "string",
-                        "enum": ["chat_history", "step_outputs", "interactions", "intention_cache"],
-                        "description": "Which memory table to search. chat_history=conversations, step_outputs=tool executions, interactions=LLM logs, intention_cache=cached queries"
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target": {
+                            "type": "string",
+                            "enum": ["chat_history", "step_outputs", "interactions", "intention_cache"],
+                            "description": "Which memory table to search. chat_history=conversations, step_outputs=tool executions, interactions=LLM logs, intention_cache=cached queries"
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "Search query (natural language). Use quotes for exact phrases: '\"exact match\"'. Supports wildcards: 'term*', boolean: 'term1 AND term2'"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max results to return (default 10, max 50)",
+                            "default": 10,
+                            "minimum": 1,
+                            "maximum": 50
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": "Optional: Filter results to specific session (default: all sessions)"
+                        },
+                        "tool_filter": {
+                            "type": "string",
+                            "description": "Optional: For step_outputs only - filter by tool name (e.g., 'run_command')"
+                        },
+                        "role_filter": {
+                            "type": "string",
+                            "enum": ["A", "B", "C"],
+                            "description": "Optional: For interactions only - filter by agent role"
+                        },
+                        "success_only": {
+                            "type": "boolean",
+                            "description": "Optional: For step_outputs only - return only successful executions (default false)",
+                            "default": False
+                        }
                     },
-                    "query": {
-                        "type": "string",
-                        "description": "Search query (natural language). Use quotes for exact phrases: '\"exact match\"'. Supports wildcards: 'term*', boolean: 'term1 AND term2'"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max results to return (default 10, max 50)",
-                        "default": 10,
-                        "minimum": 1,
-                        "maximum": 50
-                    },
-                    "session_id": {
-                        "type": "string",
-                        "description": "Optional: Filter results to specific session (default: all sessions)"
-                    },
-                    "tool_filter": {
-                        "type": "string",
-                        "description": "Optional: For step_outputs only - filter by tool name (e.g., 'run_command')"
-                    },
-                    "role_filter": {
-                        "type": "string",
-                        "enum": ["A", "B", "C"],
-                        "description": "Optional: For interactions only - filter by agent role"
-                    },
-                    "success_only": {
-                        "type": "boolean",
-                        "description": "Optional: For step_outputs only - return only successful executions (default false)",
-                        "default": False
-                    }
-                },
-                "required": ["target", "query"]
+                    "required": ["target", "query"]
+                }
             }
         }
     

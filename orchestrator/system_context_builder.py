@@ -182,8 +182,8 @@ Each tool has a specific purpose - use the right tool for each step."""
             # Agent B: Include brief descriptions (for execution)
             tools_desc = []
             for name, tool_obj in tool_registry.items():
-                # Get description from tool object's schema
-                desc = tool_obj.schema.get('description', 'No description')[:60]  # Truncate
+                # Get description directly from tool object
+                desc = tool_obj.description[:60]  # Truncate
                 tools_desc.append(f"- {name}: {desc}")
             
             return f"""**Available Tools ({len(tool_names)}):**
@@ -249,7 +249,7 @@ Each tool has a specific purpose - use the right tool for each step."""
         if role == "A":
             role_intro = "- You are Agent A: focus on planning + narration, never emit commands, and expect Agent B to fulfill every tool call."
         elif role == "B":
-            role_intro = "- You are Agent B: generate commands + output schemas for ONE step at a time, never talk to the user, and honor Agent A's declared output_keys."
+            role_intro = "- You are Agent B: execute the intent using available tools. You can call multiple tools if needed."
         else:
             role_intro = "- You are an orchestration helper role."
 

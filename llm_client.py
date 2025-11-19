@@ -59,6 +59,7 @@ class LLMClient:
         self,
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
         cycle_id: Optional[str] = None,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
@@ -70,6 +71,7 @@ class LLMClient:
         Args:
             messages: List of messages (system, user, assistant, tool)
             tools: Optional tool schemas
+            tool_choice: Optional tool choice (auto, none, or specific tool)
             cycle_id: Cycle ID for logging
             max_tokens: Override default max_tokens
             temperature: Override default temperature
@@ -106,6 +108,13 @@ class LLMClient:
                 
                 if tools:
                     api_kwargs["tools"] = tools
+                    if tool_choice:
+                        api_kwargs["tool_choice"] = tool_choice
+                else:
+                    # Only force JSON object format if NOT using tools
+                    # This avoids conflicts with tool calling models
+                    if self.role in ("A", "B"):
+                        api_kwargs["response_format"] = {"type": "json_object"}
                 
                 # Call OpenAI API
                 response = self.client.chat.completions.create(**api_kwargs)

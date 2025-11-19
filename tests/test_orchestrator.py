@@ -15,7 +15,6 @@ from unittest.mock import Mock, patch
 
 from types import SimpleNamespace
 
-import pytest
 
 from config import Config
 from memory.api import Memory
@@ -450,7 +449,7 @@ class TestAgentBOutputFormatValidation(unittest.TestCase):
             "command": "ls -la",
             "output_format": {"files": "list"}
         }
-        with pytest.raises(ValueError):
+        with self.assertRaises(ValueError):
             self.orchestrator._normalize_agent_b_payload(step, 0, payload)
 
 
