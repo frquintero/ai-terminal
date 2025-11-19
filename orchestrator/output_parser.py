@@ -27,6 +27,7 @@ class OutputParser:
         output_format: Dict[str, str],
         stdout: Optional[str],
         raw_stdout: Optional[str] = None,
+        data: Optional[Any] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, str]]:
         """
         Parse stdout/raw_stdout according to Agent B's output_format mapping.
@@ -59,13 +60,19 @@ class OutputParser:
                 value = normalized_stdout.strip()
                 rendered_value = value
             elif fmt_lower == "list":
-                value = self._parse_list(normalized_stdout)
+                if isinstance(data, list):
+                    value = data
+                else:
+                    value = self._parse_list(normalized_stdout)
                 rendered_value = ", ".join(value)
             elif fmt_lower in ("raw", "table"):
                 value = normalized_raw
                 rendered_value = value
             elif fmt_lower == "json":
-                value = self._parse_json(normalized_stdout, key)
+                if data is not None:
+                    value = data
+                else:
+                    value = self._parse_json(normalized_stdout, key)
                 rendered_value = json.dumps(value, ensure_ascii=False)
             else:
                 raise OutputParserError(

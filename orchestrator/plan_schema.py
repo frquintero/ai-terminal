@@ -21,34 +21,16 @@ from typing import Any, Dict, List, Optional, Tuple
 # 1. Execution Plan (tools required)
 EXECUTION_PLAN_SCHEMA = {
     "type": "object",
-    "required": ["steps", "narration_template"],
+    "required": ["intent"],
     "properties": {
-        "narration_template": {
+        "intent": {
             "type": "string",
-            "description": "Template referencing {output_keys} from all steps"
+            "description": "High-level goal for Agent B"
         },
-        "steps": {
+        "success_criteria": {
             "type": "array",
-            "minItems": 1,
-            "maxItems": 10,
-            "items": {
-                "type": "object",
-                "required": ["tool_name", "intent", "output_keys"],
-                "properties": {
-                    "tool_name": {"type": "string"},
-                    "intent": {"type": "string"},
-                    "description": {"type": "string"},
-                    "specifics": {
-                        "type": "object",
-                        "description": "Concrete details for Agent B (e.g. file content, specific args)"
-                    },
-                    "output_keys": {
-                        "type": "array",
-                        "minItems": 1,
-                        "items": {"type": "string"}
-                    }
-                }
-            }
+            "items": {"type": "string"},
+            "description": "List of conditions for success"
         }
     }
 }
@@ -80,7 +62,7 @@ def detect_response_type(plan: Any) -> Optional[str]:
     if not isinstance(plan, dict):
         return None
     
-    if "steps" in plan:
+    if "intent" in plan:
         return "execution_plan"
     if "response" in plan:
         return "response"
@@ -110,7 +92,7 @@ def validate_plan_structure(plan: Any) -> Tuple[bool, Optional[str]]:
     if response_type is None:
         return False, (
             "Response must be one of:\n"
-            '1. Execution plan: {"steps": [...], "narration_template": "..."}\n'
+            '1. Execution plan: {"intent": "...", "success_criteria": [...]}\n'
             '2. Direct response: {"response": "..."}'
         )
     
@@ -125,69 +107,20 @@ def validate_plan_structure(plan: Any) -> Tuple[bool, Optional[str]]:
 
 def _validate_execution_plan(plan: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
     """Validate execution plan structure."""
-    steps = plan["steps"]
+    intent = plan.get("intent")
     
-    if not isinstance(steps, list):
-        return False, f"'steps' must be array, got {type(steps).__name__}"
-    if len(steps) == 0:
-        return False, "Plan must have at least 1 step"
-    if len(steps) > 10:
-        return False, f"Plan has {len(steps)} steps (max 10). Consider breaking into multiple queries."
+    if not isinstance(intent, str):
+        return False, f"'intent' must be string, got {type(intent).__name__}"
+    if not intent.strip():
+        return False, "'intent' cannot be empty"
     
-    template = plan.get("narration_template")
-    if not isinstance(template, str):
-        return False, f"'narration_template' must be string, got {type(template).__name__}"
-    if not template.strip():
-        return False, "'narration_template' cannot be empty"
-    
-    # Validate each step
-    for idx, step in enumerate(steps):
-        if not isinstance(step, dict):
-            return False, f"Step {idx} must be object, got {type(step).__name__}"
-        
-        # Required fields
-        if "tool_name" not in step:
-            return False, f"Step {idx} missing required 'tool_name'"
-        if "intent" not in step:
-            return False, f"Step {idx} missing required 'intent'"
-        if "output_keys" not in step:
-            return False, f"Step {idx} missing required 'output_keys'"
-        
-        # Type checks
-        if not isinstance(step["tool_name"], str):
-            return False, f"Step {idx} 'tool_name' must be string"
-        if not isinstance(step["intent"], str):
-            return False, f"Step {idx} 'intent' must be string"
-        if "description" in step and not isinstance(step["description"], str):
-            return False, f"Step {idx} 'description' must be string if provided"
-        if "specifics" in step and not isinstance(step["specifics"], dict):
-            return False, f"Step {idx} 'specifics' must be object (dict) if provided"
-        
-        # Non-empty checks
-        if not step["tool_name"].strip():
-            return False, f"Step {idx} 'tool_name' cannot be empty"
-        if not step["intent"].strip():
-            return False, f"Step {idx} 'intent' cannot be empty"
-        if "description" in step and not step["description"].strip():
-            return False, f"Step {idx} 'description' cannot be empty"
-        
-        output_keys = step["output_keys"]
-        if not isinstance(output_keys, list):
-            return False, f"Step {idx} 'output_keys' must be array, got {type(output_keys).__name__}"
-        if len(output_keys) == 0:
-            return False, f"Step {idx} 'output_keys' must have at least one entry"
-        seen = set()
-        for key in output_keys:
-            if not isinstance(key, str):
-                return False, f"Step {idx} output key must be string, got {type(key).__name__}"
-            key_stripped = key.strip()
-            if not key_stripped:
-                return False, f"Step {idx} output key cannot be empty"
-            if key_stripped in seen:
-                return False, f"Step {idx} output key '{key_stripped}' is duplicated"
-            seen.add(key_stripped)
-            # normalize list entries in place
-        step["output_keys"] = [k.strip() for k in output_keys]
+    success_criteria = plan.get("success_criteria")
+    if success_criteria is not None:
+        if not isinstance(success_criteria, list):
+            return False, f"'success_criteria' must be array, got {type(success_criteria).__name__}"
+        for idx, criteria in enumerate(success_criteria):
+            if not isinstance(criteria, str):
+                return False, f"Success criteria {idx} must be string"
     
     return True, None
 
@@ -215,14 +148,7 @@ def validate_tool_availability(plan: Dict[str, Any], available_tools: List[str])
     Returns:
         (valid: bool, error_message: Optional[str])
     """
-    available_set = set(available_tools)
-    
-    for idx, step in enumerate(plan["steps"]):
-        tool_name = step["tool_name"]
-        
-        if tool_name not in available_set:
-            return False, f"Step {idx}: Unknown tool '{tool_name}'. Available: {sorted(available_set)}"
-    
+    # Agent A no longer suggests tools, so this validation is skipped for Agent A plans
     return True, None
 
 

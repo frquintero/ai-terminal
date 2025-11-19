@@ -426,8 +426,11 @@ class Memory:
             "task_state",
             "step_outputs",
             "chat_history",
-            "router_decisions",
-            "cycle_failures"
+            "cycle_failures",
+            "cycle_metrics",
+            "step_metrics",
+            "llm_metrics",
+            "router_decisions"
         ]
         
         with self._lock:
@@ -708,6 +711,10 @@ class Memory:
             """
             INSERT INTO task_state (cycle_id, plan_json, status)
             VALUES (?, ?, ?)
+            ON CONFLICT(cycle_id) DO UPDATE SET
+                plan_json = excluded.plan_json,
+                status = excluded.status,
+                updated_at = CURRENT_TIMESTAMP
             """,
             (cycle_id, plan_json, status)
         )

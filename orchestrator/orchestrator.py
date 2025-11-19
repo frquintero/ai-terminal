@@ -562,7 +562,7 @@ Example: {{"response": "I apologize, but I encountered an internal error..."}}""
             self.memory.update_task_status(
                 cycle_id=cycle_id,
                 status="done",
-                current_step_id=len(plan["steps"]) - 1
+                current_step_id=execution_result.get("total_steps", 0) - 1
             )
             
             if execution_result["success"]:
@@ -572,8 +572,12 @@ Example: {{"response": "I apologize, but I encountered an internal error..."}}""
                         {"route": "PLANNER", "success": True}
                     )
                     template_values = self._build_template_value_map(execution_result)
+                    
+                    # Use narration template from Agent B (in execution_result)
+                    narration_template = execution_result.get("narration_template", "Task completed.")
+                    
                     final_response, response_segments = self._render_narration_template(
-                        template=plan["narration_template"],
+                        template=narration_template,
                         output_values=template_values
                     )
                     execution_result["narration_segments"] = response_segments
@@ -600,13 +604,13 @@ Example: {{"response": "I apologize, but I encountered an internal error..."}}""
                     f"The user asked: {query}",
                     "",
                     "A multi-step plan was executed but did not fully succeed.",
-                    f"Plan steps: {len(plan['steps'])}",
                     f"Steps completed: {execution_result['steps_completed']}",
                     f"Steps failed: {execution_result['steps_failed']}",
                     f"Overall success flag: {execution_result['success']}",
                     "",
                     "Step details:"
                 ]
+                # ... (rest of error handling remains similar)
                 for result in execution_result["step_results"]:
                     status = "PASS" if result["success"] else "FAIL"
                     summary_lines.append(
@@ -678,7 +682,7 @@ Describe the failure and tell the user what to do next."""
         plan: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Execute plan steps sequentially via Agent B → ToolExecutor.
+        Execute plan steps sequentially via Agent B (One-Shot Manifest) → ToolExecutor.
         
         Args:
             cycle_id: Cycle ID for logging
@@ -693,14 +697,14 @@ Describe the failure and tell the user what to do next."""
                 - success: Overall success flag
         
         Workflow:
-        1. For each step in plan:
-           a. Call Agent B (LLM) to generate precise tool_args from intent
-           b. Substitute variables in tool_args ($PREVIOUS_OUTPUT, $STEP_N_OUTPUT)
-           c. Execute via ToolExecutor
-           d. Log to step_outputs table
-           e. Update task_state current_step_id
-           f. On failure: record error, continue
-        2. Return execution summary
+        1. Call Agent B ONCE to generate the full Execution Manifest (all steps).
+        2. Loop through the manifest steps:
+           a. Substitute variables in tool_args ($PREVIOUS_OUTPUT.stdout, etc.)
+           b. Execute via ToolExecutor
+           c. Log to step_outputs table
+           d. Update task_state current_step_id
+           e. On failure: record error, continue
+        3. Return execution summary
         """
         step_results = []
         steps_completed = 0
@@ -709,88 +713,103 @@ Describe the failure and tell the user what to do next."""
         template_values: Dict[str, Any] = {}
         output_value_types: Dict[str, str] = {}
         output_value_sources: Dict[str, Dict[str, Any]] = {}
-        total_steps = len(plan["steps"])
         
-        for step_id, step in enumerate(plan["steps"]):
+        # 1. Get Execution Manifest from Agent B (One-Shot)
+        self._emit_status(
+            "planning",
+            {"route": "PLANNER", "stage": "agent_b_manifest"}
+        )
+        
+        manifest_result = self._get_execution_manifest(cycle_id, plan)
+        
+        if not manifest_result["success"]:
+            # Agent B failed to generate manifest
+            return {
+                "steps_completed": 0,
+                "steps_failed": 0,
+                "total_steps": 0,
+                "step_results": [],
+                "success": False,
+                "error": manifest_result["error"]
+            }
+        
+        # Update plan in DB with the generated manifest (Intent + Manifest)
+        # This ensures we have a record of the actual steps Agent B decided to take
+        plan["manifest"] = manifest_result
+        self.memory.save_plan(
+            cycle_id=cycle_id,
+            plan=plan,
+            status="in_progress"
+        )
+            
+        execution_steps = manifest_result["execution_steps"]
+        narration_template = manifest_result.get("narration_template", "")
+        total_steps = len(execution_steps)
+
+        # 2. Execute Steps
+        for i, exec_step in enumerate(execution_steps):
+            step_id = exec_step.get("step_id", i)
+            
+            # Use description from Agent B if available, or generic
+            description = f"Step {step_id}: {exec_step['tool_name']}"
+            
             # Update current step in task_state
             self.memory.update_task_status(
                 cycle_id=cycle_id,
                 status="in_progress",
                 current_step_id=step_id
             )
-            description = step.get("description", "")
-            self._emit_status(
-                "executing",
-                {
-                    "route": "PLANNER",
-                    "step": step_id + 1,
-                    "total_steps": total_steps,
-                    "tool": step["tool_name"],
-                    "description": description
-                }
-            )
             
-            # Call Agent B to generate precise tool_args
-            agent_b_result = self._call_agent_b(
-                cycle_id=cycle_id,
-                plan=plan,
-                step_id=step_id,
-                previous_results=step_results
-            )
+            tool_name = exec_step["tool_name"]
+            tool_args = exec_step["tool_args"]
+            step_output_format = exec_step.get("output_format", {})
             
-            step_output_format = agent_b_result.get("output_format") or {}
-            
-            if not agent_b_result["success"]:
-                # Agent B failed to generate valid tool_args
+            # Substitute variables in tool_args
+            try:
+                tool_args = self._substitute_step_variables(
+                    tool_args,
+                    step_results
+                )
+            except Exception as e:
+                # Variable substitution failed
                 step_result = {
                     "step_id": step_id,
-                    "tool_name": step["tool_name"],
-                    "tool_args": {},
+                    "tool_name": tool_name,
+                    "tool_args": tool_args,
                     "description": description,
                     "success": False,
                     "output": "",
                     "exit_code": None,
-                    "error": agent_b_result["error"]
+                    "error": f"Variable substitution failed: {str(e)}"
                 }
                 step_results.append(step_result)
                 steps_failed += 1
-                error_text = agent_b_result.get("error", "Agent B failed to generate tool_args")
-                
-                # CRITICAL: Persist Agent B failure to step_outputs so it's visible in debugging
-                # (Previously these failures were never saved, causing them to "disappear" from step_outputs)
                 self.memory.save_step_output(
                     cycle_id=cycle_id,
                     step_id=step_id,
-                    tool_name=step["tool_name"],
-                    tool_args={},
+                    tool_name=tool_name,
+                    tool_args=tool_args,
                     success=False,
                     exit_code=None,
-                    output_preview=error_text[:1000],
+                    output_preview=f"Variable substitution failed: {str(e)}",
                     stdout=None,
-                    stderr=error_text,
+                    stderr=str(e),
                     raw_stdout=None,
-                    raw_stderr=error_text,
+                    raw_stderr=str(e),
                     output_format=step_output_format,
                     parsed_outputs=None,
                     artifact_path=None
                 )
                 continue
-            
-            tool_args = agent_b_result["tool_args"]
-            
-            # Substitute variables in tool_args
-            tool_args = self._substitute_step_variables(
-                tool_args,
-                step_results
-            )
+
             if "command" in tool_args:
                 self._emit_status(
                     "executing",
                     {
                         "route": "PLANNER",
                         "step": step_id + 1,
-                        "total_steps": total_steps,
-                        "tool": step["tool_name"],
+                        "total_steps": len(execution_steps),
+                        "tool": tool_name,
                         "description": description,
                         "command": tool_args.get("command")
                     }
@@ -798,7 +817,7 @@ Describe the failure and tell the user what to do next."""
             
             # Execute step
             exec_result = self.tool_executor.execute(
-                tool_name=step["tool_name"],
+                tool_name=tool_name,
                 tool_args=tool_args,
                 cycle_id=cycle_id,
                 step_id=step_id
@@ -812,7 +831,8 @@ Describe the failure and tell the user what to do next."""
                     parsed_outputs, rendered_values = self.output_parser.parse(
                         output_format=step_output_format,
                         stdout=exec_result.get("stdout"),
-                        raw_stdout=exec_result.get("raw_stdout")
+                        raw_stdout=exec_result.get("raw_stdout"),
+                        data=exec_result.get("data")
                     )
                 except OutputParserError as exc:
                     parse_error = str(exc)
@@ -821,9 +841,10 @@ Describe the failure and tell the user what to do next."""
             step_output_value = exec_result.get("stdout") if exec_result["success"] else None
             if step_output_value is None:
                 step_output_value = exec_result.get("result")
+            
             step_result = {
                 "step_id": step_id,
-                "tool_name": step["tool_name"],
+                "tool_name": tool_name,
                 "tool_args": tool_args,
                 "description": description,
                 "output_format": step_output_format,
@@ -834,14 +855,15 @@ Describe the failure and tell the user what to do next."""
                 "raw_stdout": exec_result.get("raw_stdout"),
                 "raw_stderr": exec_result.get("raw_stderr"),
                 "exit_code": exec_result.get("exit_code"),
-                "error": parse_error or exec_result.get("error")
+                "error": parse_error or exec_result.get("error"),
+                "parsed_outputs": parsed_outputs
             }
             step_results.append(step_result)
             self._emit_tool_output({
                 "route": "PLANNER",
                 "step_id": step_id,
-                "total_steps": total_steps,
-                "tool_name": step["tool_name"],
+                "total_steps": len(execution_steps),
+                "tool_name": tool_name,
                 "tool_args": tool_args,
                 "command": tool_args.get("command"),
                 "stdout": exec_result.get("stdout"),
@@ -861,7 +883,7 @@ Describe the failure and tell the user what to do next."""
             self.memory.save_step_output(
                 cycle_id=cycle_id,
                 step_id=step_id,
-                tool_name=step["tool_name"],
+                tool_name=tool_name,
                 tool_args=tool_args,
                 success=step_success,
                 exit_code=exec_result.get("exit_code"),
@@ -872,7 +894,7 @@ Describe the failure and tell the user what to do next."""
                 raw_stderr=exec_result.get("raw_stderr"),
                 output_format=step_output_format,
                 parsed_outputs=parsed_outputs if step_success else None,
-                artifact_path=None  # TODO: Implement artifact storage for large outputs
+                artifact_path=None
             )
             
             # Record step metrics
@@ -880,7 +902,7 @@ Describe the failure and tell the user what to do next."""
             step_latency = exec_result.get("latency_ms", 0)
             step_metric = StepMetrics(
                 step_id=step_id,
-                tool_name=step["tool_name"],
+                tool_name=tool_name,
                 success=step_success,
                 latency_ms=step_latency,
                 output_size_bytes=output_size
@@ -898,8 +920,14 @@ Describe the failure and tell the user what to do next."""
                 metrics.record_step_metric(step_metric)
             
             if step_success:
+                # Create a dummy plan step for metadata since Agent A doesn't provide steps anymore
+                dummy_plan_step = {
+                    "tool_name": tool_name,
+                    "description": description,
+                    "intent": description
+                }
                 source_metadata = self._build_output_source_metadata(
-                    step=step,
+                    step=dummy_plan_step, 
                     step_id=step_id,
                     description=description,
                     tool_args=tool_args,
@@ -919,7 +947,7 @@ Describe the failure and tell the user what to do next."""
                             exec_result=exec_result
                         ):
                             final_value = self._format_no_output_message(
-                                step=step,
+                                step=dummy_plan_step,
                                 tool_args=tool_args
                             )
                             source_for_key["no_output"] = True
@@ -933,70 +961,46 @@ Describe the failure and tell the user what to do next."""
                         output_value_sources[key] = source_for_key
                         template_values[key] = typed_value_for_template
                 elif not step_output_format:
-                    recorded_keys = self._record_step_outputs(
-                        step=step,
-                        raw_output=exec_result.get("result"),
-                        output_values=output_values
-                    )
-                    for key in recorded_keys:
-                        output_value_types[key] = "str"
-                        output_value_sources[key] = source_metadata
-                        template_values[key] = output_values.get(key)
+                    # If no output format, we can't map to keys for narration
+                    pass
             
             if step_success:
                 steps_completed += 1
             else:
                 steps_failed += 1
-                # For now, continue execution even on failure
-                # Future: make this configurable per step or plan
         
         return {
             "steps_completed": steps_completed,
             "steps_failed": steps_failed,
-            "total_steps": len(plan["steps"]),
+            "total_steps": len(execution_steps),
             "step_results": step_results,
             "success": steps_failed == 0,
             "output_values": output_values,
             "template_values": template_values,
             "output_value_types": output_value_types,
-            "output_value_sources": output_value_sources
+            "output_value_sources": output_value_sources,
+            "narration_template": narration_template
         }
     
-    def _call_agent_b(
+    def _get_execution_manifest(
         self,
         cycle_id: str,
-        plan: Dict[str, Any],
-        step_id: int,
-        previous_results: List[Dict[str, Any]]
+        plan: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Call Agent B to generate precise tool_args for a step.
+        Call Agent B to generate the full Execution Manifest (all steps).
         
         Args:
             cycle_id: Cycle ID for logging
             plan: Complete plan from Agent A
-            step_id: Current step index
-            previous_results: Results from previous steps
         
         Returns:
             Dict with:
                 - success: bool
-                - tool_args: dict (if successful)
-                - command: Optional[str]
-                - output_format: dict mapping output_keys -> types
+                - execution_steps: List[Dict] (if successful)
                 - error: str (if failed)
         """
-        # Get current step's tool name and schema
-        current_step = plan["steps"][step_id]
-        suggested_tool_name = current_step["tool_name"]
-        
-        # ARCHITECTURAL FIX: Give Agent B access to ALL tools, not just the one Agent A picked.
-        # Agent B is the Engineer; if Agent A (Planner) picked the wrong tool (e.g. read_file for 2 files),
-        # Agent B must be able to switch to a better tool (e.g. run_command).
-        
-        # We prioritize the suggested tool in the prompt, but provide the full registry.
-        # For token efficiency, we could filter this, but for now we pass the full registry
-        # so Agent B has the "generic" tools (run_command, write_file) available as fallbacks.
+        # Get all tool schemas
         tool_schemas = [t.schema for t in TOOLS.values()]
         
         # Build system context for Agent B
@@ -1039,7 +1043,7 @@ Describe the failure and tell the user what to do next."""
             if llm_result["error"]:
                 return {
                     "success": False,
-                    "tool_args": {},
+                    "execution_steps": [],
                     "error": f"Agent B LLM call failed: {llm_result['error']}"
                 }
             
@@ -1049,48 +1053,66 @@ Describe the failure and tell the user what to do next."""
             try:
                 response_json = self._parse_agent_b_json(response_text)
                 
-                # Allow Agent B to override the tool name
-                # If response_json has "tool_name", use it. Otherwise default to plan's tool.
-                selected_tool_name = response_json.get("tool_name", suggested_tool_name)
+                # Validate structure
+                if "execution_steps" not in response_json:
+                    raise ValueError("Response missing 'execution_steps' key")
                 
-                # Validate the selected tool exists
-                if selected_tool_name not in TOOLS:
-                     raise ValueError(f"Agent B selected unknown tool '{selected_tool_name}'")
-
-                # Update the step object temporarily for normalization (so it validates against the NEW tool)
-                # We don't mutate the original plan, just the context for normalization
-                step_context = current_step.copy()
-                step_context["tool_name"] = selected_tool_name
+                if not isinstance(response_json["execution_steps"], list):
+                    raise ValueError("'execution_steps' must be a list")
                 
-                normalized = self._normalize_agent_b_payload(
-                    step=step_context,
-                    step_id=step_id,
-                    payload=response_json
-                )
+                # Normalize steps
+                normalized_steps = []
+                for i, step in enumerate(response_json["execution_steps"]):
+                    # Basic validation
+                    if "tool_name" not in step:
+                        raise ValueError(f"Step {i} missing 'tool_name'")
+                    if "tool_args" not in step:
+                        raise ValueError(f"Step {i} missing 'tool_args'")
+                    
+                    # Validate tool exists
+                    if step["tool_name"] not in TOOLS:
+                        raise ValueError(f"Step {i} uses unknown tool '{step['tool_name']}'")
+                    
+                    # Normalize payload (reuse existing logic but adapted)
+                    # We create a dummy 'plan step' context for normalization
+                    dummy_plan_step = {
+                        "tool_name": step["tool_name"],
+                        "output_keys": list(step.get("output_format", {}).keys())
+                    }
+                    
+                    normalized = self._normalize_agent_b_payload(
+                        step=dummy_plan_step,
+                        step_id=i,
+                        payload=step
+                    )
+                    
+                    normalized_steps.append({
+                        "step_id": i,
+                        "tool_name": step["tool_name"],
+                        "tool_args": normalized["tool_args"],
+                        "output_format": normalized["output_format"]
+                    })
                 
-                # Return the selected tool name so the executor knows what to run
                 return {
                     "success": True,
-                    "tool_name": selected_tool_name, # Pass back the actual tool used
-                    "tool_args": normalized["tool_args"],
-                    "command": normalized.get("command"),
-                    "output_format": normalized.get("output_format", {}),
+                    "execution_steps": normalized_steps,
+                    "narration_template": response_json.get("narration_template", ""),
                     "error": None
                 }
+                
             except (json.JSONDecodeError, ValueError) as e:
                 current_try += 1
                 if current_try > max_retries:
                     return {
                         "success": False,
-                        "tool_args": {},
-                        "output_format": {},
-                        "command": None,
+                        "execution_steps": [],
                         "error": str(e)
                     }
                 
                 # Add error to history and retry
                 messages.append({"role": "assistant", "content": response_text})
                 messages.append({"role": "user", "content": f"Error: {str(e)}\nPlease fix the JSON payload."})
+
     
     def _parse_agent_b_json(self, text: str) -> Dict[str, Any]:
         """
@@ -1226,8 +1248,10 @@ Describe the failure and tell the user what to do next."""
         Substitute variables in tool arguments using safe recursive dict walk.
         
         Supports:
-        - $PREVIOUS_OUTPUT: Output from last step
-        - $STEP_N_OUTPUT: Output from step N (0-indexed)
+        - $PREVIOUS_OUTPUT: Output from last step (defaults to 'output' field)
+        - $PREVIOUS_OUTPUT.field: Specific field from last step (stdout, stderr, exit_code, etc.)
+        - $STEP_N_OUTPUT: Output from step N (defaults to 'output' field)
+        - $STEP_N_OUTPUT.field: Specific field from step N
         
         Args:
             tool_args: Tool arguments dict (may contain variable references)
@@ -1239,33 +1263,66 @@ Describe the failure and tell the user what to do next."""
         import re
         import copy
         
+        # Regex to match $PREVIOUS_OUTPUT or $STEP_N_OUTPUT with optional .field
+        # Group 1: "PREVIOUS" or "STEP_N"
+        # Group 2: "PREVIOUS" (if match is PREVIOUS)
+        # Group 3: N (if match is STEP_N)
+        # Group 4: field name (optional)
+        VAR_REGEX = re.compile(r'\$((PREVIOUS)|STEP_(\d+))_OUTPUT(?:\.([a-zA-Z0-9_]+))?')
+        
+        def resolve_match(match) -> str:
+            full_match = match.group(0)
+            var_type_full = match.group(1)
+            is_previous = match.group(2) is not None
+            step_idx_str = match.group(3)
+            field_name = match.group(4)
+            
+            target_result = None
+            
+            if is_previous:
+                if previous_results:
+                    target_result = previous_results[-1]
+            elif step_idx_str is not None:
+                step_idx = int(step_idx_str)
+                if 0 <= step_idx < len(previous_results):
+                    target_result = previous_results[step_idx]
+            
+            if target_result is None:
+                return full_match # Could not resolve step
+            
+            # Determine value to extract
+            if field_name:
+                # Access specific field
+                if field_name in target_result:
+                    val = target_result[field_name]
+                    return str(val) if val is not None else ""
+                else:
+                    # Field not found in result.
+                    # It might be a file extension or suffix (e.g. $VAR.txt)
+                    # Try to resolve the base variable (defaulting to "output")
+                    # and append the suffix.
+                    base_val = target_result.get("output")
+                    if base_val is not None:
+                        return str(base_val) + "." + field_name
+                    
+                    return full_match
+            else:
+                # Default to "output" (legacy behavior)
+                val = target_result.get("output")
+                return str(val) if val is not None else ""
+
         def substitute_in_value(value: Any) -> Any:
             """Recursively substitute variables in a value (str, dict, list, or primitive)"""
             if isinstance(value, str):
-                # Substitute $PREVIOUS_OUTPUT
-                if previous_results and "$PREVIOUS_OUTPUT" in value:
-                    last_output = previous_results[-1]["output"]
-                    value = value.replace("$PREVIOUS_OUTPUT", last_output)
-                
-                # Substitute $STEP_N_OUTPUT
-                for match in re.finditer(r'\$STEP_(\d+)_OUTPUT', value):
-                    step_num = int(match.group(1))
-                    if step_num < len(previous_results):
-                        step_output = previous_results[step_num]["output"]
-                        value = value.replace(match.group(0), step_output)
-                
-                return value
+                return VAR_REGEX.sub(resolve_match, value)
             
             elif isinstance(value, dict):
-                # Recursively process dict
                 return {k: substitute_in_value(v) for k, v in value.items()}
             
             elif isinstance(value, list):
-                # Recursively process list
                 return [substitute_in_value(item) for item in value]
             
             else:
-                # Primitive type (int, float, bool, None) - return as-is
                 return value
         
         # Deep copy to avoid mutating original

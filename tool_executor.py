@@ -122,6 +122,7 @@ class ToolExecutor:
                 "raw_stderr": normalized["raw_stderr"],
                 "exit_code": exit_code,
                 "output_preview": preview,
+                "data": result if isinstance(result, (dict, list)) else None,
                 "error": None
             }
         
@@ -278,6 +279,16 @@ class ToolExecutor:
             # Fallback to generic payload string if no stdout provided
             if stdout is None and "result" in value:
                 stdout = str(value["result"])
+            
+            # If still no stdout, and it's a dict, dump it as JSON
+            if stdout is None and stderr is None:
+                try:
+                    stdout = json.dumps(value, indent=2, ensure_ascii=False)
+                    raw_stdout = stdout
+                except Exception:
+                    stdout = str(value)
+                    raw_stdout = stdout
+
         elif isinstance(value, (list, tuple)):
             stdout = "\n".join(str(item) for item in value)
             raw_stdout = stdout

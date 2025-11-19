@@ -31,6 +31,8 @@ def test_config():
         agent_type="custom",
         max_tokens=1024,
         temperature=0.7,
+        agent_a_temperature=0.7,
+        agent_b_temperature=0.0,
         hide_thinking=False,
         max_steps=5,
         show_raw_output=False,
@@ -40,6 +42,7 @@ def test_config():
         event_memory_max_events=40,
         event_memory_max_chars=6000,
         artifact_threshold_bytes=8192,
+        save_llm_traces=False,
     )
 
 
@@ -75,49 +78,47 @@ class TestTask1DiskMonitoring:
             "and alerts when it exceeds 80%"
         )
 
-        # Mock Agent A (Planner) response - returns list of tool names
+        # Mock Agent A (Planner) response - returns intent
         planner_response = {
-            "plan": [
-                "get_disk_usage",  # Check current disk usage
-                "create_file",      # Create monitoring script
-                "run_command",      # Make script executable
-            ],
-            "reasoning": "First check current disk usage, then create script, then set permissions",
+            "intent": "Create a Python script that monitors disk space and alerts when it exceeds 80%",
+            "success_criteria": ["script created", "permissions set"]
         }
 
         # Mock Agent B (Command Engineer) responses for each step
-        agent_b_responses = [
-            {
-                # Step 1: Get disk usage
-                "tool_name": "run_command",
-                "tool_args": {"command": "df -h / | grep -oP '[0-9]+(?=%)' | head -1"},
-            },
-            {
-                # Step 2: Create script file
-                "tool_name": "create_file",
-                "tool_args": {
-                    "path": "/tmp/disk_monitor.py",
-                    "content": (
-                        "#!/usr/bin/env python3\n"
-                        "import os\n"
-                        "import psutil\n"
-                        "usage = psutil.disk_usage('/')\n"
-                        "if usage.percent > 80:\n"
-                        "    print(f'ALERT: Disk usage {usage.percent}%')\n"
-                    ),
+        agent_b_response = {
+            "execution_steps": [
+                {
+                    # Step 1: Get disk usage
+                    "tool_name": "run_command",
+                    "tool_args": {"command": "df -h / | grep -oP '[0-9]+(?=%)' | head -1"},
                 },
-            },
-            {
-                # Step 3: Make executable
-                "tool_name": "run_command",
-                "tool_args": {"command": "chmod +x /tmp/disk_monitor.py"},
-            },
-        ]
+                {
+                    # Step 2: Create script file
+                    "tool_name": "create_file",
+                    "tool_args": {
+                        "path": "/tmp/disk_monitor.py",
+                        "content": (
+                            "#!/usr/bin/env python3\n"
+                            "import os\n"
+                            "import psutil\n"
+                            "usage = psutil.disk_usage('/')\n"
+                            "if usage.percent > 80:\n"
+                            "    print(f'ALERT: Disk usage {usage.percent}%')\n"
+                        ),
+                    },
+                },
+                {
+                    # Step 3: Make executable
+                    "tool_name": "run_command",
+                    "tool_args": {"command": "chmod +x /tmp/disk_monitor.py"},
+                },
+            ],
+            "narration_template": "Task completed."
+        }
 
         # Simulate decomposition and execution
-        assert len(planner_response["plan"]) == 3
-        assert all(tool in ["get_disk_usage", "create_file", "run_command"] 
-                   for tool in planner_response["plan"])
+        assert planner_response["intent"] is not None
+        assert len(agent_b_response["execution_steps"]) == 3
 
     def test_task1_execution_steps(self, orchestrator):
         """Test step-by-step execution for disk monitoring task"""
@@ -175,48 +176,81 @@ class TestTask2BackupScript:
         query = "Set up a daily backup of my home directory to an external drive"
 
         # Expected decomposition
-        expected_steps = [
-            "create_file",        # Create backup script
-            "run_command",        # Test script
-            "run_command",        # Set up cron job
-        ]
+        expected_intent = "Set up a daily backup of my home directory to an external drive"
+        
+        # Mock Agent A response
+        planner_response = {
+            "intent": expected_intent,
+            "success_criteria": ["backup script created", "cron job set"]
+        }
 
-        assert len(expected_steps) == 3
-        assert expected_steps[0] == "create_file"
+        assert planner_response["intent"] == expected_intent
 
     def test_task2_execution_with_mocked_llm(self, orchestrator):
         """Test full execution with mocked LLM calls"""
         query = "Set up a daily backup of my home directory to an external drive"
 
-        mock_response = Mock()
-        mock_response.content = "Backup script created and cron job scheduled"
-        mock_response.usage = Mock(
-            prompt_tokens=100, completion_tokens=150, total_tokens=250
-        )
+        # Mock Agent A response
+        agent_a_json = json.dumps({
+            "intent": "Set up a daily backup of my home directory to an external drive",
+            "success_criteria": ["backup script created", "cron job set"]
+        })
+        agent_a_response = Mock()
+        agent_a_response.content = f"```json\n{agent_a_json}\n```"
+
+        # Mock Agent B response
+        agent_b_json = json.dumps({
+            "execution_steps": [
+                {
+                    "tool_name": "write_file",
+                    "tool_args": {"file_path": "backup.sh", "content": "echo backup"},
+                    "output_format": {"path": "str"}
+                }
+            ],
+            "narration_template": "Backup script created at {path}"
+        })
+        agent_b_response = Mock()
+        agent_b_response.content = f"```json\n{agent_b_json}\n```"
 
         with patch("orchestrator.orchestrator.LLMClient") as MockLLMClient:
             mock_llm = Mock()
-            mock_llm.call.return_value = {
-                "message": mock_response,
-                "usage": {
-                    "prompt_tokens": 100,
-                    "completion_tokens": 150,
-                    "total_tokens": 250,
+            # Configure side_effect for multiple calls
+            mock_llm.call.side_effect = [
+                {
+                    "message": agent_a_response,
+                    "usage": {"total_tokens": 100},
+                    "latency_ms": 500,
+                    "trace_id": "trace-a",
+                    "error": None
                 },
-                "latency_ms": 1200,
-                "trace_id": "test-backup-trace",
-                "error": None,
-            }
+                {
+                    "message": agent_b_response,
+                    "usage": {"total_tokens": 100},
+                    "latency_ms": 500,
+                    "trace_id": "trace-b",
+                    "error": None
+                }
+            ]
             MockLLMClient.return_value = mock_llm
 
-            # Execute
-            result = orchestrator.handle_query(query)
+            # Mock ToolExecutor to avoid actual file creation
+            with patch("orchestrator.orchestrator.ToolExecutor") as MockExecutor:
+                mock_executor = Mock()
+                mock_executor.execute.return_value = {
+                    "success": True,
+                    "result": "/tmp/backup.sh",
+                    "stdout": "/tmp/backup.sh",
+                    "exit_code": 0,
+                    "error": None
+                }
+                MockExecutor.return_value = mock_executor                # Execute
+                result = orchestrator.handle_query(query)
 
-            # Verify result structure
-            # Router may classify as PLANNER, CHAT, or SHELL depending on patterns
-            assert result.route in ["PLANNER", "CHAT", "SHELL"]
-            # Response will have either agent_response (CHAT) or plan (PLANNER) or was SHELL
-            assert result.cycle_id is not None
+                # Verify result structure
+                assert result.route == "PLANNER"
+                assert result.cycle_id is not None
+                assert result.execution_result["success"] is True
+                assert "Backup script created" in result.agent_response
 
 
 class TestTask3DockerMonitoring:
@@ -226,10 +260,15 @@ class TestTask3DockerMonitoring:
         """Test Agent A decomposition for Docker monitoring task"""
         query = "Find all Docker containers using more than 500MB memory and list them"
 
-        # Expected steps
-        expected_tools = ["run_command", "run_command"]  # docker stats, filter
+        # Expected intent
+        expected_intent = "Find all Docker containers using more than 500MB memory and list them"
+        
+        planner_response = {
+            "intent": expected_intent,
+            "success_criteria": ["containers listed"]
+        }
 
-        assert len(expected_tools) == 2
+        assert planner_response["intent"] == expected_intent
 
     def test_task3_execution_with_tool_schema(self, orchestrator):
         """Test Agent B receiving tool schemas for Docker task"""
@@ -372,20 +411,8 @@ class TestPlannerIntegration:
         )
         
         plan = {
-            "steps": [
-                {
-                    "id": 0,
-                    "tool": "create_file",
-                    "tool_name": "create_file",
-                    "description": "Create monitoring script"
-                },
-                {
-                    "id": 1,
-                    "tool": "run_command",
-                    "tool_name": "run_command",
-                    "description": "Make script executable"
-                }
-            ]
+            "intent": "Create a Python script that monitors disk space",
+            "success_criteria": ["script created"]
         }
         memory.save_plan(cycle_id=cycle_id, plan=plan, status="in_progress")
         
@@ -427,32 +454,21 @@ class TestPlannerIntegration:
         )
         
         plan = {
-            "steps": [
-                {
-                    "id": 0,
-                    "tool": "create_file",
-                    "tool_name": "create_file",
-                    "description": "Create test script"
-                },
-                {
-                    "id": 1,
-                    "tool": "run_command",
-                    "tool_name": "run_command",
-                    "description": "Run test script"
-                },
-                {
-                    "id": 2,
-                    "tool": "run_command",
-                    "tool_name": "run_command",
-                    "description": "Cleanup"
-                }
-            ]
+            "intent": "Create a simple test script",
+            "success_criteria": ["script created"]
         }
         
         memory.save_plan(cycle_id=cycle_id, plan=plan, status="in_progress")
         
         # Simulate step execution progression (as in _execute_plan)
-        for step_id in range(3):
+        # Note: Agent B would provide the steps dynamically now
+        steps_from_agent_b = [
+            {"tool_name": "create_file"},
+            {"tool_name": "run_command"},
+            {"tool_name": "run_command"}
+        ]
+        
+        for step_id, step in enumerate(steps_from_agent_b):
             # Update current step
             memory.update_task_status(
                 cycle_id=cycle_id,
@@ -464,7 +480,7 @@ class TestPlannerIntegration:
             memory.save_step_output(
                 cycle_id=cycle_id,
                 step_id=step_id,
-                tool_name=plan["steps"][step_id]["tool_name"],
+                tool_name=step["tool_name"],
                 tool_args={},
                 success=True,
                 output_preview=f"Step {step_id} completed"

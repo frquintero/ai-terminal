@@ -26,6 +26,8 @@ def test_config():
         agent_type="custom",
         max_tokens=1024,
         temperature=0.7,
+        agent_a_temperature=0.7,
+        agent_b_temperature=0.7,
         hide_thinking=False,
         max_steps=5,
         show_raw_output=False,
@@ -35,9 +37,8 @@ def test_config():
         event_memory_max_events=40,
         event_memory_max_chars=6000,
         artifact_threshold_bytes=8192,
+        save_llm_traces=False,
     )
-
-
 @pytest.fixture
 def temp_db():
     """Create temporary database for testing"""
@@ -51,7 +52,7 @@ def memory(temp_db):
     """Create Memory instance with test database"""
     mem = Memory(db_path=temp_db)
     yield mem
-        mem.close(force=True)
+    mem.close(force=True)
 
 
 @pytest.fixture
@@ -275,8 +276,9 @@ class TestHandoffIntegration:
         # Step 1: Chat exchange
         with patch("orchestrator.orchestrator.LLMClient") as MockLLMClient:
             mock_llm = Mock()
+            # Return valid JSON for CHAT route
             mock_llm.call.return_value = {
-                "message": Mock(content="Chat response"),
+                "message": Mock(content='{"response": "Chat response"}'),
                 "usage": None,
                 "latency_ms": 100,
                 "trace_id": "test-1",
