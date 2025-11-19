@@ -10,6 +10,8 @@ class Config:
         agent_type: str,
         max_tokens: int,
         temperature: float,
+        agent_a_temperature: float,
+        agent_b_temperature: float,
         hide_thinking: bool,
         max_steps: int,
         show_raw_output: bool,
@@ -27,6 +29,8 @@ class Config:
         self.agent_type = agent_type
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.agent_a_temperature = agent_a_temperature
+        self.agent_b_temperature = agent_b_temperature
         self.hide_thinking = hide_thinking
         self.max_steps = max_steps
         self.show_raw_output = show_raw_output
@@ -87,6 +91,19 @@ def load_config() -> Config:
     except ValueError:
         raise ValueError("TEMPERATURE must be a float")
 
+    # Separate temperatures for Agent A and Agent B
+    agent_a_temperature_str = os.getenv('AGENT_A_TEMPERATURE', temperature_str)
+    try:
+        agent_a_temperature = float(agent_a_temperature_str)
+    except ValueError:
+        raise ValueError("AGENT_A_TEMPERATURE must be a float")
+
+    agent_b_temperature_str = os.getenv('AGENT_B_TEMPERATURE', temperature_str)
+    try:
+        agent_b_temperature = float(agent_b_temperature_str)
+    except ValueError:
+        raise ValueError("AGENT_B_TEMPERATURE must be a float")
+
     hide_thinking_str = os.getenv('HIDE_THINKING', 'true')
     if hide_thinking_str.lower() in ('true', '1', 'yes'):
         hide_thinking = True
@@ -144,6 +161,8 @@ def load_config() -> Config:
         agent_type,
         max_tokens,
         temperature,
+        agent_a_temperature,
+        agent_b_temperature,
         hide_thinking,
         max_steps,
         show_raw_output,

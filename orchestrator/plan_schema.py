@@ -38,6 +38,10 @@ EXECUTION_PLAN_SCHEMA = {
                     "tool_name": {"type": "string"},
                     "intent": {"type": "string"},
                     "description": {"type": "string"},
+                    "specifics": {
+                        "type": "object",
+                        "description": "Concrete details for Agent B (e.g. file content, specific args)"
+                    },
                     "output_keys": {
                         "type": "array",
                         "minItems": 1,
@@ -156,6 +160,8 @@ def _validate_execution_plan(plan: Dict[str, Any]) -> Tuple[bool, Optional[str]]
             return False, f"Step {idx} 'intent' must be string"
         if "description" in step and not isinstance(step["description"], str):
             return False, f"Step {idx} 'description' must be string if provided"
+        if "specifics" in step and not isinstance(step["specifics"], dict):
+            return False, f"Step {idx} 'specifics' must be object (dict) if provided"
         
         # Non-empty checks
         if not step["tool_name"].strip():

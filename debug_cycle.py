@@ -71,12 +71,26 @@ class CycleDebugger:
     
     def find_cycle(self, prefix: str) -> Optional[str]:
         """Find full cycle_id from prefix"""
+        # Check router_decisions first
         cursor = self.conn.execute(
             "SELECT cycle_id FROM router_decisions WHERE cycle_id LIKE ? LIMIT 1",
             (f"{prefix}%",)
         )
         row = cursor.fetchone()
-        return row[0] if row else None
+        if row:
+            return row[0]
+            
+        # Check cycle_failures
+        if self._table_exists("cycle_failures"):
+             cursor = self.conn.execute(
+                "SELECT cycle_id FROM cycle_failures WHERE cycle_id LIKE ? LIMIT 1",
+                (f"{prefix}%",)
+            )
+             row = cursor.fetchone()
+             if row:
+                 return row[0]
+                 
+        return None
     
     def get_recent_cycles(self, limit: int = 5) -> List[Dict[str, Any]]:
         """Get recent cycles for display"""
@@ -93,6 +107,7 @@ class CycleDebugger:
     
     def get_cycle_metadata(self, cycle_id: str) -> Optional[Dict[str, Any]]:
         """Get cycle metadata"""
+        # Try router_decisions first
         cursor = self.conn.execute(
             """
             SELECT cycle_id, route, query_text, confidence, created_at 
@@ -102,7 +117,27 @@ class CycleDebugger:
             (cycle_id,)
         )
         row = cursor.fetchone()
-        return dict(row) if row else None
+        if row:
+            return dict(row)
+            
+        # Try cycle_failures
+        if self._table_exists("cycle_failures"):
+            cursor = self.conn.execute(
+                """
+                SELECT cycle_id, route, query_text, '0.0' as confidence, created_at, 
+                       error_message, error_type, stage, payload_json
+                FROM cycle_failures 
+                WHERE cycle_id = ?
+                """,
+                (cycle_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                data = dict(row)
+                data['is_failure'] = True
+                return data
+                
+        return None
     
     def get_agent_interactions(self, cycle_id: str) -> List[Dict[str, Any]]:
         """Get all agent interactions for this cycle"""
@@ -178,9 +213,36 @@ class CycleDebugger:
         print(f"CYCLE: {cycle_id}")
         print("="*70)
         
+        if metadata.get('is_failure'):
+            print(f"\n❌ CYCLE FAILED")
+            print(f"  Error Type: {metadata.get('error_type')}")
+            print(f"  Stage:      {metadata.get('stage')}")
+            print(f"  Message:    {metadata.get('error_message')}")
+            
+            if metadata.get('payload_json'):
+                try:
+                    payload = json.loads(metadata['payload_json'])
+                    print("\n💥 FAILURE PAYLOAD:")
+                    # Extract execution result if present
+                    exec_result = payload.get('execution_result')
+                    if exec_result:
+                        steps = exec_result.get('step_results', [])
+                        for step in steps:
+                            print(f"  Step {step.get('step_id')}: {step.get('tool_name')}")
+                            print(f"    Success: {step.get('success')}")
+                            if step.get('error'):
+                                print(f"    Error:   {step.get('error')}")
+                    
+                    # Extract agent response if present
+                    agent_response = payload.get('agent_response')
+                    if agent_response:
+                        print(f"\n  Agent Response Preview: {self._truncate(agent_response, 200)}")
+                except Exception as e:
+                    print(f"  Payload parsing error: {e}")
+        
         print(f"\n📋 METADATA:")
         print(f"  Route:      {metadata['route']}")
-        print(f"  Confidence: {metadata['confidence']:.2f}")
+        print(f"  Confidence: {float(metadata['confidence']):.2f}")
         print(f"  Query:      {metadata['query_text']}")
         print(f"  Created:    {metadata['created_at']}")
         

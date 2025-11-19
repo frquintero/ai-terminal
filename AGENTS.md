@@ -1,15 +1,15 @@
-## Issue Tracking with bd (beads)
+# Issue Tracking with bd (beads)
 
 **IMPORTANT**: This project uses **bd (beads)** for ALL issue tracking. Do NOT use markdown TODOs, task lists, or other tracking methods.
 
-### Why bd?
+## Why bd?
 
 - Dependency-aware: Track blockers and relationships between issues
 - Git-friendly: Auto-syncs to JSONL for version control
 - Agent-optimized: JSON output, ready work detection, discovered-from links
 - Prevents duplicate tracking systems and confusion
 
-### Quick Start
+## Quick Start
 
 **Check for ready work:**
 ```bash

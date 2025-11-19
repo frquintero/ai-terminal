@@ -134,7 +134,9 @@ class LLMClient:
                         messages=messages,
                         response_text=assistant_message.content or "",
                         usage=usage_dict,
-                        latency_ms=latency_ms
+                        latency_ms=latency_ms,
+                        temperature=temperature,
+                        max_tokens=max_tokens
                     )
                 
                 # Record LLM metrics
@@ -247,7 +249,9 @@ class LLMClient:
         messages: List[Dict[str, Any]],
         response_text: str,
         usage: Optional[Dict[str, int]],
-        latency_ms: int
+        latency_ms: int,
+        temperature: float,
+        max_tokens: int
     ):
         """
         Log interaction to Memory.
@@ -258,6 +262,8 @@ class LLMClient:
             response_text: Assistant response text
             usage: Token usage dict
             latency_ms: Call latency
+            temperature: Temperature used for this call
+            max_tokens: Max tokens used for this call
         """
         # Extract system prompt for checksum
         system_prompt = ""
@@ -293,8 +299,8 @@ class LLMClient:
                 full_prompt=full_prompt,
                 full_response=response_text,
                 model=self.config.model,
-                temperature=self.config.temperature,
-                max_tokens=self.config.max_tokens
+                temperature=temperature,
+                max_tokens=max_tokens
             )
     
     def _generate_prompt_preview(self, messages: List[Dict[str, Any]]) -> str:

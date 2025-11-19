@@ -18,7 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from config import Config
 from llm_client import LLMClient
 from memory.api import Memory
-from orchestrator.prompts import get_agent_a_system_prompt, get_agent_b_prompt
+from orchestrator.prompts import get_agent_a_system_prompt, get_agent_a_user_message, get_agent_b_system_prompt, get_agent_b_user_message
 from orchestrator.metrics import CycleMetrics, StepMetrics, LLMMetrics, get_metrics
 from orchestrator.system_context_builder import SystemContextBuilder
 from orchestrator.plan_validator import PlanValidator, PlanValidationError
@@ -353,11 +353,13 @@ Explain what happened and advise the user to retry after checking logs."""
         )
         system_prompt = system_context + "\n\n" + get_agent_a_system_prompt(available_tools)
         
-        user_prompt = (
+        user_context_msg = (
             f"{user_context.strip()}\n\n"
             "Respond with a direct JSON object {\"response\": \"...\"} for the user. "
             "Do not propose a new tool plan."
         )
+        
+        user_prompt = get_agent_a_user_message(user_context_msg)
         
         messages = [
             {"role": "system", "content": system_prompt},
@@ -369,17 +371,18 @@ Explain what happened and advise the user to retry after checking logs."""
             role="A",
             memory=self.memory
         )
-        llm_result = llm_client.call(messages=messages, cycle_id=cycle_id)
+        llm_result = llm_client.call(messages=messages, cycle_id=cycle_id, temperature=self.config.agent_a_temperature)
         
         if llm_result["error"]:
             return f"[Agent A response failed: {llm_result['error']}]\n\n{user_context}"
         
         content = llm_result["message"].content or ""
         try:
-            payload = json.loads(content)
+            # Use robust parsing to handle <think> tags or markdown blocks
+            payload = self._parse_agent_b_json(content)
             if isinstance(payload, dict) and "response" in payload:
                 return payload["response"]
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, ValueError):
             pass
         
         return content or user_context
@@ -422,10 +425,12 @@ Explain what happened and advise the user to retry after checking logs."""
         # Build context for Agent A: include last 3 chat interactions (Chat→Planner handoff)
         context_msg = self._build_agent_a_context_message(query)
         
+        user_message = get_agent_a_user_message(context_msg)
+        
         # Retry loop
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": context_msg}
+            {"role": "user", "content": user_message}
         ]
         
         response = None
@@ -445,7 +450,8 @@ Explain what happened and advise the user to retry after checking logs."""
             
             llm_result = llm_client.call(
                 messages=messages,
-                cycle_id=cycle_id
+                cycle_id=cycle_id,
+                temperature=self.config.agent_a_temperature
             )
             
             if llm_result["error"]:
@@ -489,10 +495,17 @@ Agent A could not produce valid planner JSON after {self.MAX_PLAN_RETRIES + 1} a
 Last validation hint:
 {last_error}
 
-Explain the failure to the user and suggest trying again."""
+Explain the failure to the user and suggest trying again.
+IMPORTANT: Respond with a valid JSON object containing a single "response" key.
+Example: {{"response": "I apologize, but I encountered an internal error..."}}"""
+            
+            # Re-inject history so Agent A knows what "it" refers to
+            history_context = self._build_agent_a_context_message(query)
+            full_fallback_context = f"{history_context}\n\n{fallback_context}"
+
             agent_response = self._call_agent_a_direct_response(
                 cycle_id=cycle_id,
-                user_context=fallback_context
+                user_context=full_fallback_context
             )
             
             return OrchestratorResult(
@@ -733,7 +746,7 @@ Describe the failure and tell the user what to do next."""
                     "step_id": step_id,
                     "tool_name": step["tool_name"],
                     "tool_args": {},
-                    "description": step["description"],
+                    "description": description,
                     "success": False,
                     "output": "",
                     "exit_code": None,
@@ -975,17 +988,16 @@ Describe the failure and tell the user what to do next."""
         """
         # Get current step's tool name and schema
         current_step = plan["steps"][step_id]
-        tool_name = current_step["tool_name"]
+        suggested_tool_name = current_step["tool_name"]
         
-        # Get only the current tool's schema (not all tools)
-        tool = TOOLS.get(tool_name)
-        if not tool:
-            return {
-                "success": False,
-                "error": f"Tool '{tool_name}' not found in registry"
-            }
+        # ARCHITECTURAL FIX: Give Agent B access to ALL tools, not just the one Agent A picked.
+        # Agent B is the Engineer; if Agent A (Planner) picked the wrong tool (e.g. read_file for 2 files),
+        # Agent B must be able to switch to a better tool (e.g. run_command).
         
-        current_tool_schema = [tool.schema]  # Single-item list for consistency with prompt format
+        # We prioritize the suggested tool in the prompt, but provide the full registry.
+        # For token efficiency, we could filter this, but for now we pass the full registry
+        # so Agent B has the "generic" tools (run_command, write_file) available as fallbacks.
+        tool_schemas = [t.schema for t in TOOLS.values()]
         
         # Build system context for Agent B
         system_context = self.context_builder.build_for_role(
@@ -995,17 +1007,19 @@ Describe the failure and tell the user what to do next."""
             shell_cwd=self._get_effective_shell_cwd()
         )
         
-        # Build Agent B prompt with only current tool's schema
-        system_prompt = system_context + "\n\n" + get_agent_b_prompt(
+        # Build Agent B prompt
+        system_prompt = system_context + "\n\n" + get_agent_b_system_prompt()
+        
+        user_message = get_agent_b_user_message(
             plan=plan,
             current_step_id=step_id,
             previous_outputs=previous_results,
-            tool_schemas=current_tool_schema
+            tool_schemas=tool_schemas  # Pass ALL schemas
         )
         
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Generate tool_args for step {step_id}"}
+            {"role": "user", "content": user_message}
         ]
         
         # Call LLM in Agent B role
@@ -1015,55 +1029,80 @@ Describe the failure and tell the user what to do next."""
             memory=self.memory
         )
         
-        llm_result = llm_client.call(
-            messages=messages,
-            cycle_id=cycle_id
-        )
+        max_retries = 2
+        current_try = 0
         
-        if llm_result["error"]:
-            return {
-                "success": False,
-                "tool_args": {},
-                "error": f"Agent B LLM call failed: {llm_result['error']}"
-            }
-        
-        # Parse Agent B response
-        response_text = llm_result["message"].content or ""
-        
-        try:
-            response_json = self._parse_agent_b_json(response_text)
-            normalized = self._normalize_agent_b_payload(
-                step=current_step,
-                step_id=step_id,
-                payload=response_json
+        while True:
+            llm_result = llm_client.call(
+                messages=messages,
+                cycle_id=cycle_id,
+                temperature=self.config.agent_b_temperature
             )
-            return {
-                "success": True,
-                "tool_args": normalized["tool_args"],
-                "command": normalized.get("command"),
-                "output_format": normalized.get("output_format", {}),
-                "error": None
-            }
-        except json.JSONDecodeError as e:
-            return {
-                "success": False,
-                "tool_args": {},
-                "output_format": {},
-                "command": None,
-                "error": f"Agent B returned invalid JSON: {e}"
-            }
-        except ValueError as e:
-            return {
-                "success": False,
-                "tool_args": {},
-                "output_format": {},
-                "command": None,
-                "error": str(e)
-            }
+            
+            if llm_result["error"]:
+                return {
+                    "success": False,
+                    "tool_args": {},
+                    "error": f"Agent B LLM call failed: {llm_result['error']}"
+                }
+            
+            # Parse Agent B response
+            response_text = llm_result["message"].content or ""
+            
+            try:
+                response_json = self._parse_agent_b_json(response_text)
+                
+                # Allow Agent B to override the tool name
+                # If response_json has "tool_name", use it. Otherwise default to plan's tool.
+                selected_tool_name = response_json.get("tool_name", suggested_tool_name)
+                
+                # Validate the selected tool exists
+                if selected_tool_name not in TOOLS:
+                     raise ValueError(f"Agent B selected unknown tool '{selected_tool_name}'")
+
+                # Update the step object temporarily for normalization (so it validates against the NEW tool)
+                # We don't mutate the original plan, just the context for normalization
+                step_context = current_step.copy()
+                step_context["tool_name"] = selected_tool_name
+                
+                normalized = self._normalize_agent_b_payload(
+                    step=step_context,
+                    step_id=step_id,
+                    payload=response_json
+                )
+                
+                # Return the selected tool name so the executor knows what to run
+                return {
+                    "success": True,
+                    "tool_name": selected_tool_name, # Pass back the actual tool used
+                    "tool_args": normalized["tool_args"],
+                    "command": normalized.get("command"),
+                    "output_format": normalized.get("output_format", {}),
+                    "error": None
+                }
+            except (json.JSONDecodeError, ValueError) as e:
+                current_try += 1
+                if current_try > max_retries:
+                    return {
+                        "success": False,
+                        "tool_args": {},
+                        "output_format": {},
+                        "command": None,
+                        "error": str(e)
+                    }
+                
+                # Add error to history and retry
+                messages.append({"role": "assistant", "content": response_text})
+                messages.append({"role": "user", "content": f"Error: {str(e)}\nPlease fix the JSON payload."})
     
     def _parse_agent_b_json(self, text: str) -> Dict[str, Any]:
         """
-        Parse JSON from Agent B response (similar to plan validator).
+        Parse JSON from Agent B response using STRICT protocol.
+        
+        Protocol:
+        1. The payload MUST be wrapped in a ```json ... ``` code block.
+        2. If multiple blocks exist, the LAST one is used (allows for scratchpad blocks).
+        3. <think> blocks are explicitly ignored.
         
         Args:
             text: Raw Agent B response
@@ -1072,44 +1111,31 @@ Describe the failure and tell the user what to do next."""
             Parsed JSON dict
         
         Raises:
-            json.JSONDecodeError: If JSON cannot be parsed
+            ValueError: If no valid JSON block is found
+            json.JSONDecodeError: If JSON is malformed
         """
         import json
         
-        # Strip whitespace
-        text = text.strip()
+        # 1. Remove <think> blocks to prevent false positives
+        clean_text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
         
-        # Try direct parse first
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
+        # 2. Extract all ```json blocks
+        # Regex finds content between ```json and ```
+        matches = re.findall(r'```json\s*(.*?)\s*```', clean_text, re.DOTALL)
         
-        # Try extracting from markdown code block
-        if "```json" in text:
-            start = text.find("```json") + 7
-            end = text.find("```", start)
-            if end != -1:
-                json_text = text[start:end].strip()
-                return json.loads(json_text)
+        if not matches:
+            # Fallback: Look for generic ``` blocks if json tag was missed
+            matches = re.findall(r'```\s*(\{.*?\})\s*```', clean_text, re.DOTALL)
+            
+        if not matches:
+            # STRICT MODE: Do not attempt to find raw JSON outside blocks.
+            # This prevents capturing "I will use {"foo": "bar"}" from reasoning text.
+            raise ValueError("Protocol Violation: No ```json code block found in response.")
+            
+        # 3. Use the LAST block (allows Agent to refine its thought in previous blocks)
+        json_text = matches[-1].strip()
         
-        # Try extracting from generic code block
-        if "```" in text:
-            start = text.find("```") + 3
-            end = text.find("```", start)
-            if end != -1:
-                json_text = text[start:end].strip()
-                return json.loads(json_text)
-        
-        # Try finding first { and last }
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            json_text = text[start:end+1]
-            return json.loads(json_text)
-        
-        # Give up
-        return json.loads(text)
+        return json.loads(json_text)
 
     def _normalize_agent_b_payload(
         self,

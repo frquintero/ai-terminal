@@ -91,7 +91,15 @@ class PlanValidator:
         Raises:
             json.JSONDecodeError: If JSON cannot be parsed
         """
+        import re
+        
         # Strip whitespace
+        text = text.strip()
+        
+        # Strip thinking tags (e.g., <think>reasoning</think>)
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+        
+        # Strip whitespace again after removing tags
         text = text.strip()
         
         # Try direct parse first (happy path)
@@ -99,6 +107,9 @@ class PlanValidator:
             return json.loads(text)
         except json.JSONDecodeError:
             pass
+        
+        # DEBUG: Print text if direct parse fails
+        # print(f"DEBUG: Direct JSON parse failed. Text:\n{text!r}")
         
         # Try extracting from markdown code block
         if "```json" in text:

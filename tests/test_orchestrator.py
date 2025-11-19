@@ -32,7 +32,7 @@ class TestOrchestratorPrompts(unittest.TestCase):
         prompt = get_agent_a_system_prompt(["run_command", "read_file"])
         self.assertIn("run_command", prompt)
         self.assertIn("read_file", prompt)
-        self.assertIn("One-Shot Planner", prompt)
+        self.assertIn("One-Shot Planning", prompt)
 
 
 class TestHandleQueryRouterless(unittest.TestCase):
@@ -45,6 +45,8 @@ class TestHandleQueryRouterless(unittest.TestCase):
         self.config.model = "gpt-4"
         self.config.max_tokens = 1024
         self.config.temperature = 0.2
+        self.config.agent_a_temperature = 0.2
+        self.config.agent_b_temperature = 0.0
         self.orchestrator = Orchestrator(self.config, self.memory)
 
     def tearDown(self):
@@ -98,6 +100,8 @@ class TestOrchestratorIntegration(unittest.TestCase):
         
         self.config = Mock(spec=Config)
         self.config.model = "test-model"
+        self.config.agent_a_temperature = 0.2
+        self.config.agent_b_temperature = 0.0
         
         self.orchestrator = Orchestrator(self.config, self.memory)
     
@@ -427,6 +431,8 @@ class TestAgentBOutputFormatValidation(unittest.TestCase):
         self.config.model = "test-model"
         self.config.max_tokens = 512
         self.config.temperature = 0.1
+        self.config.agent_a_temperature = 0.2
+        self.config.agent_b_temperature = 0.0
         self.orchestrator = Orchestrator(self.config, self.memory)
 
     def tearDown(self):
