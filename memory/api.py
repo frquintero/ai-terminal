@@ -338,12 +338,22 @@ class Memory:
         stage: Optional[str],
         error_type: Optional[str],
         error_message: str,
-        payload: Optional[Dict[str, Any]] = None
+        payload: Optional[Dict[str, Any]] = None,
+        agent_response: Optional[str] = None,
+        execution_result: Optional[Dict[str, Any]] = None,
+        response_segments: Optional[List[Dict[str, Any]]] = None,
+        context: Optional[Dict[str, Any]] = None
     ):
         """
         Persist failure snapshot outside the success-only transaction tables.
         """
         payload_json = json.dumps(payload) if payload is not None else None
+        execution_result_json = json.dumps(execution_result) if execution_result is not None else None
+        response_segments_json = json.dumps(response_segments) if response_segments is not None else None
+        context_json = json.dumps(context) if context is not None else None
+        agent_response_preview = (agent_response or None)
+        if agent_response_preview:
+            agent_response_preview = agent_response_preview[:1000]
         self.conn.execute(
             """
             INSERT INTO cycle_failures (
@@ -354,9 +364,13 @@ class Memory:
                 stage,
                 error_type,
                 error_message,
-                payload_json
+                payload_json,
+                agent_response_preview,
+                execution_result_json,
+                response_segments_json,
+                context_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(cycle_id) DO UPDATE SET
                 session_id=excluded.session_id,
                 query_text=excluded.query_text,
@@ -364,7 +378,11 @@ class Memory:
                 stage=excluded.stage,
                 error_type=excluded.error_type,
                 error_message=excluded.error_message,
-                payload_json=excluded.payload_json
+                payload_json=excluded.payload_json,
+                agent_response_preview=excluded.agent_response_preview,
+                execution_result_json=excluded.execution_result_json,
+                response_segments_json=excluded.response_segments_json,
+                context_json=excluded.context_json
             """,
             (
                 cycle_id,
@@ -374,7 +392,11 @@ class Memory:
                 stage,
                 error_type,
                 error_message,
-                payload_json
+                payload_json,
+                agent_response_preview,
+                execution_result_json,
+                response_segments_json,
+                context_json
             )
         )
         self._commit_or_defer()
@@ -386,7 +408,12 @@ class Memory:
         cursor = self.conn.execute(
             """
             SELECT cycle_id, session_id, query_text, route, stage,
-                   error_type, error_message, payload_json, created_at
+                   error_type, error_message, payload_json,
+                   agent_response_preview,
+                   execution_result_json,
+                   response_segments_json,
+                   context_json,
+                   created_at
             FROM cycle_failures
             WHERE cycle_id = ?
             """,
@@ -405,7 +432,11 @@ class Memory:
             "error_type": row[5],
             "error_message": row[6],
             "payload": json.loads(row[7]) if row[7] else None,
-            "created_at": row[8]
+            "agent_response_preview": row[8],
+            "execution_result": json.loads(row[9]) if row[9] else None,
+            "response_segments": json.loads(row[10]) if row[10] else None,
+            "context": json.loads(row[11]) if row[11] else None,
+            "created_at": row[12]
         }
     
     def purge_all_data(

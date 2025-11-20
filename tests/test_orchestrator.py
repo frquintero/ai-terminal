@@ -20,7 +20,7 @@ from config import Config
 from memory.api import Memory
 from orchestrator.orchestrator import Orchestrator, OrchestratorResult
 from orchestrator.plan_validator import PlanValidator
-from orchestrator.prompts import get_agent_a_system_prompt
+from orchestrator.prompts import get_agent_a_system_prompt, get_agent_b_system_prompt
 from orchestrator.routes import Route
 
 
@@ -340,6 +340,60 @@ class TestOrchestratorIntegration(unittest.TestCase):
         self.assertIn("tool failed", failure["payload"]["execution_result"]["error"])
 
     @patch("orchestrator.orchestrator.LLMClient")
+    def test_agent_b_loop_returns_structured_outputs(self, mock_llm_client):
+        """Agent B loop captures stdout via output_format for fenced rendering."""
+        cycle_id = self.memory.create_cycle(
+            session_id=self.orchestrator.session_id,
+            query="show csv"
+        )
+
+        tool_call = SimpleNamespace(
+            id="call-1",
+            function=SimpleNamespace(
+                name="run_command",
+                arguments=json.dumps({
+                    "command": "cat all.csv",
+                    "output_format": {"rows": "raw"}
+                })
+            )
+        )
+
+        mock_llm_client.return_value.call.side_effect = [
+            {"error": None, "message": SimpleNamespace(content=None, tool_calls=[tool_call])},
+            {"error": None, "message": SimpleNamespace(
+                content="```json\n{\"narration_template\":\"Here are the rows:\\n{rows}\"}\n```",
+                tool_calls=[]
+            )}
+        ]
+
+        with patch.object(self.orchestrator.tool_executor, "execute", return_value={
+            "success": True,
+            "stdout": "Fruit,Count\nApple,1\nBerry,2\n",
+            "stderr": None,
+            "raw_stdout": "Fruit,Count\nApple,1\nBerry,2\n",
+            "raw_stderr": None,
+            "exit_code": 0,
+            "output_preview": "Fruit,Count\nApple,1\nBerry,2\n",
+            "error": None,
+            "result": "Fruit,Count\nApple,1\nBerry,2\n",
+            "agent_message": None
+        }):
+            summary = self.orchestrator._run_agent_b_tool_loop(
+                cycle_id=cycle_id,
+                query="show csv",
+                plan={"intent": "show csv", "success_criteria": ["show file"]}
+            )
+
+        self.assertIn("rows", summary["output_values"])
+        self.assertEqual(summary["output_value_types"]["rows"], "raw")
+        self.assertIn("{rows}", summary["narration_template"])
+        self.assertIn("Fruit,Count", summary["output_values"]["rows"])
+        self.assertEqual(
+            summary["output_value_sources"]["rows"]["tool_name"],
+            "run_command"
+        )
+
+    @patch("orchestrator.orchestrator.LLMClient")
     def test_execution_plan_path_does_not_exit_early(self, mock_llm_client):
         """Ensure execution-plan responses proceed without touching undefined agent_response."""
         # Fake LLM returning a simple execution plan (Agent A format)
@@ -451,6 +505,29 @@ class TestAgentBOutputFormatValidation(unittest.TestCase):
         }
         with self.assertRaises(ValueError):
             self.orchestrator._normalize_agent_b_payload(step, 0, payload)
+
+    def test_agent_b_system_prompt_allows_literal_json_segments(self):
+        """Building Agent B prompt should not KeyError on literal JSON braces."""
+        prompt = get_agent_b_system_prompt([])
+        self.assertIn('"segments"', prompt)
+        self.assertIn("```json", prompt)
+
+    def test_parse_agent_b_json_handles_backslash_newlines(self):
+        """Backslash-newline inside a JSON string should be normalized for parsing."""
+        raw = """```json
+{
+  "segments": [
+    {
+      "kind": "block",
+      "fence": "output",
+      "body": "line1\\n\\
+line2"
+    }
+  ]
+}
+```"""
+        parsed = self.orchestrator._parse_agent_b_json(raw)
+        self.assertEqual(parsed["segments"][0]["body"], "line1\nline2")
 
 
 if __name__ == "__main__":

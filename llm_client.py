@@ -52,8 +52,8 @@ class LLMClient:
         self.memory = memory
         
         self.client = openai.OpenAI(
-            base_url=config.base_url,
-            api_key=config.api_key
+            base_url=getattr(config, "base_url", None),
+            api_key=getattr(config, "api_key", None)
         )
     
     def call(

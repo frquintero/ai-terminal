@@ -263,28 +263,34 @@ class UIFormatter:
 
         renderables: List[Any] = []
         current_text_buffer: str = ""
-        rendered_blocks: Set[str] = set()
 
         for segment in segments:
-            seg_type = segment.get("type")
-            if seg_type == "text":
-                text_value = segment.get("content", "")
-                if text_value is None:
-                    continue
-                current_text_buffer += text_value
-            elif seg_type == "output":
-                inline_value, block_renderables = self._render_output_placeholder(
-                    key=segment.get("key"),
-                    execution_result=execution_result,
-                    rendered_blocks=rendered_blocks
+            kind = segment.get("kind") or segment.get("type")
+            if kind in {"text", "inline_value"}:
+                text_value = (
+                    segment.get("text")
+                    or segment.get("content")
+                    or segment.get("value")
+                    or ""
                 )
-                if inline_value is not None:
-                    current_text_buffer += inline_value
-                if block_renderables:
-                    if current_text_buffer:
-                        renderables.append(self._create_markdown(current_text_buffer))
-                        current_text_buffer = ""
-                    renderables.extend(block_renderables)
+                current_text_buffer += str(text_value)
+            elif kind == "block":
+                if current_text_buffer:
+                    renderables.append(self._create_markdown(current_text_buffer))
+                    current_text_buffer = ""
+                fence = segment.get("fence") or segment.get("tag") or "output"
+                body = segment.get("body") or segment.get("content") or ""
+                title = segment.get("title")
+                truncated_note = segment.get("truncated")
+                if title:
+                    renderables.append(Text(str(title), style="bold"))
+                renderables.append(
+                    self._create_markdown(
+                        f"```{fence}\n{body}\n```"
+                    )
+                )
+                if truncated_note:
+                    renderables.append(Text(str(truncated_note), style="dim"))
 
         if current_text_buffer:
             renderables.append(self._create_markdown(current_text_buffer))
@@ -310,22 +316,33 @@ class UIFormatter:
         fmt = (value_types.get(key) or "").strip().lower()
         source = value_sources.get(key) or {}
         no_output_flag = bool(source.get("no_output"))
+        value = output_values.get(key)
+        value_text = str(value) if value is not None else None
+        payload_text = self._select_payload_text(source, value_text)
+        is_multiline_str = (
+            fmt in {"str", ""}
+            and payload_text is not None
+            and "\n" in payload_text.rstrip("\n")
+        )
 
         inline_value: Optional[str] = None
-        value = output_values.get(key)
         if no_output_flag:
-            inline_value = str(value) if value is not None else ""
-        elif fmt in {"int", "float", "str", ""}:
-            if value is not None:
-                inline_value = str(value)
+            inline_value = value_text if value_text is not None else ""
+        elif fmt in {"int", "float"}:
+            if value_text is not None:
+                inline_value = value_text
+        elif fmt in {"str", ""}:
+            if not is_multiline_str and value_text is not None:
+                inline_value = value_text
         elif value is None and key not in value_sources:
             inline_value = f"[missing:{key}]"
 
         block_renderables: List[Any] = []
         if key not in rendered_blocks and not no_output_flag:
+            block_fmt = "raw" if is_multiline_str else fmt
             block_tag, block_payload = self._resolve_block_payload(
-                fmt=fmt,
-                output_value=str(value) if value is not None else None,
+                fmt=block_fmt,
+                output_value=value_text,
                 source=source
             )
             if block_tag and block_payload:
@@ -348,14 +365,7 @@ class UIFormatter:
         if fmt not in {"list", "raw", "table", "json"}:
             return None, None
 
-        payload_source: Optional[str] = None
-        if source:
-            raw_stdout = source.get("raw_stdout")
-            stdout = source.get("stdout")
-            payload_source = raw_stdout if raw_stdout not in (None, "") else stdout
-
-        if not payload_source:
-            payload_source = output_value
+        payload_source = self._select_payload_text(source, output_value)
 
         if payload_source is None:
             return None, None
@@ -388,6 +398,21 @@ class UIFormatter:
         if truncated:
             trimmed = trimmed.rstrip() + "\n[output truncated]"
         return block_tag, trimmed
+
+    def _select_payload_text(
+        self,
+        source: Optional[Dict[str, Any]],
+        output_value: Optional[str]
+    ) -> Optional[str]:
+        """Pick the best available stdout text for rendering."""
+        if source:
+            raw_stdout = source.get("raw_stdout")
+            if raw_stdout not in (None, ""):
+                return str(raw_stdout)
+            stdout = source.get("stdout")
+            if stdout not in (None, ""):
+                return str(stdout)
+        return output_value
 
     def _build_fenced_block(self, tag: str, content: str) -> Markdown:
         normalized_tag = tag or "output"

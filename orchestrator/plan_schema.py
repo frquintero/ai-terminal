@@ -1,14 +1,13 @@
 """
-Plan JSON schema and validation for Agent A (Planner/Narrator)
+Plan JSON schema and validation for Agent A (Planner/Chat)
 
 Agent A supports TWO response types:
-1. Execution Plan with narration template
+1. Execution plan handoff (intent + success_criteria)
 2. Direct response (no tools needed)
 
 Schema goals:
-- Declarative description of required outputs via `output_keys`
-- Final narration controlled by Agent A through `narration_template`
-- Single-source narrator: Agent A always produces the final user message
+- Keep Agent A lightweight; it delegates execution and final rendering to Agent B.
+- Avoid narration templates; Agent B assembles the final user-facing segments.
 """
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -79,7 +78,7 @@ def validate_plan_structure(plan: Any) -> Tuple[bool, Optional[str]]:
     Returns:
         (valid: bool, error_message: Optional[str])
     
-    Validates structure for all three response types.
+    Validates structure for both response types.
     Does NOT validate tool existence - that's done separately.
     """
     # Must be dict
@@ -157,62 +156,14 @@ def validate_tool_availability(plan: Dict[str, Any], available_tools: List[str])
 # ============================================================================
 
 EXAMPLE_PLAN_SIMPLE = {
-    "steps": [
-        {
-            "tool_name": "run_command",
-            "intent": "list all files and directories in /tmp with details",
-            "description": "List files in /tmp directory",
-            "output_keys": ["files"]
-        }
-    ],
-    "narration_template": "Here are the files in /tmp:\n{files}"
-}
-
-EXAMPLE_PLAN_MULTI_STEP = {
-    "steps": [
-        {
-            "tool_name": "run_command",
-            "intent": "find Python files in current directory, limit to first 10 results",
-            "description": "Find first 10 Python files",
-            "output_keys": ["py_files"]
-        },
-        {
-            "tool_name": "run_command",
-            "intent": "count lines in all Python files",
-            "description": "Count lines in Python files",
-            "output_keys": ["line_counts"]
-        },
-        {
-            "tool_name": "write_file",
-            "intent": "create a file named report.txt with text 'Analysis complete'",
-            "description": "Write summary report",
-            "output_keys": ["report_path"]
-        }
-    ],
-    "narration_template": (
-        "Found these Python files:\n{py_files}\n\n"
-        "Line counts:\n{line_counts}\n\n"
-        "Report saved to {report_path}"
-    )
-}
-
-EXAMPLE_PLAN_INVALID_NO_STEPS = {
-    "steps": [],
-    "narration_template": "Nothing to do"
+    "intent": "List files in /tmp with details",
+    "success_criteria": [
+        "Command executes successfully",
+        "Output includes file names"
+    ]
 }
 
 EXAMPLE_PLAN_INVALID_WRONG_TYPE = {
-    "steps": "not an array",
-    "narration_template": "Invalid"
-}
-
-EXAMPLE_PLAN_INVALID_MISSING_FIELD = {
-    "steps": [
-        {
-            "tool_name": "run_command",
-            "intent": "Example intent",
-            "description": "Missing output_keys"
-        }
-    ],
-    "narration_template": "Result: {value}"
+    "intent": 123,
+    "success_criteria": "not-an-array"
 }

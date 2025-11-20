@@ -108,3 +108,34 @@ def test_render_output_placeholder_skips_block_for_no_output():
 
     assert inline_value == fallback
     assert blocks == []
+
+
+def test_render_output_placeholder_fences_multiline_str_stdout():
+    formatter = UIFormatter()
+    execution_result = {
+        "output_values": {"log": "first line\nsecond line\n"},
+        "output_value_types": {"log": "str"},
+        "output_value_sources": {
+            "log": {
+                "tool_name": "run_command",
+                "command": "echo -e 'first line\\nsecond line'",
+                "stdout": "first line\nsecond line\n",
+                "raw_stdout": "first line\nsecond line\n",
+                "tool_args": {}
+            }
+        }
+    }
+    rendered_blocks = set()
+
+    inline_value, blocks = formatter._render_output_placeholder(
+        key="log",
+        execution_result=execution_result,
+        rendered_blocks=rendered_blocks
+    )
+
+    assert inline_value is None
+    assert len(blocks) == 1
+    assert "```output" in blocks[0].markup
+    assert "first line" in blocks[0].markup
+    assert "second line" in blocks[0].markup
+    assert "log" in rendered_blocks

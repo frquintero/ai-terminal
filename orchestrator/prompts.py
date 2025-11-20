@@ -1,8 +1,8 @@
 """
 System prompts for the dual-agent orchestrator.
 
-Agent A covers planning, narration, and chat duties (one agent, multiple modes).
-Agent B handles tactical command construction for each plan step.
+Agent A covers planning and chat duties (one agent, multiple modes).
+Agent B handles tactical execution and assembles the final user-facing segments.
 """
 
 import platform
@@ -88,7 +88,24 @@ You are the tactical executor. You receive a **High-Level Intent** from Agent A 
 1. Parse the provided JSON (intent + success_criteria) in the user message—this is your target and the tests for “done.”
 2. Choose the right tool(s) to achieve the intent.
 3. After each tool call, read stdout/stderr/exit_code to decide next steps; stop when success_criteria are met.
-4. When done, return a concise, sufficient final answer.
+4. Attach an `output_format` map to each tool call when you need typed parsing later (types: int, float, list, raw, table, json, str).
+5. When done, return a single ```json block with an ordered `segments` array. The REPL is a dumb renderer—YOU decide fences and titles. Do not rely on downstream rendering logic.
+
+**Segment Schema (final JSON block):**
+```json
+{{
+  "segments": [
+    {{"kind": "text", "text": "summary sentence or notes"}},
+    {{"kind": "block", "fence": "output|json|bash|md|<lang>", "title": "optional title", "body": "verbatim stdout or content", "truncated": "optional note"}},
+    {{"kind": "inline_value", "text": "already-resolved scalar, if you need one inline"}}
+  ],
+  "template_values": {{"optional_pre_resolved_scalars": "for reuse"}}
+}}
+```
+- Always supply the fence name for blocks (choose the language or `output`).
+- Provide the exact body you want shown; include any truncation note in `truncated` if you chose to truncate upstream.
+- Inline values should already be resolved text; do not expect REPL interpolation.
+- Do not emit narration templates; your `segments` are the final user-facing response.
 
 **Engineering Principles:**
 Tools (scope):
@@ -110,7 +127,7 @@ Tools (scope):
 - Use the tools provided to you directly. `run_interactive` responses include JSON with `status`, `events`, and `session_id`; treat these as observations and decide whether to send more input, close the session, or reformulate the command.
 - If you need to run multiple commands, you can make multiple tool calls in one turn only for independent steps (e.g., list files with `run_command "ls"` while also `read_file "README.md"`); otherwise build a single pipeline.
 - If a tool fails, analyze the error (stderr/exit_code) and try a different approach.
-- **Final Response:** When finished, provide a direct answer to the user. Do NOT repeat the success criteria or say "Execution Complete". Just state the result or answer.
+- **Final Response:** One ```json block containing the `segments` array you want rendered to the user. No additional narration template is used downstream.
 """
 
 AGENT_B_USER_TEMPLATE = """**User Intent:**
@@ -181,7 +198,7 @@ def get_agent_b_system_prompt(tool_schemas: List[dict]) -> str:
     import json
     context = get_system_context()
     context["tool_schemas"] = json.dumps(tool_schemas, indent=2)
-    return AGENT_B_SYSTEM_PROMPT.format(**context)
+    return AGENT_B_SYSTEM_PROMPT.format_map(_SafeFormatDict(context))
 
 
 def get_agent_b_user_message(

@@ -12,7 +12,7 @@ from typing import Optional
 
 DEFAULT_DB_PATH = Path("logs/orchestrator.db")
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 CREATE_TABLES = """
 -- Schema version tracking
@@ -56,6 +56,10 @@ CREATE TABLE IF NOT EXISTS cycle_failures (
     error_type TEXT,
     error_message TEXT NOT NULL,
     payload_json TEXT,
+    agent_response_preview TEXT,
+    execution_result_json TEXT,
+    response_segments_json TEXT,
+    context_json TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

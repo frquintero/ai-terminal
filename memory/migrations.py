@@ -112,6 +112,10 @@ def migrate_v4_to_v5(conn: sqlite3.Connection):
             error_type TEXT,
             error_message TEXT NOT NULL,
             payload_json TEXT,
+            agent_response_preview TEXT,
+            execution_result_json TEXT,
+            response_segments_json TEXT,
+            context_json TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         """
@@ -125,12 +129,29 @@ def migrate_v4_to_v5(conn: sqlite3.Connection):
     conn.commit()
 
 
+def migrate_v5_to_v6(conn: sqlite3.Connection):
+    """
+    Enrich cycle_failures with debug snapshots.
+    """
+    columns = [
+        ("agent_response_preview", "TEXT"),
+        ("execution_result_json", "TEXT"),
+        ("response_segments_json", "TEXT"),
+        ("context_json", "TEXT"),
+    ]
+    for name, ddl in columns:
+        if not _column_exists(conn, "cycle_failures", name):
+            conn.execute(f"ALTER TABLE cycle_failures ADD COLUMN {name} {ddl}")
+    conn.commit()
+
+
 # Registry of all migrations (version, description, migration function)
 MIGRATIONS: List[Migration] = [
     (2, "Expand step_outputs for structured outputs", migrate_v1_to_v2),
     (3, "Create metrics tables in unified schema", migrate_v2_to_v3),
     (4, "Swap route_metrics for route-less cycle_metrics", migrate_v3_to_v4),
     (5, "Add cycle_failures table for unsuccessful cycles", migrate_v4_to_v5),
+    (6, "Enrich cycle_failures with debug snapshots", migrate_v5_to_v6),
 ]
 
 
