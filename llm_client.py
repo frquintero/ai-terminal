@@ -9,6 +9,7 @@ import hashlib
 import json
 import time
 import uuid
+import re
 from typing import Any, Dict, List, Optional
 
 import openai
@@ -127,6 +128,39 @@ class LLMClient:
                     raise ValueError("No choices returned from API")
                 
                 assistant_message = response.choices[0].message
+
+                # Optionally strip <think> blocks from content for cleaner logs
+                raw_content = assistant_message.content or ""
+                if getattr(self.config, "hide_thinking", False) and raw_content:
+                    raw_content = re.sub(r"<think>.*?</think>", "", raw_content, flags=re.DOTALL).strip()
+                    try:
+                        assistant_message.content = raw_content  # keep downstream behavior consistent
+                    except Exception:
+                        pass
+                
+                # Derive trace text for logging: use message content if present,
+                # otherwise summarize tool calls so telemetry isn't blank.
+                response_text = assistant_message.content or ""
+                if not response_text:
+                    tool_calls = getattr(assistant_message, "tool_calls", None) or []
+                    summaries = []
+                    for tc in tool_calls:
+                        func = getattr(tc, "function", None)
+                        name = getattr(func, "name", None) or getattr(tc, "name", "")
+                        raw_args = getattr(func, "arguments", None) or getattr(tc, "arguments", "")
+                        arg_excerpt = raw_args or ""
+                        if len(arg_excerpt) > 200:
+                            arg_excerpt = arg_excerpt[:200] + "..."
+                        if name and arg_excerpt:
+                            summaries.append(f"{name}: {arg_excerpt}")
+                        elif name:
+                            summaries.append(name)
+                        elif arg_excerpt:
+                            summaries.append(arg_excerpt)
+                        else:
+                            summaries.append("tool_call")
+                    if summaries:
+                        response_text = "; ".join(summaries)
                 
                 usage_dict = None
                 if hasattr(response, 'usage') and response.usage:
@@ -141,7 +175,7 @@ class LLMClient:
                     self._log_to_memory(
                         cycle_id=cycle_id,
                         messages=messages,
-                        response_text=assistant_message.content or "",
+                        response_text=response_text,
                         usage=usage_dict,
                         latency_ms=latency_ms,
                         temperature=temperature,
