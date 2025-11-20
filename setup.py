@@ -246,6 +246,7 @@ def discover_agent_backends() -> List[Tuple[str, str, str]]:
         # Parse if/elif blocks for agent_type
         minimax_match = re.search(r"elif agent_type == ['\"]minimax['\"]:", config_code)
         kimi_match = re.search(r"if agent_type == ['\"]kimi2['\"]:", config_code)
+        groq_match = re.search(r"elif agent_type == ['\"]groq['\"]:", config_code)
         custom_match = re.search(r"elif agent_type == ['\"]custom['\"]:", config_code)
         
         if minimax_match or "MINIMAX_M2_API_KEY" in config_code:
@@ -253,6 +254,9 @@ def discover_agent_backends() -> List[Tuple[str, str, str]]:
         
         if kimi_match or "KIMI_2_API_KEY" in config_code:
             backends.append(("kimi2", "Kimi K2 (Moonshot AI)", "https://platform.moonshot.ai"))
+            
+        if groq_match or "GROQ_API_KEY" in config_code:
+            backends.append(("groq", "Groq (LPU Inference Engine)", "https://console.groq.com"))
         
         # Don't show custom unless explicitly requested
         # if custom_match:
@@ -345,6 +349,32 @@ def configure_kimi2(existing: Dict[str, str]) -> Dict[str, str]:
     return config
 
 
+def configure_groq(existing: Dict[str, str]) -> Dict[str, str]:
+    """Configure Groq backend"""
+    print_header("Groq Configuration")
+    
+    config = {}
+    config['AGENT_TYPE'] = 'groq'
+    
+    # Check for existing API key
+    existing_key = existing.get('GROQ_API_KEY')
+    if existing_key:
+        print_success(f"Found existing API key: {existing_key[:8]}...{existing_key[-4:]}")
+        use_existing = prompt_bool("Use this existing API key?", default=True)
+        if use_existing:
+            config['GROQ_API_KEY'] = existing_key
+        else:
+            config['GROQ_API_KEY'] = prompt_password("Enter your Groq API key")
+    else:
+        print_info("Get your API key from: https://console.groq.com/keys")
+        config['GROQ_API_KEY'] = prompt_password("Enter your Groq API key")
+    
+    config['GROQ_MODEL'] = prompt_string("Model name", default=existing.get('GROQ_MODEL', 'openai/gpt-oss-20b'))
+    config['GROQ_BASE_URL'] = prompt_string("Base URL", default=existing.get('GROQ_BASE_URL', 'https://api.groq.com/openai/v1'))
+    
+    return config
+
+
 def configure_shared_options(existing: Dict[str, str]) -> Dict[str, str]:
     """Configure shared model parameters"""
     print_header("Model Parameters")
@@ -401,6 +431,12 @@ def write_env_file(config: Dict[str, str], filename: str = ".env"):
         lines.append(f"KIMI_2_MODEL={existing.get('KIMI_2_MODEL', '')}")
         lines.append(f"KIMI_2_BASE_URL={existing.get('KIMI_2_BASE_URL', '')}\n")
     
+    if 'GROQ_API_KEY' in existing or agent_type == 'groq':
+        lines.append("# Groq Settings")
+        lines.append(f"GROQ_API_KEY={existing.get('GROQ_API_KEY', '')}")
+        lines.append(f"GROQ_MODEL={existing.get('GROQ_MODEL', '')}")
+        lines.append(f"GROQ_BASE_URL={existing.get('GROQ_BASE_URL', '')}\n")
+
     if 'CUSTOM_API_KEY' in existing or agent_type == 'custom':
         lines.append("# Custom Backend Settings")
         lines.append(f"CUSTOM_API_KEY={existing.get('CUSTOM_API_KEY', '')}")
@@ -477,6 +513,11 @@ def main():
         base_url = config['KIMI_2_BASE_URL']
         model = config['KIMI_2_MODEL']
         api_key = config['KIMI_2_API_KEY']
+    elif agent_type == 'groq':
+        config = configure_groq(existing)
+        base_url = config['GROQ_BASE_URL']
+        model = config['GROQ_MODEL']
+        api_key = config['GROQ_API_KEY']
     else:
         print_error(f"Unknown backend: {agent_type}")
         return

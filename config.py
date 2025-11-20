@@ -55,6 +55,12 @@ def load_config() -> Config:
             raise ValueError("KIMI_2_API_KEY is required when AGENT_TYPE=kimi2")
         model = os.getenv('KIMI_2_MODEL', 'kimi-k2-turbo-preview')
         base_url = os.getenv('KIMI_2_BASE_URL', 'https://api.moonshot.ai/v1')
+    elif agent_type == 'groq':
+        api_key = os.getenv('GROQ_API_KEY')
+        if not api_key:
+            raise ValueError("GROQ_API_KEY is required when AGENT_TYPE=groq")
+        model = os.getenv('GROQ_MODEL', 'llama3-70b-8192')
+        base_url = os.getenv('GROQ_BASE_URL', 'https://api.groq.com/openai/v1')
     elif agent_type == 'minimax':
         api_key = os.getenv('MINIMAX_M2_API_KEY')
         if not api_key:
@@ -76,7 +82,7 @@ def load_config() -> Config:
         if not base_url:
             raise ValueError("CUSTOM_BASE_URL or OPENAI_BASE_URL is required when AGENT_TYPE=custom")
     else:
-        raise ValueError(f"Invalid AGENT_TYPE: {agent_type}. Must be 'minimax', 'kimi2', or 'custom'")
+        raise ValueError(f"Invalid AGENT_TYPE: {agent_type}. Must be 'minimax', 'kimi2', 'groq', or 'custom'")
 
     # Optional with defaults
     max_tokens_str = os.getenv('MAX_TOKENS', '1024')
