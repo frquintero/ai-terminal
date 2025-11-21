@@ -536,12 +536,10 @@ line2"
         """Final narration call should be parsed without using tools."""
         mock_call.return_value = {
             "error": None,
-            "message": SimpleNamespace(content="""```json
-{
-  "segments": [{"kind":"text","text":"done"}],
-  "template_values": {"ok": true}
-}
-```""")
+            "message": SimpleNamespace(content={
+                "segments": [{"kind": "text", "text": "done"}],
+                "template_values": {"ok": True}
+            })
         }
         segments, template, tvals = self.orchestrator._call_agent_b_final_narration(
             cycle_id="c",

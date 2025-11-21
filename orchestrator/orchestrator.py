@@ -1218,7 +1218,15 @@ Describe the failure and tell the user what to do next."""
         system_prompt = (
             "You are Agent B preparing the final user-facing response.\n"
             "Tools are DISABLED for this call. Do not call any tools.\n"
-            "Return a single ```json block containing a `segments` array and optional `template_values`."
+            "Return a JSON OBJECT (no code fences) with this exact shape:\n"
+            "{\n"
+            "  \"segments\": [\n"
+            "    {\"kind\": \"text\", \"text\": \"summary or notes\"},\n"
+            "    {\"kind\": \"block\", \"fence\": \"output|json|bash|md|<lang>\", \"title\": \"optional\", \"body\": \"verbatim output\", \"truncated\": \"optional\"}\n"
+            "  ],\n"
+            "  \"template_values\": {\"optional_pre_resolved_scalars\": \"for reuse\"}\n"
+            "}\n"
+            "Always include `kind` for each segment; include `fence` and `body` for blocks."
         )
         user_prompt = "\n".join(summary_lines)
 
@@ -1244,12 +1252,15 @@ Describe the failure and tell the user what to do next."""
         msg = response["message"]
         content = msg.content or ""
 
-        narration_template = content
-        response_segments = None
+        # With response_format json_object, content may already be a dict.
+        if isinstance(content, dict):
+            parsed_final = content
+        else:
+            parsed_final = json.loads(content)
+
+        narration_template = parsed_final.get("narration_template")
+        response_segments = parsed_final.get("segments")
         try:
-            parsed_final = self._parse_agent_b_json(content)
-            narration_template = parsed_final.get("narration_template", content)
-            response_segments = parsed_final.get("segments")
             extra_template_values = parsed_final.get("template_values") or {}
             for key, value in extra_template_values.items():
                 template_values[key] = value
