@@ -481,6 +481,8 @@ class TestAgentBOutputFormatValidation(unittest.TestCase):
         self.config.temperature = 0.1
         self.config.agent_a_temperature = 0.2
         self.config.agent_b_temperature = 0.0
+        self.config.api_key = "test-key"
+        self.config.base_url = "http://example.com"
         self.orchestrator = Orchestrator(self.config, self.memory)
 
     def tearDown(self):
@@ -528,6 +530,30 @@ line2"
 ```"""
         parsed = self.orchestrator._parse_agent_b_json(raw)
         self.assertEqual(parsed["segments"][0]["body"], "line1\nline2")
+
+    @patch("orchestrator.orchestrator.LLMClient.call")
+    def test_final_narration_is_tool_free(self, mock_call):
+        """Final narration call should be parsed without using tools."""
+        mock_call.return_value = {
+            "error": None,
+            "message": SimpleNamespace(content="""```json
+{
+  "segments": [{"kind":"text","text":"done"}],
+  "template_values": {"ok": true}
+}
+```""")
+        }
+        segments, template, tvals = self.orchestrator._call_agent_b_final_narration(
+            cycle_id="c",
+            plan={"intent": "List files", "success_criteria": []},
+            step_results=[],
+            output_values={},
+            template_values={},
+            agent_b_notes="note",
+            last_stdout="out"
+        )
+        self.assertEqual(segments[0]["text"], "done")
+        self.assertTrue(tvals.get("ok"))
 
 
 if __name__ == "__main__":

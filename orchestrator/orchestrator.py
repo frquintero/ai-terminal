@@ -713,7 +713,7 @@ Describe the failure and tell the user what to do next."""
         """
         Execute the plan using Agent B's native tool loop.
         """
-        # We pass empty list to system prompt as we don't need schema injection
+        # We pass empty list to system prompt as we don't need schema injection for the execution phase
         system_prompt = get_agent_b_system_prompt([]) 
         user_msg = get_agent_b_user_message(plan)
         
@@ -742,6 +742,9 @@ Describe the failure and tell the user what to do next."""
         )
         
         final_response = ""
+        agent_b_notes = ""
+        last_stdout = None
+        last_raw_stdout = None
         
         for loop_idx in range(max_loops):
             # Call LLM
@@ -786,6 +789,7 @@ Describe the failure and tell the user what to do next."""
                 raw_content = msg.content or ""
                 # Clean <think> tags and extra whitespace
                 final_response = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL).strip()
+                agent_b_notes = final_response
                 break
             
             # Execute tools
@@ -829,6 +833,11 @@ Describe the failure and tell the user what to do next."""
                     step_id=step_id
                 )
                 
+                if exec_result.get("stdout"):
+                    last_stdout = exec_result.get("stdout")
+                if exec_result.get("raw_stdout"):
+                    last_raw_stdout = exec_result.get("raw_stdout")
+
                 success = exec_result["success"]
                 if success:
                     steps_completed += 1
@@ -935,21 +944,21 @@ Describe the failure and tell the user what to do next."""
                    "content": tool_content
                 })
         
-        narration_template = final_response
-        response_segments = None
-        try:
-            parsed_final = self._parse_agent_b_json(final_response)
-            narration_template = parsed_final.get("narration_template", final_response)
-            response_segments = parsed_final.get("segments")
-            extra_template_values = parsed_final.get("template_values") or {}
-            for key, value in extra_template_values.items():
-                template_values[key] = value
-        except Exception:
-            parsed_final = None
-        response_segments_filled = response_segments or [
+        # Final narration pass with tools DISABLED to avoid bogus tool calls (e.g., "json").
+        final_segments, narration_template, template_values = self._call_agent_b_final_narration(
+            cycle_id=cycle_id,
+            plan=plan,
+            step_results=step_results,
+            output_values=output_values,
+            template_values=template_values,
+            agent_b_notes=agent_b_notes,
+            last_stdout=last_stdout or last_raw_stdout
+        )
+
+        response_segments_filled = final_segments or [
             {
                 "kind": "text",
-                "text": narration_template if parsed_final else final_response
+                "text": narration_template or final_response
             }
         ]
         final_text = self._segments_to_text(response_segments_filled)
@@ -961,14 +970,14 @@ Describe the failure and tell the user what to do next."""
             "step_results": step_results,
             "success": steps_failed == 0,
             "final_response": final_text,
-            "narration_template": narration_template,
+            "narration_template": narration_template or final_response,
             "output_values": output_values,
             "output_value_types": output_value_types,
             "output_value_sources": output_value_sources,
             "template_values": template_values,
             "response_segments": response_segments_filled,
-            "agent_b_final_raw": final_response,
-            "missing_segments": response_segments is None or len(response_segments) == 0
+            "agent_b_final_raw": narration_template or final_response,
+            "missing_segments": len(response_segments_filled) == 0
         }
 
     def _execute_manifest_plan(
@@ -1170,6 +1179,88 @@ Describe the failure and tell the user what to do next."""
             return json.loads(json_text)
         except json.JSONDecodeError:
             return json.loads(sanitized_text)
+
+    def _call_agent_b_final_narration(
+        self,
+        *,
+        cycle_id: str,
+        plan: Dict[str, Any],
+        step_results: List[Dict[str, Any]],
+        output_values: Dict[str, Any],
+        template_values: Dict[str, Any],
+        agent_b_notes: str,
+        last_stdout: Optional[str]
+    ) -> Tuple[List[Dict[str, Any]], Optional[str], Dict[str, Any]]:
+        """
+        Run a final, tool-free Agent B pass to produce narration segments.
+        This avoids accidental tool calls (e.g., to a non-existent "json" tool).
+        """
+        llm_client = LLMClient(
+            config=self.config,
+            role="B",
+            memory=self.memory
+        )
+
+        # Build concise execution summary for context.
+        summary_lines = [
+            "Execution summary:",
+            f"- Intent: {plan.get('intent')}",
+            f"- Success criteria: {', '.join(plan.get('success_criteria') or []) or '(none)'}",
+            f"- Steps run: {len(step_results)}",
+        ]
+        if last_stdout:
+            # Provide tail of stdout for fidelity without overwhelming tokens
+            tail = last_stdout[-1500:] if len(last_stdout) > 1500 else last_stdout
+            summary_lines.append(f"- Last stdout:\n{tail}")
+        if agent_b_notes:
+            summary_lines.append(f"- Notes: {agent_b_notes}")
+
+        system_prompt = (
+            "You are Agent B preparing the final user-facing response.\n"
+            "Tools are DISABLED for this call. Do not call any tools.\n"
+            "Return a single ```json block containing a `segments` array and optional `template_values`."
+        )
+        user_prompt = "\n".join(summary_lines)
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+
+        response = llm_client.call(
+            messages=messages,
+            tools=None,
+            tool_choice=None,
+            cycle_id=cycle_id,
+            temperature=self.config.agent_b_temperature
+        )
+
+        if response["error"]:
+            fallback = [
+                {"kind": "text", "text": f"Error calling Agent B: {response['error']}"}
+            ]
+            return fallback, "Error", template_values
+
+        msg = response["message"]
+        content = msg.content or ""
+
+        narration_template = content
+        response_segments = None
+        try:
+            parsed_final = self._parse_agent_b_json(content)
+            narration_template = parsed_final.get("narration_template", content)
+            response_segments = parsed_final.get("segments")
+            extra_template_values = parsed_final.get("template_values") or {}
+            for key, value in extra_template_values.items():
+                template_values[key] = value
+        except Exception:
+            response_segments = None
+
+        response_segments_filled = response_segments or [
+            {"kind": "text", "text": narration_template}
+        ]
+
+        return response_segments_filled, narration_template, template_values
 
     
     def _build_template_value_map(
