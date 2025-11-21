@@ -1211,9 +1211,8 @@ Describe the failure and tell the user what to do next."""
         if last_stdout:
             # Provide tail of stdout for fidelity without overwhelming tokens
             tail = last_stdout[-1500:] if len(last_stdout) > 1500 else last_stdout
-            summary_lines.append(f"- Last stdout:\n{tail}")
-        if agent_b_notes:
-            summary_lines.append(f"- Notes: {agent_b_notes}")
+            summary_lines.append("- Use this exact stdout as the block body (verbatim, do not add blank lines or escapes):")
+            summary_lines.append(tail)
 
         system_prompt = (
             "You are Agent B preparing the final user-facing response.\n"
