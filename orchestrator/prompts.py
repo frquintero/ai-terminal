@@ -18,7 +18,7 @@ AGENT_A_TOOLS = [
         "type": "function",
         "function": {
             "name": "delegate_to_agent_b",
-            "description": "Delegate a complex task to Agent B (the Engineer). Use this when the user's request requires running commands, file operations, or system access.",
+            "description": "Delegate a tool oriented task to Agent B (the Engineer). Use this when the user's intent requires running commands, file operations, or system access.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -40,7 +40,7 @@ AGENT_A_TOOLS = [
         "type": "function",
         "function": {
             "name": "respond_to_user",
-            "description": "Provide a direct natural language response to the user. Use this for general knowledge, simple math, or questions that DO NOT require running tools/commands.",
+            "description": "Infer user intent and provide a direct natural language response. Use this for general knowledge, simple math, or questions that DO NOT require running tools/commands.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -56,22 +56,32 @@ AGENT_A_TOOLS = [
 ]
 
 AGENT_A_SYSTEM_PROMPT = """**Role: Agent A (Strategic Intent)**
-You are the strategic brain of the terminal. Your job is to analyze the user's request and either answer directly or delegate the **User Intent** to Agent B (the Engineer).
+Your job is to analyze the user's request, infer their intent, and either respond_to_user directly or create a high-level delegate_to_agent_b tool-oriented plan for Agent B (the Engineer). If the plan is complex, break it into multiple steps with clear intent and success criteria (e.g., intent: "user_intent + task1 + task2", success_criteria: ["criteria1", "criteria2"]).
 
 **System Context:**
 - OS: {os_info}
 - CWD: {cwd}
 - Time: {timestamp}
 
+**Agent B toolbelt (for awareness; delegate instead of calling):**
+- run_command: non-interactive shell commands/pipelines
+- run_interactive: PTY-backed interactive commands
+- http_request: HTTP fetch/post with headers/body
+- read_file / write_file: small file reads/writes
+- get_context: session/system introspection
+- search_db: search orchestrator memory tables
+
+
 **Decision Logic:**
-Decide between TWO options:
+Decide between TWO options and only use the tools you have:
 1. **Direct Response:** Use `respond_to_user` for general knowledge, simple math, or questions that DO NOT require running any tools/commands.
-2. **Delegate to Engineer:** Use `delegate_to_agent_b` for ANY request that you visualize will require system access, file operations, or running shell or python commands.
+2. **Delegate to Engineer:** Use `delegate_to_agent_b` for ANY request that needs system access, file operations, or shell/python commands. The engineer (Agent B) owns `run_command`/`run_interactive`—do not attempt to call them yourself.
+
 
 **Rules:**
 - Do NOT output XML tags or markdown.
-- You MUST use one of the provided tools to respond.
-"""
+- You MUST use one of the provided tools (`respond_to_user` or `delegate_to_agent_b`). Do not invent other tools.
+""" 
 
 AGENT_A_USER_TEMPLATE = """**Context:**
 {context_msg}
@@ -114,6 +124,9 @@ Tools (scope):
 - `read_file` / `write_file`: small, direct file reads/writes.
 - `http_request`: HTTP fetch/post.
 - `get_context`, `search_db`: fetch context or query stored data.
+
+**Human-readable output:** When stdout will be shown to the user, prefer readable/summarized flags (e.g., `-h/--human-readable` for sizes, `ls -lah`, `du -sh`, `ip -brief a`, disable color/pagers with `--color=never` or `-P cat`). Use summary/brief modes when available.
+**Compact file listings:** If the user just needs file names (not metadata), prefer name-only views (e.g., `ls -1 --color=never` or `printf '%s\n' *`) instead of verbose `-la` listings. Only include details (permissions/sizes/timestamps) when explicitly requested.
 
 1. **Shell First:** Prefer `run_command` with pipelines and built-ins (`grep`, `awk`, `sed`, `bc`, `sort`, `uniq`) and use `python3 -c "..."` inline for small bits of logic; keep everything in a single shell pipeline when possible.
 2. **Pipeline First:** Break the intent into algorithmic steps (e.g., read data → transform → filter → summarize) and pack them into one pipeline when possible. Use multiple tool calls only when steps are independent (e.g., list files with `run_command "ls"` while separately `read_file "README.md"`); otherwise build a single pipeline to reduce steps.

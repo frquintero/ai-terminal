@@ -176,7 +176,7 @@ class SystemContextBuilder:
             tools_list = ", ".join(tool_names)
             return f"""**Available Tools ({len(tool_names)}):** {tools_list}
 
-Each tool has a specific purpose - use the right tool for each step."""
+Note: Agent A cannot call these tools directly. Agent B is the executor—delegate any system/file/command work via `delegate_to_agent_b`."""
         
         elif role == 'B':
             # Agent B: Include brief descriptions (for execution)

@@ -165,6 +165,20 @@ class Orchestrator:
     def _emit_tool_output(self, payload: Dict[str, Any]) -> None:
         self._emit_event("tool_output", payload)
     
+    def _extract_tool_hint(self, error_text: Optional[str]) -> Optional[str]:
+        """Best-effort extraction of a tool name from an error string."""
+        if not error_text:
+            return None
+        patterns = [
+            r"tool ['\"]?([A-Za-z0-9_]+)['\"]?",
+            r"\"name\"\\s*:\\s*\"([A-Za-z0-9_]+)\"",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, error_text)
+            if match:
+                return match.group(1)
+        return None
+    
     def _get_effective_shell_cwd(self) -> str:
         """
         Get the effective shell working directory for system prompts.
@@ -515,9 +529,17 @@ Explain what happened and advise the user to retry after checking logs."""
                 "preparing_response",
                 {"route": "PLANNER", "error": True}
             )
+            tool_hint = self._extract_tool_hint(last_error)
+            tool_line = (
+                f"Tool mentioned in validation error: {tool_hint}"
+                if tool_hint else
+                "No specific tool was mentioned in the validation error."
+            )
             fallback_context = f"""The user asked: {query}
 
 Agent A could not produce valid planner JSON.
+Stage: Agent A planner (pre-delegation).
+{tool_line}
 
 Last validation hint:
 {last_error}
@@ -676,9 +698,17 @@ Example: {{"response": "I apologize, but I encountered an internal error..."}}""
             )
             
             # Call Agent A to explain error
+            tool_hint = self._extract_tool_hint(str(e))
+            tool_line = (
+                f"Tool mentioned in error: {tool_hint}"
+                if tool_hint else
+                "No specific tool was mentioned in the error."
+            )
             error_context = f"""The user asked: {query}
 
 A failure occurred while executing the plan steps.
+Stage: Agent B execution loop.
+{tool_line}
 
 Error:
 {str(e)}
@@ -746,204 +776,227 @@ Describe the failure and tell the user what to do next."""
         last_stdout = None
         last_raw_stdout = None
         
-        for loop_idx in range(max_loops):
-            # Call LLM
-            response = llm_client.call(
-                messages=messages,
-                tools=tools,
-                cycle_id=cycle_id,
-                temperature=self.config.agent_b_temperature
-            )
-            
-            if response["error"]:
-                # Log error and break
-                final_response = f"Error calling Agent B: {response['error']}"
-                break
-                
-            msg = response["message"]
-            if not msg:
-                final_response = "Error: No message returned from Agent B"
-                break
-            
-            # Append assistant message to history
-            assistant_msg_dict = {
-                "role": "assistant",
-                "content": msg.content
-            }
-            if hasattr(msg, "tool_calls") and msg.tool_calls:
-                # Convert tool_calls objects to dicts for serialization
-                tool_calls_list = []
-                for tc in msg.tool_calls:
-                    if hasattr(tc, "model_dump"):
-                        tool_calls_list.append(tc.model_dump())
-                    elif hasattr(tc, "to_dict"):
-                        tool_calls_list.append(tc.to_dict())
-                    else:
-                        tool_calls_list.append(tc)
-                assistant_msg_dict["tool_calls"] = tool_calls_list
-                
-            messages.append(assistant_msg_dict)
-            
-            if not getattr(msg, "tool_calls", None):
-                # No tools called = Final response
-                raw_content = msg.content or ""
-                # Clean <think> tags and extra whitespace
-                final_response = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL).strip()
-                agent_b_notes = final_response
-                break
-            
-            # Execute tools
-            for tc in msg.tool_calls:
-                total_steps_attempted += 1
-                tool_name = tc.function.name
-                parsed_outputs = None
-                try:
-                    args = json.loads(tc.function.arguments)
-                except json.JSONDecodeError:
-                    args = {}
-               
-                output_format = args.pop("output_format", {}) if isinstance(args, dict) else {}
-                
-                # Log execution
-                step_id = len(step_results)
-                step_meta = next(
-                    (s for s in (plan.get("steps") or []) if s.get("id") == step_id),
-                    {}
-                )
-                self._emit_status(
-                   "executing", 
-                   {
-                       "route": "PLANNER", 
-                       "step": step_id + 1, 
-                       "tool": tool_name,
-                       "command": args.get("command") if isinstance(args, dict) else None
-                   }
-                )
-                
-                self.memory.update_task_status(
-                   cycle_id=cycle_id,
-                   status="in_progress",
-                   current_step_id=step_id
-                )
-
-                exec_result = self.tool_executor.execute(
-                    tool_name=tool_name,
-                    tool_args=args,
+        try:
+            for loop_idx in range(max_loops):
+                # Call LLM
+                response = llm_client.call(
+                    messages=messages,
+                    tools=tools,
                     cycle_id=cycle_id,
-                    step_id=step_id
+                    temperature=self.config.agent_b_temperature
                 )
                 
-                if exec_result.get("stdout"):
-                    last_stdout = exec_result.get("stdout")
-                if exec_result.get("raw_stdout"):
-                    last_raw_stdout = exec_result.get("raw_stdout")
-
-                success = exec_result["success"]
-                if success:
-                    steps_completed += 1
-                else:
-                    steps_failed += 1
+                if response["error"]:
+                    # Log error and break
+                    final_response = f"Error calling Agent B: {response['error']}"
+                    break
+                    
+                msg = response["message"]
+                if not msg:
+                    final_response = "Error: No message returned from Agent B"
+                    break
                 
-                description = f"Step {step_id}: {tool_name}"
-                
-                step_result = {
-                    "step_id": step_id,
-                    "tool_name": tool_name,
-                    "tool_args": args,
-                    "description": description,
-                    "success": success,
-                    "output": exec_result.get("stdout") or exec_result.get("stderr") or exec_result.get("result"),
-                    "error": exec_result.get("error"),
-                    "output_format": output_format
+                # Append assistant message to history
+                assistant_msg_dict = {
+                    "role": "assistant",
+                    "content": msg.content
                 }
-                step_results.append(step_result)
-                
-                if success and output_format:
-                    try:
-                        parsed_outputs, rendered_outputs = self.output_parser.parse(
-                            output_format,
-                            exec_result.get("stdout"),
-                            exec_result.get("raw_stdout"),
-                            exec_result.get("data")
-                        )
-                    except OutputParserError:
-                        parsed_outputs, rendered_outputs = {}, {}
-
-                    for key, fmt in output_format.items():
-                        rendered_value = rendered_outputs.get(key)
-                        parsed_value = parsed_outputs.get(key)
-                        if self._should_use_no_output_message(
-                            fmt=fmt,
-                            rendered_value=rendered_value,
-                            parsed_value=parsed_value,
-                            exec_result=exec_result
-                        ):
-                            fallback = self._format_no_output_message(
-                                step=step_meta or {},
-                                tool_args=args
-                            )
-                            output_values[key] = fallback
-                            template_values[key] = fallback
-                            output_value_sources[key] = {"no_output": True}
+                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    # Convert tool_calls objects to dicts for serialization
+                    tool_calls_list = []
+                    for tc in msg.tool_calls:
+                        if hasattr(tc, "model_dump"):
+                            tool_calls_list.append(tc.model_dump())
+                        elif hasattr(tc, "to_dict"):
+                            tool_calls_list.append(tc.to_dict())
                         else:
-                            output_values[key] = rendered_value
-                            if isinstance(fmt, str) and fmt.lower() in {"int", "float"}:
-                                template_values[key] = parsed_value
+                            tool_calls_list.append(tc)
+                    assistant_msg_dict["tool_calls"] = tool_calls_list
+                    
+                messages.append(assistant_msg_dict)
+                
+                if not getattr(msg, "tool_calls", None):
+                    # No tools called = Final response
+                    raw_content = msg.content or ""
+                    # Clean <think> tags and extra whitespace
+                    final_response = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL).strip()
+                    agent_b_notes = final_response
+                    break
+                
+                # Execute tools
+                for tc in msg.tool_calls:
+                    total_steps_attempted += 1
+                    tool_name = tc.function.name
+                    parsed_outputs = None
+                    try:
+                        args = json.loads(tc.function.arguments)
+                    except json.JSONDecodeError:
+                        args = {}
+                   
+                    output_format = args.pop("output_format", {}) if isinstance(args, dict) else {}
+                    
+                    # Log execution
+                    step_id = len(step_results)
+                    step_meta = next(
+                        (s for s in (plan.get("steps") or []) if s.get("id") == step_id),
+                        {}
+                    )
+                    self._emit_status(
+                       "executing", 
+                       {
+                           "route": "PLANNER", 
+                           "step": step_id + 1, 
+                           "tool": tool_name,
+                           "command": args.get("command") if isinstance(args, dict) else None
+                       }
+                    )
+                    
+                    self.memory.update_task_status(
+                       cycle_id=cycle_id,
+                       status="in_progress",
+                       current_step_id=step_id
+                    )
+    
+                    exec_result = self.tool_executor.execute(
+                        tool_name=tool_name,
+                        tool_args=args,
+                        cycle_id=cycle_id,
+                        step_id=step_id
+                    )
+                    
+                    if exec_result.get("stdout"):
+                        last_stdout = exec_result.get("stdout")
+                    if exec_result.get("raw_stdout"):
+                        last_raw_stdout = exec_result.get("raw_stdout")
+    
+                    success = exec_result["success"]
+                    if success:
+                        steps_completed += 1
+                    else:
+                        steps_failed += 1
+                    
+                    description = f"Step {step_id}: {tool_name}"
+                    
+                    step_result = {
+                        "step_id": step_id,
+                        "tool_name": tool_name,
+                        "tool_args": args,
+                        "description": description,
+                        "success": success,
+                        "output": exec_result.get("stdout") or exec_result.get("stderr") or exec_result.get("result"),
+                        "error": exec_result.get("error"),
+                        "output_format": output_format
+                    }
+                    step_results.append(step_result)
+                    
+                    if success and output_format:
+                        try:
+                            parsed_outputs, rendered_outputs = self.output_parser.parse(
+                                output_format,
+                                exec_result.get("stdout"),
+                                exec_result.get("raw_stdout"),
+                                exec_result.get("data")
+                            )
+                        except OutputParserError:
+                            parsed_outputs, rendered_outputs = {}, {}
+    
+                        for key, fmt in output_format.items():
+                            rendered_value = rendered_outputs.get(key)
+                            parsed_value = parsed_outputs.get(key)
+                            if self._should_use_no_output_message(
+                                fmt=fmt,
+                                rendered_value=rendered_value,
+                                parsed_value=parsed_value,
+                                exec_result=exec_result
+                            ):
+                                fallback = self._format_no_output_message(
+                                    step=step_meta or {},
+                                    tool_args=args
+                                )
+                                output_values[key] = fallback
+                                template_values[key] = fallback
+                                output_value_sources[key] = {"no_output": True}
                             else:
-                                template_values[key] = rendered_value
-                            output_value_sources[key] = {
-                                "tool_name": tool_name,
-                                "tool_args": args,
-                                "command": args.get("command") if isinstance(args, dict) else None,
-                                "stdout": exec_result.get("stdout"),
-                                "raw_stdout": exec_result.get("raw_stdout")
-                            }
-                        output_value_types[key] = fmt
+                                output_values[key] = rendered_value
+                                if isinstance(fmt, str) and fmt.lower() in {"int", "float"}:
+                                    template_values[key] = parsed_value
+                                else:
+                                    template_values[key] = rendered_value
+                                output_value_sources[key] = {
+                                    "tool_name": tool_name,
+                                    "tool_args": args,
+                                    "command": args.get("command") if isinstance(args, dict) else None,
+                                    "stdout": exec_result.get("stdout"),
+                                    "raw_stdout": exec_result.get("raw_stdout")
+                                }
+                            output_value_types[key] = fmt
+    
+                    # Emit tool output event
+                    self._emit_tool_output({
+                       "route": "PLANNER",
+                       "step_id": step_id,
+                       "tool_name": tool_name,
+                       "tool_args": args,
+                       "stdout": exec_result.get("stdout"),
+                       "stderr": exec_result.get("stderr"),
+                       "success": success,
+                       "events": exec_result.get("events")
+                    })
+                    
+                    # Save step output
+                    self.memory.save_step_output(
+                       cycle_id=cycle_id,
+                       step_id=step_id,
+                       tool_name=tool_name,
+                       tool_args=args,
+                       success=success,
+                       exit_code=exec_result.get("exit_code"),
+                       output_preview=str(exec_result.get("stdout") or exec_result.get("stderr") or "")[:500],
+                       stdout=exec_result.get("stdout"),
+                       stderr=exec_result.get("stderr"),
+                       raw_stdout=exec_result.get("raw_stdout"),
+                       raw_stderr=exec_result.get("raw_stderr"),
+                       output_format=output_format or None,
+                       parsed_outputs=parsed_outputs if success and output_format else exec_result.get("events"),
+                       artifact_path=exec_result.get("artifact_path")
+                    )
+                    
+                    # Append tool result to messages for next turn
+                    tool_content = (
+                       exec_result.get("agent_message")
+                       or exec_result.get("stdout")
+                       or exec_result.get("stderr")
+                       or "Success"
+                    )
+                    messages.append({
+                       "role": "tool",
+                       "tool_call_id": tc.id,
+                       "name": tool_name,
+                       "content": tool_content
+                    })
+            
+        except Exception as e:
+            # CRASH LANDING: Capture partial progress
+            # If we don't catch here, the exception bubbles up, rolling back the DB transaction
+            # and erasing all traces of what Agent B actually did.
+            return {
+                "steps_completed": steps_completed,
+                "steps_failed": steps_failed + 1,
+                "total_steps": total_steps_attempted + 1,
+                "step_results": step_results,
+                "success": False,
+                "final_response": f"Agent B crashed: {str(e)}",
+                "narration_template": f"Agent B crashed: {str(e)}",
+                "output_values": output_values,
+                "output_value_types": output_value_types,
+                "output_value_sources": output_value_sources,
+                "template_values": template_values,
+                "response_segments": [{"kind": "text", "text": f"Agent B crashed: {str(e)}"}],
+                "agent_b_final_raw": str(e),
+                "missing_segments": False,
+                "error": str(e)
+            }
 
-                # Emit tool output event
-                self._emit_tool_output({
-                   "route": "PLANNER",
-                   "step_id": step_id,
-                   "tool_name": tool_name,
-                   "tool_args": args,
-                   "stdout": exec_result.get("stdout"),
-                   "stderr": exec_result.get("stderr"),
-                   "success": success,
-                   "events": exec_result.get("events")
-                })
-                
-                # Save step output
-                self.memory.save_step_output(
-                   cycle_id=cycle_id,
-                   step_id=step_id,
-                   tool_name=tool_name,
-                   tool_args=args,
-                   success=success,
-                   exit_code=exec_result.get("exit_code"),
-                   output_preview=str(exec_result.get("stdout") or exec_result.get("stderr") or "")[:500],
-                   stdout=exec_result.get("stdout"),
-                   stderr=exec_result.get("stderr"),
-                   raw_stdout=exec_result.get("raw_stdout"),
-                   raw_stderr=exec_result.get("raw_stderr"),
-                   output_format=output_format or None,
-                   parsed_outputs=parsed_outputs if success and output_format else exec_result.get("events"),
-                   artifact_path=exec_result.get("artifact_path")
-                )
-                
-                # Append tool result to messages for next turn
-                tool_content = (
-                   exec_result.get("agent_message")
-                   or exec_result.get("stdout")
-                   or exec_result.get("stderr")
-                   or "Success"
-                )
-                messages.append({
-                   "role": "tool",
-                   "tool_call_id": tc.id,
-                   "name": tool_name,
-                   "content": tool_content
-                })
-        
         # Final narration pass with tools DISABLED to avoid bogus tool calls (e.g., "json").
         final_segments, narration_template, template_values = self._call_agent_b_final_narration(
             cycle_id=cycle_id,
