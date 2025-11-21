@@ -2,37 +2,105 @@
 
 **AI-Terminal** is an intelligent command-line interface that translates natural language user queries into precise shell commands. It solves the problem of complex shell syntax and multi-step workflows by using a **Routerless Dual-Agent Orchestrator** to plan, execute, and narrate system operations.
 
+### Detailed Process Flow
+
+1. **REPL & Entry Point** (`main.py`)
+   - User Input: Loop waits for `input()`.
+   - Orchestrator Call: Passed to `orchestrator.handle_query(user_input)`.
+
+2. **Orchestrator & Agent A** (`orchestrator.py`)
+   - Initialization: Creates `cycle_id`, logs start.
+   - Agent A (Planner):
+     - Prompt built with `AGENT_A_SYSTEM_PROMPT`.
+     - Goal: Analyze query & history to decide strategy.
+     - Decision (Tool Call): Must call one of:
+       - `respond_to_user(response)`: For simple questions/chat.
+       - `delegate_to_agent_b(intent, success_criteria)`: For system execution tasks.
+
+3. **Agent B Execution Loop** (If Delegated)
+   - If delegated, orchestrator starts Agent B (Executor) loop:
+     - Setup: Agent B initialized with intent & success_criteria from Agent A.
+     - ReAct Loop: `while` loop (max 15 steps):
+       1. Think: Agent B (LLM) called with current history.
+       2. Tool Call: Agent B calls native tool (e.g., `run_command`, `read_file`).
+       3. Execute: ToolExecutor runs command on system.
+       4. Observation: Tool output (`stdout`/`stderr`) fed back as "tool" role message.
+       5. Repeat: Analyzes result vs success_criteria, decides next step.
+     - Completion: When satisfied, stops calling tools.
+     - Final Narration: Orchestrator makes one final, tool-free call to Agent B for structured JSON response with final summary & output segments.
+
+
+## Memory System
+
+1. **FTS5 Semantic Search** (`memory/schema.py`)
+SQLite FTS5 virtual tables (synced via triggers) enable fast natural-language search over history:
+- `intention_cache_fts`: Successful query-to-tool mappings.
+- `step_outputs_fts`: Actual tool outputs (e.g., "grep" results, errors).
+- `chat_history_fts`: All past conversations.
+
+2. **The search_db Tool** (`tools.py`)
+Exposes memory via SearchDBTool (lines 663-932):
+- **Name**: `search_db`
+- **Description**: "Search institutional memory (chat history, tool executions, LLM logs) via FTS5."
+- **Function**: Allows Agent to query past experiences. For example, an agent can query the `step_outputs` table for a specific error message like 'connection refused' to see successful past solutions.
+
+3. **Memory API** (`memory/api.py`)
+Memory class provides search methods:
+- `search_chat_history`: Recall user instructions/context.
+- `search_step_outputs`: Find technical solutions/command patterns.
+- `search_interactions`: Analyze past reasoning.
+
+Database acts as active Long-Term Memory layer. Indexes every interaction/result, enabling Agent to:
+- Recall correct tool use from past successes (`intention_cache`).
+- Retrieve old code snippets/file contents (`step_outputs`).
+- Contextualize problems against history.
+
+This turns a simple debug log into a growing knowledge base.
+
+## Context & Prompts
+
+In this architecture, agents are stateless entities. Continuity between the user and the AI terminal is maintained solely by injecting past interactions into the "Context Window" (the total prompt sent to the LLM) for each request. There is no hidden internal memory inside the model itself; it only knows what is presented in the current prompt.
+
+### Prompt Structure
+
+Every prompt consists of two main parts:
+
+1.  **System Prompt (Principles & Behavior)**:
+    *   Defines the **Persona** (e.g., "You are Agent A...").
+    *   Sets **Rules** (e.g., "Do NOT output XML").
+    *   This part remains static or semantically stable across calls.
+
+2.  **User Message (History & Tracking)**:
+    *   Generated dynamically for each cycle.
+    *   Contains the **Variable Context**, such as:
+        *   Recent Chat History (User query + Agent response).
+        *   Current Intent/Task.
+    *   This allows the stateless model to "see" the past and maintain conversational continuity.
+
+### Agent B's Loopy Context
+
+Agent B (the Executor) operates in a ReAct loop (`orchestrator.py`), and its context window is managed dynamically to simulate state:
+
+*   **Seed**: It starts with Agent A's plan injected into its User Message.
+*   **Rolling History**: As Agent B executes tools, the "conversation" grows:
+    *   `Assistant`: "I need to run `ls`."
+    *   `Tool`: (Output of `ls` injected by Orchestrator).
+    *   `Assistant`: "Now I will read `file.txt`."
+*   This **Loop History** is injected into the prompt at every step, allowing Agent B to "remember" its own previous actions and their results, despite being stateless.
+
 ### Quick Start
-```bash
-# Set up and activate virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Run the terminal
-python main.py
-```
+To get started, set up a virtual environment, install the dependencies listed in `requirements.txt`, and run the `main.py` script.
 
 ### Debugging & Development
-- **Debug a Cycle**: To analyze a specific interaction (bugs, semantic errors), use the debug tool with the cycle ID (visible in the REPL status line):
-  ```bash
-  python3 debug_cycle.py <cycle_id_prefix>
-  ```
-  This tool provides a full audit trail of Agent A's intent, Agent B's execution steps, tool outputs, and database state.
-
+- **Debug a Cycle**: Developers can inspect specific interaction cycles using the `debug_cycle.py` utility with a cycle ID (visible in the REPL status line).
+  
 - **Issue Tracking**: This project uses **bd (beads)** for issue tracking.
   - Check work: `bd ready`
   - Create issue: `bd create "Title" -t bug|feature`
   - Update status: `bd update <id> --status in_progress`
   - Close issue: `bd close <id> --reason "Done"`
 
-- **Database Management**: To purge all data and start with a fresh state (e.g., after an architecture upgrade), use the purge utility:
-  ```bash
-  python3 -m memory.purge_db --yes --include-sessions --include-cache
-  ```
-  This will delete all sessions, cycles, logs, and metrics, leaving the database schema intact.
+- **Database Management**: To reset the system state, the `memory.purge_db` module can be executed to clear all sessions and logs while preserving the schema.
 
 ---
 

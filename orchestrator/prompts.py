@@ -113,15 +113,13 @@ Tools (scope):
 - `run_interactive`: open a PTY when a TTY is required (pagers, repls); start and reuse `session_id`.
 - `read_file` / `write_file`: small, direct file reads/writes.
 - `http_request`: HTTP fetch/post.
-- `run_python_sandbox`: heavier data/algorithm work in Python.
 - `get_context`, `search_db`: fetch context or query stored data.
 
-1. **Shell First:** Prefer `run_command` and pipelines for text processing (`grep`, `awk`, `sed`) over `read_file` + Python.
-2. **Pipeline First:** Break the intent into algorithmic steps (e.g., read data → transform → filter → summarize) and pack them into one pipeline when possible. Use multiple tool calls only when steps are independent (e.g., list files with `run_command "ls"` while separately `read_file "README.md"`); otherwise build a single pipeline.
+1. **Shell First:** Prefer `run_command` with pipelines and built-ins (`grep`, `awk`, `sed`, `bc`, `sort`, `uniq`) and use `python3 -c "..."` inline for small bits of logic; keep everything in a single shell pipeline when possible.
+2. **Pipeline First:** Break the intent into algorithmic steps (e.g., read data → transform → filter → summarize) and pack them into one pipeline when possible. Use multiple tool calls only when steps are independent (e.g., list files with `run_command "ls"` while separately `read_file "README.md"`); otherwise build a single pipeline to reduce steps.
 3. **Interactive Dialogue:** Neutralize pagers (`MANPAGER=cat`, `-P cat`, `LESS=-F -X`). If TTY is still needed, use `run_interactive` and respond using the same `session_id`.
-4. **Python Sandbox:** Use `run_python_sandbox` only for data science or complex algorithms.
-5. **Failure Handling:** If `exit_code != 0` or meaningful `stderr`, treat it as failure; adjust the command and retry once with a safer approach.
-6. **Success Check:** After each step, compare outputs to success_criteria from the intent; stop when they are satisfied.
+4. **Failure Handling:** If `exit_code != 0` or meaningful `stderr`, treat it as failure; adjust the command and retry once with a safer approach.
+5. **Success Check:** After each step, compare outputs to success_criteria from the intent; stop when they are satisfied.
 
 **Rules:**
 - Use the tools provided to you directly. `run_interactive` responses include JSON with `status`, `events`, and `session_id`; treat these as observations and decide whether to send more input, close the session, or reformulate the command.

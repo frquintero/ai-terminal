@@ -2579,7 +2579,6 @@ class InteractiveCommandTool(BaseTool):
 class RunPythonSandboxTool(BaseTool):
     """
     Execute Python code in an isolated, resource-limited sandbox.
-    
     Use ONLY for:
     - Data visualization/plotting (matplotlib, seaborn)
     - Complex algorithms, ML, scientific computing (numpy, scipy, sklearn)
@@ -2597,6 +2596,9 @@ class RunPythonSandboxTool(BaseTool):
     - Project file access via SANDBOX_PROJECT env var
     - Optional network isolation
     """
+    
+    # Temporarily hidden from tool registry to discourage use for simple tasks.
+    AUTO_REGISTER = False
     
     @property
     def name(self) -> str:
@@ -2700,6 +2702,7 @@ with open(os.path.join(project_dir, 'output.txt'), 'w') as f:
         - Matplotlib configured for non-interactive backend
         - Plots automatically saved to artifacts/
         """
+        
         import uuid
         import shutil as _shutil
         import textwrap
