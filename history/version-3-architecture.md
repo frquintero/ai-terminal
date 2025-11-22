@@ -235,6 +235,31 @@ The application is configured via environment variables, typically stored in a `
 *   `SHOW_RAW_OUTPUT`: Whether to display raw tool output in the REPL (`true`/`false`).
 *   `SAVE_LLM_TRACES`: Whether to log full prompts/responses to the database (`true`/`false`).
 
+### Hard Limits and Recovery Mechanisms
+
+The system implements multiple layers of hard limits to prevent runaway resource consumption while allowing reasonable recovery from transient issues:
+
+1. **Agent B Execution Loop Limit** (`orchestrator.py`):
+   - **Limit**: `max_loops = 15` (hardcoded)
+   - **Purpose**: Caps the number of tool execution iterations in Agent B's ReAct loop
+   - **Impact**: Each iteration can make one LLM call + tool execution
+   - **Behavior**: After 15 iterations, the loop terminates regardless of completion status
+
+2. **LLM API Retry Limit** (`llm_client.py`):
+   - **Limit**: `max_retries = 3` (hardcoded, default parameter)
+   - **Purpose**: Limits retries for failed LLM API calls with exponential backoff
+   - **Backoff Schedule**: 1s, 2s, 4s delays between attempts
+   - **Retryable Errors**: timeout, rate_limit, 429, connection, 503, service unavailable
+   - **Non-Retryable Errors**: auth errors (401/403), malformed requests (400), unknown errors
+   - **Impact**: A single Agent B step can consume up to 3 LLM calls before failing
+
+3. **Combined Impact**:
+   - **Worst Case**: Agent B loop could make up to **15 × 3 = 45 LLM calls** before giving up
+   - **Recovery**: System gracefully degrades - failed cycles are logged but don't crash the application
+   - **Fallback**: On persistent failures, Agent A generates user-friendly error explanations
+
+These limits ensure system stability while providing robust error recovery for transient network/API issues.
+
 ## Design Principles
 
 ### 1. In AI We Trust
@@ -251,3 +276,114 @@ Reliability is paramount. Every architectural change or prompt adjustment must b
 
 ### Engineering Principle
 Prefer piping commands together instead of multiple separate tool calls. Agent B should default to composing rich shell pipelines (e.g., `awk ... | sort | uniq -c | head`) so each execution step captures the full data flow, reserving multi-command sequences only for cases where a single pipeline cannot express the intent. This keeps the system instructions aligned with the Agent B prompt and reinforces our emphasis on efficient, atomic tool usage.
+
+## Error Handling and Differentiation in the Orchestrator
+
+The orchestrator (`orchestrator/orchestrator.py`) is designed with robust error handling to ensure reliability, user safety, and debuggability. It differentiates between various error types based on context, stage, and source, preventing conflation of issues (e.g., a JSON parsing error vs. a command execution failure). This chapter documents the error taxonomy, detection mechanisms, handling strategies, logging, and recovery processes.
+
+### Error Taxonomy
+Errors are categorized by **type**, **stage**, and **source** for precise differentiation:
+
+1. **By Type**:
+   - **JSON Parsing Errors**: Invalid JSON in tool arguments or responses (e.g., malformed `{"file_path": }`).
+   - **Tool Execution Errors**: Failures during tool invocation (e.g., file not found in `read_file`, command syntax errors in `run_command`).
+   - **Command Exit Code Errors**: Non-zero exit codes from shell commands (e.g., `ls` on non-existent directory, `grep` with no matches).
+   - **LLM Call Errors**: API failures, timeouts, or invalid responses from the LLM provider.
+   - **Orchestrator Internal Errors**: Exceptions in the orchestrator logic (e.g., database errors, invalid plan structures).
+   - **Validation Errors**: Plan or response validation failures (e.g., missing required fields in Agent A's output).
+
+2. **By Stage**:
+   - **Planning (Agent A)**: Errors during intent analysis or tool calling.
+   - **Execution (Agent B Loop)**: Errors in tool calls, observations, or loop logic.
+   - **Narration/Finalization**: Errors in response formatting or segment generation.
+   - **Orchestrator Lifecycle**: Errors in session/cycle management or database operations.
+
+3. **By Source**:
+   - **User Input**: Invalid queries or malformed data.
+   - **LLM Output**: Hallucinations, incomplete responses, or tool misuse.
+   - **System/External**: File system issues, network failures, or tool executor bugs.
+   - **Internal Logic**: Code bugs in orchestrator, prompts, or tools.
+
+### Detection Mechanisms
+The orchestrator uses layered detection to identify and classify errors early:
+
+1. **JSON Parsing**:
+   - In `_run_agent_b_tool_loop`, tool arguments are parsed with `json.loads(tc.function.arguments)`.
+   - Failure: Catches `json.JSONDecodeError`, logs as `JSONDecodeError`, and defaults `args` to `{}` to continue gracefully.
+
+2. **Tool Execution**:
+   - Wrapped in `try-except` around `self.tool_executor.execute()`.
+   - Detects: Exceptions from tools (e.g., `FileNotFoundError` for `read_file`, `OSError` for permissions).
+   - Also checks `exec_result.get("error")` for tool-reported errors.
+
+3. **Command Exit Codes**:
+   - After execution, inspects `exit_code`:
+     - `0`: Success.
+     - Non-zero: Analyzes `stderr` and `stdout` for informativeness.
+     - Uses `_is_informative_negative()` to treat codes like 1/2/127 with diagnostic output as "successful failures" (e.g., "command not found" with suggestions).
+
+4. **LLM Call Errors**:
+   - In `llm_client.call()`, checks `response["error"]`.
+   - Types: API errors, rate limits, malformed responses.
+
+5. **Validation Errors**:
+   - Uses `PlanValidator` for Agent A responses.
+   - Detects missing tools, invalid JSON, or unknown response types.
+
+6. **Orchestrator Exceptions**:
+   - Top-level `try-except` in `handle_query()` catches all unhandled errors.
+   - Differentiates by `e.__class__.__name__` (e.g., `PlanValidationError`, `sqlite3.Error`).
+
+### Handling Strategies
+Errors are handled with a "fail gracefully, log thoroughly, recover if possible" approach:
+
+1. **Graceful Degradation**:
+   - JSON errors: Continue with empty args; tool may fail but doesn't crash the loop.
+   - Command errors: If informative (e.g., "file not found"), treat as success and include output in response.
+   - LLM errors: Retry with backoff; if persistent, fall back to Agent A for error explanation.
+
+2. **Recovery Mechanisms**:
+   - **Tool Failures**: Call Agent A to generate a user-friendly error message, including tool hints (e.g., "Tool `read_file` failed: file not found").
+   - **Loop Continuation**: On step failure, log and continue if not critical; abort on max failures.
+   - **Fallback Responses**: For fatal errors, use Agent A to narrate the issue (e.g., "A system error occurred; please retry").
+   - **Partial Success**: Save completed steps even if the cycle fails overall.
+
+3. **User Communication**:
+   - Errors are explained contextually (e.g., "Command `ls` failed with exit code 2: No such file or directory").
+   - Avoid generic messages; use Agent A for natural language summaries.
+
+4. **Safety Measures**:
+   - Never expose internal errors to users.
+   - Sanitize outputs (e.g., no raw stack traces).
+   - Rollback DB transactions on failures to prevent corruption.
+
+### Logging and Persistence
+All errors are logged for debugging and improvement:
+
+1. **Database Logging**:
+   - `cycle_failures` table: Stores snapshots with `stage`, `error_type`, `error_message`, `payload` (e.g., traceback, execution results).
+   - `step_outputs`: Logs per-step errors, including `stderr`, `exit_code`, and parsed errors.
+   - `interactions`: Raw LLM responses for auditing.
+
+2. **Event Emission**:
+   - `_emit_tool_output()`: Sends error details to UI callbacks.
+   - Status updates: "Planning failed", "Execution error".
+
+3. **Failure Snapshots**:
+   - `_build_failure_snapshot()`: Captures full context (query, route, agent response, execution result) for post-mortem analysis.
+
+4. **Metrics**:
+   - Tracks error rates in `cycle_metrics` and `step_metrics`.
+
+### Recovery and Adaptation
+- **Short-Term**: Retry alternates (e.g., for empty output: try `ls -a` after `ls`).
+- **Long-Term**: Use logged errors to refine prompts (e.g., add rules for common failures) or improve tools.
+- **Agent Involvement**: Agent A explains errors; Agent B can adapt (e.g., modify TODO on failures, as discussed in TODO technique).
+
+### Examples from Cycles
+- **JSON Error**: In a cycle, invalid tool args → Logged as `JSONDecodeError`, args defaulted, tool fails → Agent A explains "Invalid arguments provided".
+- **File Error**: `read_file` on missing file → `FileNotFoundError` → Step failed, logged with `stderr`, cycle continues if not critical.
+- **Command Error**: `ls /nonexistent` → Exit code 2, stderr: "No such file" → Treated as informative success, output included.
+- **LLM Error**: API timeout → Retried, if fails → Fallback to Agent A narration.
+
+This error handling ensures the system is resilient, debuggable, and user-friendly, differentiating issues to enable targeted fixes. Future changes (e.g., TODO enforcement) will build on this foundation.

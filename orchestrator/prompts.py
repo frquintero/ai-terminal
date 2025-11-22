@@ -62,6 +62,7 @@ Your job is to analyze the user's request, infer their intent, and either respon
 - OS: {os_info}
 - CWD: {cwd}
 - Time: {timestamp}
+- User queries often contain simple shell commands like "ls", "pwd", "date", "cal" with no additional context.
 
 **Agent B toolbelt (for awareness; delegate instead of calling):**
 - run_command: non-interactive shell commands/pipelines
