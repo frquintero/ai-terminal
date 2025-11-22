@@ -20,7 +20,7 @@ from config import Config
 from memory.api import Memory
 from orchestrator.orchestrator import Orchestrator, OrchestratorResult
 from orchestrator.plan_validator import PlanValidator
-from orchestrator.prompts import get_agent_a_system_prompt, get_agent_b_system_prompt
+from orchestrator.prompts import get_agent_a_system_prompt
 from orchestrator.routes import Route
 
 
@@ -29,10 +29,10 @@ class TestOrchestratorPrompts(unittest.TestCase):
     
     def test_get_agent_a_system_prompt_lists_tools(self):
         prompt = get_agent_a_system_prompt(["run_command", "read_file"])
-        # Agent A no longer lists tools, but should mention "Agent A" and "Strategic Intent"
         self.assertIn("Agent A", prompt)
         self.assertIn("Strategic Intent", prompt)
-        self.assertNotIn("run_command", prompt)
+        self.assertIn("Agent B toolbelt", prompt)
+        self.assertIn("run_command", prompt)
 
 
 class TestHandleQueryRouterless(unittest.TestCase):
@@ -136,151 +136,56 @@ class TestOrchestratorIntegration(unittest.TestCase):
         self.assertEqual(decision["query_text"], "test query")
         self.assertEqual(decision["route"], Route.PLANNER.value)
 
-    def test_execute_plan_parses_and_persists_outputs(self):
-        """_execute_plan stores parsed values and narration slots."""
-        cycle_id = self.memory.create_cycle(
-            session_id=self.orchestrator.session_id,
-            query="list files"
-        )
-        plan = {
-            "steps": [
-                {
-                    "id": 0,
-                    "tool_name": "run_command",
-                    "description": "List repository files",
-                    "output_keys": ["files", "count"]
-                }
-            ],
-            "narration_template": "Found {count} files: {files}"
-        }
-        self.memory.save_plan(cycle_id, plan, status="in_progress")
-
-        manifest_payload = {
-            "success": True,
-            "execution_steps": [
-                {
-                    "step_id": 0,
-                    "tool_name": "run_command",
-                    "tool_args": {"command": "ls"},
-                    "output_format": {"files": "list", "count": "int"}
-                }
-            ],
-            "error": None
-        }
-
-        tool_result = {
-            "success": True,
-            "result": "main.py\napp.py\ncount: 2\n",
-            "stdout": "main.py\napp.py\ncount: 2\n",
-            "stderr": None,
-            "raw_stdout": "main.py\napp.py\ncount: 2\n",
-            "raw_stderr": None,
-            "exit_code": 0,
-            "output_preview": "main.py\napp.py\ncount: 2\n",
-            "error": None,
-            "latency_ms": 15
-        }
-
-        with patch.object(self.orchestrator, "_get_execution_manifest", return_value=manifest_payload), \
-             patch.object(self.orchestrator, "tool_executor") as mock_executor:
-            mock_executor.execute.return_value = tool_result
-
-            summary = self.orchestrator._execute_plan(
-                cycle_id=cycle_id,
-                query="list files",
-                plan=plan
-            )
-
-        self.assertEqual(summary["steps_completed"], 1)
-        self.assertEqual(summary["steps_failed"], 0)
-        self.assertEqual(summary["output_values"]["files"], "main.py, app.py, count: 2")
-        self.assertEqual(summary["output_values"]["count"], "2")
-        self.assertEqual(summary["template_values"]["files"], "main.py, app.py, count: 2")
-        self.assertEqual(summary["template_values"]["count"], 2)
-        self.assertEqual(summary["output_value_types"]["files"], "list")
-        self.assertEqual(summary["output_value_types"]["count"], "int")
-        self.assertEqual(
-            summary["output_value_sources"]["files"]["command"],
-            "ls"
-        )
-        self.assertEqual(
-            summary["output_value_sources"]["count"]["tool_name"],
-            "run_command"
-        )
-
-        stored_outputs = self.memory.get_step_outputs(cycle_id)
-        self.assertEqual(len(stored_outputs), 1)
-        self.assertEqual(
-            stored_outputs[0]["parsed_outputs"],
-            {"files": ["main.py", "app.py", "count: 2"], "count": 2}
-        )
-
-        template_values = self.orchestrator._build_template_value_map(summary)
-        formatted, _ = self.orchestrator._render_narration_template(
-            "Found {count:.1f} files",
-            template_values
-        )
-        self.assertEqual(formatted, "Found 2.0 files")
-
-    def test_execute_plan_injects_no_output_message(self):
-        """When stdout is empty, the orchestrator replaces values with a helpful note."""
+    @patch("orchestrator.orchestrator.LLMClient")
+    def test_agent_b_no_output_injects_message(self, mock_llm_client):
+        """Agent B loop replaces missing stdout with a helpful fallback."""
         cycle_id = self.memory.create_cycle(
             session_id=self.orchestrator.session_id,
             query="any bat files?"
         )
-        plan = {
-            "steps": [
-                {
-                    "id": 0,
-                    "tool_name": "run_command",
-                    "intent": "Search for BAT files",
-                    "description": "Find *.bat files",
-                    "output_keys": ["bat_files"]
-                }
-            ],
-            "narration_template": "Found these files: {bat_files}"
-        }
-        self.memory.save_plan(cycle_id, plan, status="in_progress")
-
-        manifest_payload = {
-            "success": True,
-            "execution_steps": [
-                {
-                    "step_id": 0,
-                    "tool_name": "run_command",
-                    "tool_args": {"command": "find . -name '*.bat'"},
+        tool_call = SimpleNamespace(
+            id="call-1",
+            function=SimpleNamespace(
+                name="run_command",
+                arguments=json.dumps({
+                    "command": "find . -name '*.bat'",
                     "output_format": {"bat_files": "list"}
-                }
-            ],
-            "error": None
-        }
+                })
+            )
+        )
+        mock_llm_client.return_value.call.side_effect = [
+            {"error": None, "message": SimpleNamespace(content=None, tool_calls=[tool_call])},
+            {"error": None, "message": SimpleNamespace(
+                content="```json\n{\"narration_template\":\"Found these files: {bat_files}\"}\n```",
+                tool_calls=[]
+            )},
+            {"error": None, "message": SimpleNamespace(content={
+                "segments": [{"kind": "text", "text": "Found these files: {bat_files}"}],
+                "template_values": {}
+            })}
+        ]
 
-        tool_result = {
+        with patch.object(self.orchestrator.tool_executor, "execute", return_value={
             "success": True,
-            "result": "",
             "stdout": "",
-            "stderr": None,
+            "stderr": "",
             "raw_stdout": "",
-            "raw_stderr": None,
+            "raw_stderr": "",
             "exit_code": 0,
             "output_preview": "",
             "error": None,
-            "latency_ms": 5
-        }
-
-        with patch.object(self.orchestrator, "_get_execution_manifest", return_value=manifest_payload), \
-             patch.object(self.orchestrator, "tool_executor") as mock_executor:
-            mock_executor.execute.return_value = tool_result
-
-            summary = self.orchestrator._execute_plan(
+            "result": "",
+            "agent_message": None
+        }):
+            summary = self.orchestrator._run_agent_b_tool_loop(
                 cycle_id=cycle_id,
                 query="any bat files?",
-                plan=plan
+                plan={"intent": "find bats", "success_criteria": []}
             )
 
         fallback = summary["output_values"]["bat_files"]
-        self.assertIn("Tool run_command", fallback)
         self.assertIn("find . -name '*.bat'", fallback)
+        self.assertIn("no output", fallback.lower())
         self.assertTrue(summary["output_value_sources"]["bat_files"]["no_output"])
         self.assertEqual(summary["output_value_types"]["bat_files"], "list")
         self.assertEqual(summary["template_values"]["bat_files"], fallback)
@@ -363,7 +268,11 @@ class TestOrchestratorIntegration(unittest.TestCase):
             {"error": None, "message": SimpleNamespace(
                 content="```json\n{\"narration_template\":\"Here are the rows:\\n{rows}\"}\n```",
                 tool_calls=[]
-            )}
+            )},
+            {"error": None, "message": SimpleNamespace(content={
+                "segments": [{"kind": "text", "text": "Here are the rows:\n{rows}"}],
+                "template_values": {}
+            })}
         ]
 
         with patch.object(self.orchestrator.tool_executor, "execute", return_value={
@@ -419,7 +328,8 @@ class TestOrchestratorIntegration(unittest.TestCase):
                  "output_value_types": {"files": "list"},
                  "output_value_sources": {},
                  "step_results": [],
-                 "narration_template": "Files: {files}"
+                 "narration_template": "Files: {files}",
+                 "response_segments": [{"kind": "text", "text": "Files: main.py"}]
              }):
             result = self.orchestrator._run_agent_a_cycle(
                 cycle_id=cycle_id,
@@ -453,7 +363,8 @@ class TestOrchestratorIntegration(unittest.TestCase):
                  "output_value_types": {"files": "list"},
                  "output_value_sources": {},
                  "step_results": [],
-                 "narration_template": "Files: {files}"
+                 "narration_template": "Files: {files}",
+                 "response_segments": [{"kind": "text", "text": "Files: main.py"}]
              }), \
              patch.object(self.orchestrator.memory, "save_chat_exchange") as mock_save_chat:
             self.orchestrator._run_agent_a_cycle(
@@ -469,8 +380,8 @@ class TestOrchestratorIntegration(unittest.TestCase):
         )
 
 
-class TestAgentBOutputFormatValidation(unittest.TestCase):
-    """Unit tests for Agent B payload normalization."""
+class TestAgentBFallbacks(unittest.TestCase):
+    """Unit tests for Agent B failure surfacing and narration."""
 
     def setUp(self):
         self.temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -489,69 +400,122 @@ class TestAgentBOutputFormatValidation(unittest.TestCase):
         self.orchestrator.close()
         os.unlink(self.temp_db.name)
 
-    def test_shell_payload_normalization(self):
-        step = {"tool_name": "run_command", "output_keys": ["files", "count"]}
-        payload = {
-            "command": "ls -la",
-            "output_format": {"files": "LIST", "count": "int"}
-        }
-        normalized = self.orchestrator._normalize_agent_b_payload(step, 0, payload)
-        self.assertEqual(normalized["tool_args"]["command"], "ls -la")
-        self.assertEqual(normalized["output_format"], {"files": "list", "count": "int"})
-
-    def test_missing_output_key_raises_error(self):
-        step = {"tool_name": "run_command", "output_keys": ["files", "count"]}
-        payload = {
-            "command": "ls -la",
-            "output_format": {"files": "list"}
-        }
-        with self.assertRaises(ValueError):
-            self.orchestrator._normalize_agent_b_payload(step, 0, payload)
-
-    def test_agent_b_system_prompt_allows_literal_json_segments(self):
-        """Building Agent B prompt should not KeyError on literal JSON braces."""
-        prompt = get_agent_b_system_prompt([])
-        self.assertIn('"segments"', prompt)
-        self.assertIn("```json", prompt)
-
-    def test_parse_agent_b_json_handles_backslash_newlines(self):
-        """Backslash-newline inside a JSON string should be normalized for parsing."""
-        raw = """```json
-{
-  "segments": [
-    {
-      "kind": "block",
-      "fence": "output",
-      "body": "line1\\n\\
-line2"
-    }
-  ]
-}
-```"""
-        parsed = self.orchestrator._parse_agent_b_json(raw)
-        self.assertEqual(parsed["segments"][0]["body"], "line1\nline2")
-
-    @patch("orchestrator.orchestrator.LLMClient.call")
-    def test_final_narration_is_tool_free(self, mock_call):
-        """Final narration call should be parsed without using tools."""
-        mock_call.return_value = {
-            "error": None,
-            "message": SimpleNamespace(content={
-                "segments": [{"kind": "text", "text": "done"}],
-                "template_values": {"ok": True}
-            })
-        }
-        segments, template, tvals = self.orchestrator._call_agent_b_final_narration(
-            cycle_id="c",
-            plan={"intent": "List files", "success_criteria": []},
-            step_results=[],
-            output_values={},
-            template_values={},
-            agent_b_notes="note",
-            last_stdout="out"
+    @patch("orchestrator.orchestrator.LLMClient")
+    def test_tool_executor_failure_routed_to_agent_a(self, mock_llm_client):
+        """ToolExecutor exceptions should be handed to Agent A for user-facing explanation."""
+        tool_call = SimpleNamespace(
+            id="call-err",
+            function=SimpleNamespace(
+                name="run_command",
+                arguments=json.dumps({"command": "ls", "output_format": {"files": "list"}})
+            )
         )
-        self.assertEqual(segments[0]["text"], "done")
-        self.assertTrue(tvals.get("ok"))
+        mock_llm_client.return_value.call.side_effect = [
+            {"error": None, "message": SimpleNamespace(content=None, tool_calls=[tool_call])},
+            {"error": None, "message": SimpleNamespace(content="```json\n{\"segments\":[{\"kind\":\"text\",\"text\":\"should not reach\"}]}\n```", tool_calls=[])}
+        ]
+
+        with patch.object(self.orchestrator, "_call_agent_a_direct_response", return_value="Tool executor failed") as mock_agent_a, \
+             patch.object(self.orchestrator.tool_executor, "execute", side_effect=RuntimeError("bad args")):
+            summary = self.orchestrator._run_agent_b_tool_loop(
+                cycle_id="c-fail",
+                query="list files",
+                plan={"intent": "list files", "success_criteria": []}
+            )
+
+        mock_agent_a.assert_called_once()
+        self.assertFalse(summary["success"])
+        self.assertEqual(summary["final_response"], "Tool executor failed")
+        self.assertIn("Tool executor failed", summary["response_segments"][0]["text"])
+
+    @patch("orchestrator.orchestrator.LLMClient")
+    def test_informative_exit_codes_not_treated_as_fatal(self, mock_llm_client):
+        """Exit codes 1/2/127 with diagnostics are treated as informative, not fatal failures."""
+        tool_call = SimpleNamespace(
+            id="call-info",
+            function=SimpleNamespace(
+                name="run_command",
+                arguments=json.dumps({"command": "ruby -v 2>&1", "output_format": {"out": "raw"}})
+            )
+        )
+        mock_llm_client.return_value.call.side_effect = [
+            {"error": None, "message": SimpleNamespace(content=None, tool_calls=[tool_call])},
+            {"error": None, "message": SimpleNamespace(content=json.dumps({
+                "segments": [{"kind": "text", "text": "done"}],
+                "template_values": {}
+            }))},
+            {"error": None, "message": SimpleNamespace(content=json.dumps({
+                "segments": [{"kind": "text", "text": "done"}],
+                "template_values": {}
+            }))}
+        ]
+
+        exec_result = {
+            "success": True,
+            "stdout": "bash: ruby: command not found",
+            "stderr": "",
+            "raw_stdout": "bash: ruby: command not found",
+            "raw_stderr": "",
+            "exit_code": 127,
+            "output_preview": "bash: ruby: command not found",
+            "error": None,
+            "result": "bash: ruby: command not found",
+            "agent_message": None
+        }
+
+        cycle_id = self.memory.create_cycle(
+            session_id=self.orchestrator.session_id,
+            query="check ruby"
+        )
+
+        with patch.object(self.orchestrator.tool_executor, "execute", return_value=exec_result):
+            summary = self.orchestrator._run_agent_b_tool_loop(
+                cycle_id=cycle_id,
+                query="check ruby",
+                plan={"intent": "check ruby", "success_criteria": []}
+            )
+
+        step = summary["step_results"][0]
+        self.assertTrue(step["success"])
+        self.assertTrue(step.get("informative_negative"))
+        self.assertEqual(summary["steps_failed"], 0)
+        self.assertEqual(summary["steps_completed"], 1)
+
+    @patch("orchestrator.orchestrator.PlanValidator.validate_with_hints")
+    @patch("orchestrator.orchestrator.LLMClient")
+    def test_agent_a_cycle_uses_agent_b_narration_on_failure(self, mock_llm_client, mock_validate):
+        """Failed executions should still surface Agent B narration, not Agent A fallback."""
+        plan_dict = {"intent": "List files", "success_criteria": []}
+        mock_validate.return_value = (plan_dict, None)
+        mock_llm_client.return_value.call.return_value = {
+            "error": None,
+            "message": SimpleNamespace(content=json.dumps(plan_dict))
+        }
+        cycle_id = self.memory.create_cycle(
+            session_id=self.orchestrator.session_id,
+            query="list files"
+        )
+
+        with patch.object(self.orchestrator, "_execute_plan", return_value={
+            "success": False,
+            "steps_completed": 0,
+            "steps_failed": 1,
+            "total_steps": 1,
+            "step_results": [{"step_id": 0, "description": "run_command", "success": False}],
+            "response_segments": [{"kind": "text", "text": "Agent B failed"}],
+            "final_response": "Agent B failed",
+            "narration_template": None,
+            "output_values": {},
+            "output_value_types": {},
+            "output_value_sources": {},
+            "template_values": {}
+        }) as mock_execute, \
+             patch.object(self.orchestrator, "_call_agent_a_direct_response") as mock_agent_a_fallback:
+            result = self.orchestrator._run_agent_a_cycle(cycle_id=cycle_id, query="list files")
+
+        mock_execute.assert_called_once()
+        mock_agent_a_fallback.assert_not_called()
+        self.assertEqual(result.agent_response, "Agent B failed")
 
 
 if __name__ == "__main__":

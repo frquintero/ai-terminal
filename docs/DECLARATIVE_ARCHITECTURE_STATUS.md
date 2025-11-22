@@ -32,8 +32,8 @@ The system has been successfully migrated from an iterative "Agent A -> Agent B 
 ### 4. Orchestrator Logic
 - `orchestrator/orchestrator.py` was refactored to:
   1. Call Agent A to get the high-level Plan.
-  2. Call Agent B (via `_get_execution_manifest`) to get the full list of tool calls.
-  3. Iterate through the manifest locally, executing tools and performing variable substitution at runtime.
+  2. Call Agent B in a native tool-calling loop (no manifest) to execute steps incrementally.
+  3. Perform variable substitution at runtime using tool outputs and parsed values.
 
 ## Verification
 

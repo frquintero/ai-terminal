@@ -524,49 +524,7 @@ Explain what happened and advise the user to retry after checking logs."""
 
         # Check if we got a valid response
         if not response:
-            # Failed - fallback to Agent A explanation
-            self._emit_status(
-                "preparing_response",
-                {"route": "PLANNER", "error": True}
-            )
-            tool_hint = self._extract_tool_hint(last_error)
-            tool_line = (
-                f"Tool mentioned in validation error: {tool_hint}"
-                if tool_hint else
-                "No specific tool was mentioned in the validation error."
-            )
-            fallback_context = f"""The user asked: {query}
-
-Agent A could not produce valid planner JSON.
-Stage: Agent A planner (pre-delegation).
-{tool_line}
-
-Last validation hint:
-{last_error}
-
-Explain the failure to the user and suggest trying again.
-IMPORTANT: Respond with a valid JSON object containing a single "response" key.
-Example: {{"response": "I apologize, but I encountered an internal error..."}}"""
-            
-            # Re-inject history so Agent A knows what "it" refers to
-            history_context = self._build_agent_a_context_message(query)
-            full_fallback_context = f"{history_context}\n\n{fallback_context}"
-
-            agent_response = self._call_agent_a_direct_response(
-                cycle_id=cycle_id,
-                user_context=full_fallback_context
-            )
-            
-            # If we successfully generated a fallback response, treat it as a valid direct response
-            # This handles cases where Agent A outputs plain text instead of JSON but the content is valid
-            return OrchestratorResult(
-                cycle_id=cycle_id,
-                route=Route.PLANNER.value,
-                query=query,
-                agent_response=agent_response,
-                execution_result={"success": True, "fallback_triggered": True, "validation_error": last_error},
-                response_segments=[{"kind": "text", "text": agent_response}]
-            )
+            raise PlanValidationError(last_error or "Planner failed to produce a valid tool call")
         
         # Detect response type and handle accordingly
         response_type = detect_response_type(response)
@@ -612,78 +570,36 @@ Example: {{"response": "I apologize, but I encountered an internal error..."}}""
             # Mark as completed
             self.memory.update_task_status(
                 cycle_id=cycle_id,
-                status="done",
+                status="done" if execution_result.get("success") else "error",
                 current_step_id=execution_result.get("total_steps", 0) - 1
             )
             
-            if execution_result["success"]:
-                self._emit_status(
-                    "preparing_response",
-                    {"route": "PLANNER", "success": True}
-                )
-                response_segments = (
-                    execution_result.get("narration_segments")
-                    or execution_result.get("response_segments")
-                )
-                if not response_segments:
-                    fallback_text = (
-                        execution_result.get("final_response")
-                        or execution_result.get("narration_template")
-                        or "Task completed."
-                    )
-                    response_segments = [{"kind": "text", "text": fallback_text}]
-                final_response = self._segments_to_text(response_segments)
-                execution_result["narration_segments"] = response_segments
-                self.memory.save_chat_exchange(
-                    session_id=self.session_id,
-                    cycle_id=cycle_id,
-                    user_query=query,
-                    agent_response=final_response
-                )
-            else:
-                self._emit_status(
-                    "preparing_response",
-                    {"route": "PLANNER", "success": False}
-                )
-                summary_lines = [
-                    f"The user asked: {query}",
-                    "",
-                    "A multi-step plan was executed but did not fully succeed.",
-                    f"Steps completed: {execution_result['steps_completed']}",
-                    f"Steps failed: {execution_result['steps_failed']}",
-                    f"Overall success flag: {execution_result['success']}",
-                    "",
-                    "Step details:"
-                ]
-                # ... (rest of error handling remains similar)
-                for result in execution_result["step_results"]:
-                    status = "PASS" if result["success"] else "FAIL"
-                    exit_code = result.get("exit_code")
-                    stderr = result.get("stderr") or ""
-                    stdout = result.get("stdout") or ""
-                    stderr_tail = (stderr if len(stderr) <= 200 else stderr[:200] + "...").strip()
-                    stdout_tail = (stdout if len(stdout) <= 200 else stdout[:200] + "...").strip()
-                    summary_lines.append(
-                        f"- [{status}] Step {result['step_id']}: {result['description']}"
-                    )
-                    summary_lines.append(f"  exit_code: {exit_code}")
-                    if stderr_tail:
-                        summary_lines.append(f"  stderr: {stderr_tail}")
-                    if stdout_tail:
-                        summary_lines.append(f"  stdout: {stdout_tail}")
-                    if not result["success"]:
-                        summary_lines.append(f"  error: {result.get('error')}")
-                summary_lines.append("")
-                summary_lines.append(
-                    "Explain the outcome to the user and mention what succeeded or failed."
-                )
-                final_response = self._call_agent_a_direct_response(
-                    cycle_id=cycle_id,
-                    user_context="\n".join(summary_lines)
-                )
-                response_segments = [{"kind": "text", "text": final_response}]
+            self._emit_status(
+                "preparing_response",
+                {"route": "PLANNER", "success": execution_result.get("success")}
+            )
 
+            response_segments = (
+                execution_result.get("narration_segments")
+                or execution_result.get("response_segments")
+            )
+            if not response_segments:
+                fallback_text = (
+                    execution_result.get("final_response")
+                    or execution_result.get("narration_template")
+                    or "Task completed."
+                )
+                response_segments = [{"kind": "text", "text": fallback_text}]
+
+            final_response = self._segments_to_text(response_segments)
             execution_result["narration_segments"] = response_segments
+
+            self.memory.save_chat_exchange(
+                session_id=self.session_id,
+                cycle_id=cycle_id,
+                user_query=query,
+                agent_response=final_response
+            )
             
             return OrchestratorResult(
                 cycle_id=cycle_id,
@@ -780,6 +696,18 @@ Describe the failure and tell the user what to do next."""
         agent_b_notes = ""
         last_stdout = None
         last_raw_stdout = None
+
+        def _is_informative_negative(exit_code: Optional[int], stdout: Optional[str], stderr: Optional[str]) -> bool:
+            """
+            Treat common non-zero exit codes with meaningful output as informative (not fatal):
+            - 1/2: general/usage errors that still convey "not found"/"no matches"
+            - 127: command not found diagnostics
+            Only when there is some stdout/stderr to explain the condition.
+            """
+            if exit_code not in {1, 2, 127}:
+                return False
+            diagnostic = (stdout or "") + (stderr or "")
+            return diagnostic.strip() != ""
         
         try:
             for loop_idx in range(max_loops):
@@ -862,12 +790,96 @@ Describe the failure and tell the user what to do next."""
                        current_step_id=step_id
                     )
     
-                    exec_result = self.tool_executor.execute(
-                        tool_name=tool_name,
-                        tool_args=args,
-                        cycle_id=cycle_id,
-                        step_id=step_id
-                    )
+                    try:
+                        exec_result = self.tool_executor.execute(
+                            tool_name=tool_name,
+                            tool_args=args,
+                            cycle_id=cycle_id,
+                            step_id=step_id
+                        )
+                    except Exception as exec_error:
+                        steps_failed += 1
+                        description = f"Step {step_id}: {tool_name}"
+                        step_result = {
+                            "step_id": step_id,
+                            "tool_name": tool_name,
+                            "tool_args": args,
+                            "description": description,
+                            "success": False,
+                            "exit_code": None,
+                            "stdout": None,
+                            "stderr": None,
+                            "output": None,
+                            "error": str(exec_error),
+                            "output_format": output_format
+                        }
+                        step_results.append(step_result)
+
+                        # Persist the failure for debugging/recall before any further LLM calls
+                        try:
+                            self._emit_tool_output({
+                               "route": "PLANNER",
+                               "step_id": step_id,
+                               "tool_name": tool_name,
+                               "tool_args": args,
+                               "stdout": None,
+                               "stderr": str(exec_error),
+                               "success": False,
+                               "events": None
+                            })
+                            self.memory.save_step_output(
+                               cycle_id=cycle_id,
+                               step_id=step_id,
+                               tool_name=tool_name,
+                               tool_args=args,
+                               success=False,
+                               exit_code=None,
+                               output_preview=str(exec_error)[:500],
+                               stdout=None,
+                               stderr=str(exec_error),
+                               raw_stdout=None,
+                               raw_stderr=None,
+                               output_format=output_format or None,
+                               parsed_outputs=None,
+                               artifact_path=None
+                            )
+                        except Exception:
+                            # Never let logging failures mask the primary executor error
+                            pass
+
+                        failure_prompt = f"""The user asked: {query}
+
+Agent B attempted to execute a tool, but ToolExecutor failed.
+Stage: Agent B execution loop (tool execution).
+Tool: {tool_name}
+Args: {self._json_safe(args)}
+
+Error:
+{exec_error}
+
+Explain the failure to the user, call out the tool/args involved, and suggest how to fix or retry."""
+                        agent_response = self._call_agent_a_direct_response(
+                            cycle_id=cycle_id,
+                            user_context=failure_prompt
+                        )
+
+                        return {
+                            "steps_completed": steps_completed,
+                            "steps_failed": steps_failed,
+                            "total_steps": total_steps_attempted,
+                            "step_results": step_results,
+                            "success": False,
+                            "final_response": agent_response,
+                            "narration_template": agent_response,
+                            "output_values": output_values,
+                            "output_value_types": output_value_types,
+                            "output_value_sources": output_value_sources,
+                            "template_values": template_values,
+                            "response_segments": [{"kind": "text", "text": agent_response}],
+                            "agent_b_final_raw": agent_response,
+                            "missing_segments": False,
+                            "error": str(exec_error)
+                        }
                     
                     if exec_result.get("stdout"):
                         last_stdout = exec_result.get("stdout")
@@ -877,8 +889,13 @@ Describe the failure and tell the user what to do next."""
                     # Shell tools with non-zero exit codes should be marked failed even if the tool call itself returned
                     exit_code = exec_result.get("exit_code")
                     success = exec_result["success"]
+                    informative_negative = False
                     if exit_code not in (None, 0):
-                        success = False
+                        if _is_informative_negative(exit_code, exec_result.get("stdout"), exec_result.get("stderr")):
+                            informative_negative = True
+                            success = True
+                        else:
+                            success = False
                     step_error = exec_result.get("error")
                     stderr_preview = exec_result.get("stderr")
                     if not success and not step_error:
@@ -886,7 +903,7 @@ Describe the failure and tell the user what to do next."""
                             step_error = stderr_preview
                         elif exit_code not in (None, 0):
                             step_error = f"Non-zero exit code {exit_code}"
-                    if success:
+                    if success or informative_negative:
                         steps_completed += 1
                     else:
                         steps_failed += 1
@@ -904,6 +921,7 @@ Describe the failure and tell the user what to do next."""
                         "stderr": exec_result.get("stderr"),
                         "output": exec_result.get("stdout") or exec_result.get("stderr") or exec_result.get("result"),
                         "error": step_error,
+                        "informative_negative": informative_negative,
                         "output_format": output_format
                     }
                     step_results.append(step_result)
@@ -1033,14 +1051,24 @@ Describe the failure and tell the user what to do next."""
                 "text": narration_template or final_response
             }
         ]
+        response_segments_filled = self._sanitize_empty_segments(
+            response_segments_filled,
+            step_results
+        )
         final_text = self._segments_to_text(response_segments_filled)
 
+        failed_steps = len([
+            s for s in step_results
+            if not s.get("success") and not s.get("informative_negative")
+        ])
+        completed_steps = len(step_results) - failed_steps
+
         return {
-            "steps_completed": steps_completed,
-            "steps_failed": steps_failed,
-            "total_steps": total_steps_attempted,
+            "steps_completed": completed_steps,
+            "steps_failed": failed_steps,
+            "total_steps": len(step_results),
             "step_results": step_results,
-            "success": steps_failed == 0,
+            "success": failed_steps == 0,
             "final_response": final_text,
             "narration_template": narration_template or final_response,
             "output_values": output_values,
@@ -1052,127 +1080,56 @@ Describe the failure and tell the user what to do next."""
             "missing_segments": len(response_segments_filled) == 0
         }
 
-    def _execute_manifest_plan(
+    def _sanitize_empty_segments(
         self,
-        *,
-        cycle_id: str,
-        plan: Dict[str, Any],
-        manifest: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Legacy manifest execution path used by tests."""
-        step_lookup = {
-            step.get("id"): step
-            for step in plan.get("steps", [])
-        }
-        output_values: Dict[str, Any] = {}
-        output_value_types: Dict[str, Any] = {}
-        output_value_sources: Dict[str, Any] = {}
-        template_values: Dict[str, Any] = {}
-        step_results: List[Dict[str, Any]] = []
-        steps_completed = 0
-        steps_failed = 0
-        steps = manifest.get("execution_steps") or []
+        segments: List[Dict[str, Any]],
+        step_results: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Remove empty block segments and, if everything is empty, emit a short note
+        explaining that the command produced no output.
+        """
+        if not segments:
+            segments = []
 
-        for payload in steps:
-            step_id = payload.get("step_id", len(step_results))
-            tool_name = payload.get("tool_name")
-            tool_args = payload.get("tool_args", {})
-            output_format = payload.get("output_format") or {}
-            exec_result = self.tool_executor.execute(
-                tool_name=tool_name,
-                tool_args=tool_args,
-                cycle_id=cycle_id,
-                step_id=step_id
-            )
+        cleaned: List[Dict[str, Any]] = []
+        empty_blocks = 0
 
-            stdout = exec_result.get("stdout") or ""
-            raw_stdout = exec_result.get("raw_stdout")
-            parsed_outputs, rendered_outputs = self.output_parser.parse(
-                output_format,
-                stdout,
-                raw_stdout,
-                exec_result.get("data")
-            )
+        for seg in segments:
+            if seg.get("kind") == "block":
+                body = seg.get("body")
+                if body is None or str(body).strip() == "":
+                    empty_blocks += 1
+                    continue
+            cleaned.append(seg)
 
-            step_meta = step_lookup.get(step_id, {})
-            for key, fmt in output_format.items():
-                rendered_value = rendered_outputs.get(key)
-                parsed_value = parsed_outputs.get(key)
-                if self._should_use_no_output_message(
-                    fmt=fmt,
-                    rendered_value=rendered_value,
-                    parsed_value=parsed_value,
-                    exec_result=exec_result
-                ):
-                    fallback = self._format_no_output_message(
-                        step=step_meta,
-                        tool_args=tool_args
-                    )
-                    output_values[key] = fallback
-                    template_values[key] = fallback
-                    output_value_sources[key] = {
-                        "no_output": True
-                    }
-                else:
-                    output_values[key] = rendered_value
-                    if isinstance(fmt, str) and fmt.lower() in {"int", "float"}:
-                        template_values[key] = parsed_value
-                    else:
-                        template_values[key] = rendered_value
-                    output_value_sources[key] = {
-                        "tool_name": tool_name,
-                        "tool_args": tool_args,
-                        "command": tool_args.get("command"),
-                        "stdout": stdout,
-                        "raw_stdout": raw_stdout
-                    }
-                output_value_types[key] = fmt
+        if cleaned:
+            return cleaned
 
-            step_results.append({
-                "step_id": step_id,
-                "tool_name": tool_name,
-                "tool_args": tool_args,
-                "description": step_meta.get("description", ""),
-                "success": exec_result.get("success"),
-                "output": stdout,
-                "error": exec_result.get("error")
-            })
+        # Everything was empty; synthesize a note from the last step
+        note = "Command produced no output (exit 0)."
+        last_step = None
+        if step_results:
+            for s in reversed(step_results):
+                # Prefer a step that actually ran a tool and returned 0
+                if s.get("tool_name") and s.get("exit_code") in (0, None):
+                    last_step = s
+                    break
+            if not last_step:
+                last_step = step_results[-1]
 
-            self.memory.save_step_output(
-                cycle_id=cycle_id,
-                step_id=step_id,
-                tool_name=tool_name,
-                tool_args=tool_args,
-                success=exec_result.get("success"),
-                exit_code=exec_result.get("exit_code"),
-                output_preview=exec_result.get("output_preview"),
-                stdout=stdout,
-                stderr=exec_result.get("stderr"),
-                raw_stdout=raw_stdout,
-                raw_stderr=exec_result.get("raw_stderr"),
-                output_format=output_format,
-                parsed_outputs=parsed_outputs,
-                artifact_path=exec_result.get("artifact_path")
-            )
+        if last_step:
+            cmd = None
+            args = last_step.get("tool_args")
+            if isinstance(args, dict):
+                cmd = args.get("command")
+            exit_code = last_step.get("exit_code")
+            if cmd:
+                note = f"Command `{cmd}` produced no output (exit {exit_code if exit_code is not None else 0})."
+            elif last_step.get("tool_name"):
+                note = f"Tool {last_step['tool_name']} produced no output (exit {exit_code if exit_code is not None else 0})."
 
-            if exec_result.get("success"):
-                steps_completed += 1
-            else:
-                steps_failed += 1
-
-        return {
-            "steps_completed": steps_completed,
-            "steps_failed": steps_failed,
-            "total_steps": len(steps),
-            "step_results": step_results,
-            "success": steps_failed == 0,
-            "final_response": plan.get("narration_template", ""),
-            "narration_template": plan.get("narration_template", ""),
-            "output_values": output_values,
-            "output_value_types": output_value_types,
-            "output_value_sources": output_value_sources,
-            "template_values": template_values
-        }
+        return [{"kind": "text", "text": note}]
 
     def _execute_plan(
         self,
@@ -1182,16 +1139,7 @@ Describe the failure and tell the user what to do next."""
     ) -> Dict[str, Any]:
         """
         Execute plan via Agent B using native tool calling loop.
-        Replaces the old One-Shot Manifest approach.
         """
-        manifest = self._get_execution_manifest(cycle_id, query, plan)
-        if manifest:
-            return self._execute_manifest_plan(
-                cycle_id=cycle_id,
-                plan=plan,
-                manifest=manifest
-            )
-
         self._emit_status(
             "planning",
             {"route": "PLANNER", "stage": "agent_b_loop"}
@@ -1200,58 +1148,6 @@ Describe the failure and tell the user what to do next."""
     
 
     
-    def _parse_agent_b_json(self, text: str) -> Dict[str, Any]:
-        """
-        Parse JSON from Agent B response using STRICT protocol.
-        
-        Protocol:
-        1. The payload MUST be wrapped in a ```json ... ``` code block.
-        2. If multiple blocks exist, the LAST one is used (allows for scratchpad blocks).
-        3. <think> blocks are explicitly ignored.
-        
-        Args:
-            text: Raw Agent B response
-        
-        Returns:
-            Parsed JSON dict
-        
-        Raises:
-            ValueError: If no valid JSON block is found
-            json.JSONDecodeError: If JSON is malformed
-        """
-        import json
-        
-        # 1. Remove <think> blocks to prevent false positives
-        clean_text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-        
-        # 2. Extract all ```json blocks
-        # Regex finds content between ```json and ```
-        matches = re.findall(r'```json\s*(.*?)\s*```', clean_text, re.DOTALL)
-        
-        if not matches:
-            # Fallback: Look for generic ``` blocks if json tag was missed
-            matches = re.findall(r'```\s*(\{.*?\})\s*```', clean_text, re.DOTALL)
-            
-        if not matches:
-            # STRICT MODE: Do not attempt to find raw JSON outside blocks.
-            # This prevents capturing "I will use {"foo": "bar"}" from reasoning text.
-            raise ValueError("Protocol Violation: No ```json code block found in response.")
-            
-        # 3. Use the LAST block (allows Agent to refine its thought in previous blocks)
-        json_text = matches[-1].strip()
-
-        # Some models emit backslash + newline sequences inside strings, which breaks strict JSON parsing.
-        # Normalize those into escaped newlines before decoding.
-        # Tolerate escaped newlines that include a stray backslash + linebreak (\\\n),
-        # and collapse the common pattern \\n\\\n which otherwise doubles newlines.
-        normalized_text = re.sub(r"\\n\\\s*[\r\n]+", r"\\n", json_text)
-        sanitized_text = re.sub(r"\\\s*[\r\n]+", r"\\n", normalized_text)
-
-        try:
-            return json.loads(json_text)
-        except json.JSONDecodeError:
-            return json.loads(sanitized_text)
-
     def _call_agent_b_final_narration(
         self,
         *,
@@ -1531,45 +1427,6 @@ Describe the failure and tell the user what to do next."""
             }
         }
 
-    def _normalize_agent_b_payload(
-        self,
-        step: Dict[str, Any],
-        step_id: int,
-        payload: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        Normalize Agent B tool payload and validate output_format coverage.
-        This keeps legacy tests happy and ensures all declared output_keys
-        have a type.
-        """
-        if not isinstance(payload, dict):
-            raise ValueError("Tool payload must be a dict")
-        output_format = payload.get("output_format") or {}
-        normalized_format = {
-            key: (val.lower() if isinstance(val, str) else val)
-            for key, val in output_format.items()
-        }
-
-        output_keys = step.get("output_keys") or []
-        missing = [key for key in output_keys if key not in normalized_format]
-        if missing:
-            raise ValueError(
-                f"Step {step_id} missing output_format for key '{missing[0]}'"
-            )
-
-        tool_args = {k: v for k, v in payload.items() if k != "output_format"}
-        tool_name = step.get("tool_name") or payload.get("tool_name")
-
-        return {
-            "tool_name": tool_name,
-            "tool_args": tool_args,
-            "output_format": normalized_format
-        }
-
-    def _get_execution_manifest(self, *_args, **_kwargs):
-        """Legacy shim for patched tests; manifest flow removed in v3."""
-        return None
-
     def _build_agent_a_context_message(self, query: str) -> str:
         """Construct the context message for Agent A with recent conversations."""
         history = self.memory.get_chat_history(
@@ -1620,50 +1477,6 @@ Describe the failure and tell the user what to do next."""
         cleaned = text.replace("```", " ")
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         return cleaned or "(no prior response captured)"
-
-    def _record_step_outputs(
-        self,
-        step: Dict[str, Any],
-        raw_output: Optional[str],
-        output_values: Dict[str, str]
-    ) -> List[str]:
-        """
-        Map each output key from the step to the raw output.
-        
-        Returns the list of keys that were populated.
-        """
-        output_text = raw_output or ""
-        recorded: List[str] = []
-        for key in step.get("output_keys", []):
-            normalized = key.strip()
-            if not normalized:
-                continue
-            output_values[normalized] = output_text
-            recorded.append(normalized)
-        return recorded
-
-    def _build_output_source_metadata(
-        self,
-        *,
-        step: Dict[str, Any],
-        step_id: int,
-        description: str,
-        tool_args: Dict[str, Any],
-        exec_result: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Capture metadata for output rendering in the REPL."""
-        return {
-            "step_id": step_id,
-            "tool_name": step.get("tool_name"),
-            "description": description,
-            "command": tool_args.get("command"),
-            "tool_args": tool_args,
-            "stdout": exec_result.get("stdout"),
-            "stderr": exec_result.get("stderr"),
-            "raw_stdout": exec_result.get("raw_stdout"),
-            "raw_stderr": exec_result.get("raw_stderr"),
-            "exit_code": exec_result.get("exit_code"),
-        }
 
     def _should_use_no_output_message(
         self,

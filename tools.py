@@ -2264,7 +2264,25 @@ class RunCommandTool(BaseTool):
                 result["raw_stdout"] = result.get("stdout", "")
             if "raw_stderr" not in result:
                 result["raw_stderr"] = result.get("stderr", "")
-                
+
+            # Fallback: some platforms return empty string for platform.processor()
+            # If the caller asked for that and got no stdout, try a more reliable probe.
+            if (
+                result.get("exit_code") == 0
+                and not (result.get("stdout") or "").strip()
+                and "platform.processor" in command
+            ):
+                fallback_cmds = [
+                    "LC_ALL=C lscpu | awk -F: '/Model name/{gsub(/^[ \\t]+/,\"\", $2); print $2; exit}'",
+                    "grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^[ \\t]*//'"
+                ]
+                for fb_cmd in fallback_cmds:
+                    fb_result = self.shell.run_command(fb_cmd, reset_dir=reset_dir)
+                    if fb_result.get("exit_code") == 0 and (fb_result.get("stdout") or "").strip():
+                        result["stdout"] = fb_result["stdout"]
+                        result["raw_stdout"] = fb_result.get("raw_stdout", fb_result["stdout"])
+                        break
+            
             return result
             
         except Exception as e:

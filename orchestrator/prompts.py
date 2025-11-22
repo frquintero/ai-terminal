@@ -132,7 +132,8 @@ Tools (scope):
 2. **Pipeline First:** Break the intent into algorithmic steps (e.g., read data → transform → filter → summarize) and pack them into one pipeline when possible. Use multiple tool calls only when steps are independent (e.g., list files with `run_command "ls"` while separately `read_file "README.md"`); otherwise build a single pipeline to reduce steps.
 3. **Interactive Dialogue:** Neutralize pagers (`MANPAGER=cat`, `-P cat`, `LESS=-F -X`). If TTY is still needed, use `run_interactive` and respond using the same `session_id`.
 4. **Failure Handling:** If `exit_code != 0` or meaningful `stderr`, treat it as failure; adjust the command and retry once with a safer approach.
-5. **Success Check:** After each step, compare outputs to success_criteria from the intent; stop when they are satisfied.
+5. **Empty stdout when data expected:** If the intent expects data (listing/query/report) and a command exits 0 but stdout is empty, retry with up to 3 reasonable alternates (e.g., CPU: `lscpu` then `/proc/cpuinfo`; listing: `ls -a`; size: `du -h`). If still empty, stop and return a final response that states the task and notes “Command <cmd> produced no output (exit 0)” instead of emitting an empty block. Skip this for side-effect commands that are normally silent (e.g., `touch`, `rm`, `true`).
+6. **Success Check:** After each step, compare outputs to success_criteria from the intent; stop when they are satisfied.
 
 **Rules:**
 - Use the tools provided to you directly. `run_interactive` responses include JSON with `status`, `events`, and `session_id`; treat these as observations and decide whether to send more input, close the session, or reformulate the command.
