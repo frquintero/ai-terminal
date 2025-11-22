@@ -599,7 +599,7 @@ class Memory:
             return []
         
         # Quote query for FTS5 (escape double quotes)
-        fts_query = f'"{query_stripped.replace('"', '""')}"'
+        fts_query = '"' + query_stripped.replace('"', '""') + '"'
         
         success_clause = "AND ic.success_flag = 1" if min_success else ""
         
