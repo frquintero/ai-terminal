@@ -658,16 +658,21 @@ Example: {{"response": "I apologize, but I encountered an internal error..."}}""
                 # ... (rest of error handling remains similar)
                 for result in execution_result["step_results"]:
                     status = "PASS" if result["success"] else "FAIL"
+                    exit_code = result.get("exit_code")
+                    stderr = result.get("stderr") or ""
+                    stdout = result.get("stdout") or ""
+                    stderr_tail = (stderr if len(stderr) <= 200 else stderr[:200] + "...").strip()
+                    stdout_tail = (stdout if len(stdout) <= 200 else stdout[:200] + "...").strip()
                     summary_lines.append(
                         f"- [{status}] Step {result['step_id']}: {result['description']}"
                     )
-                    if result["success"]:
-                        output_preview = result["output"][:200]
-                        if len(result["output"]) > 200:
-                            output_preview += "..."
-                        summary_lines.append(f"  Output preview: {output_preview}")
-                    else:
-                        summary_lines.append(f"  Error: {result['error']}")
+                    summary_lines.append(f"  exit_code: {exit_code}")
+                    if stderr_tail:
+                        summary_lines.append(f"  stderr: {stderr_tail}")
+                    if stdout_tail:
+                        summary_lines.append(f"  stdout: {stdout_tail}")
+                    if not result["success"]:
+                        summary_lines.append(f"  error: {result.get('error')}")
                 summary_lines.append("")
                 summary_lines.append(
                     "Explain the outcome to the user and mention what succeeded or failed."
@@ -869,7 +874,18 @@ Describe the failure and tell the user what to do next."""
                     if exec_result.get("raw_stdout"):
                         last_raw_stdout = exec_result.get("raw_stdout")
     
+                    # Shell tools with non-zero exit codes should be marked failed even if the tool call itself returned
+                    exit_code = exec_result.get("exit_code")
                     success = exec_result["success"]
+                    if exit_code not in (None, 0):
+                        success = False
+                    step_error = exec_result.get("error")
+                    stderr_preview = exec_result.get("stderr")
+                    if not success and not step_error:
+                        if stderr_preview not in (None, ""):
+                            step_error = stderr_preview
+                        elif exit_code not in (None, 0):
+                            step_error = f"Non-zero exit code {exit_code}"
                     if success:
                         steps_completed += 1
                     else:
@@ -883,8 +899,11 @@ Describe the failure and tell the user what to do next."""
                         "tool_args": args,
                         "description": description,
                         "success": success,
+                        "exit_code": exit_code,
+                        "stdout": exec_result.get("stdout"),
+                        "stderr": exec_result.get("stderr"),
                         "output": exec_result.get("stdout") or exec_result.get("stderr") or exec_result.get("result"),
-                        "error": exec_result.get("error"),
+                        "error": step_error,
                         "output_format": output_format
                     }
                     step_results.append(step_result)
@@ -1255,21 +1274,39 @@ Describe the failure and tell the user what to do next."""
         )
 
         # Build concise execution summary for context.
-        summary_lines = [
-            "Execution summary:",
-            f"- Intent: {plan.get('intent')}",
-            f"- Success criteria: {', '.join(plan.get('success_criteria') or []) or '(none)'}",
-            f"- Steps run: {len(step_results)}",
-        ]
+        def _tail(text: Optional[str], limit: int = 400):
+            if not text:
+                return ""
+            return text if len(text) <= limit else text[-limit:]
+
+        steps_summary = []
+        for step in step_results:
+            steps_summary.append({
+                "id": step.get("step_id"),
+                "tool": step.get("tool_name"),
+                "command": (step.get("tool_args") or {}).get("command") if isinstance(step.get("tool_args"), dict) else None,
+                "success": step.get("success"),
+                "exit_code": step.get("exit_code"),
+                "stdout_tail": _tail(step.get("stdout")),
+                "stderr_tail": _tail(step.get("stderr")),
+                "error": step.get("error")
+            })
+
+        summary_payload = {
+            "intent": plan.get("intent"),
+            "success_criteria": plan.get("success_criteria") or [],
+            "overall_success": all(step.get("success") for step in step_results) if step_results else True,
+            "steps_run": len(step_results),
+            "steps": steps_summary,
+            "agent_notes": agent_b_notes,
+        }
         if last_stdout:
-            # Provide tail of stdout for fidelity without overwhelming tokens
-            tail = last_stdout[-1500:] if len(last_stdout) > 1500 else last_stdout
-            summary_lines.append("- Use this exact stdout as the block body (verbatim, do not add blank lines or escapes):")
-            summary_lines.append(tail)
+            summary_payload["last_stdout_tail"] = _tail(last_stdout, 1500)
 
         system_prompt = (
             "You are Agent B preparing the final user-facing response.\n"
             "Tools are DISABLED for this call. Do not call any tools.\n"
+            "Base your response ONLY on the structured execution_summary provided; do not invent results.\n"
             "Return a JSON OBJECT (no code fences) with this exact shape:\n"
             "{\n"
             "  \"segments\": [\n"
@@ -1280,7 +1317,7 @@ Describe the failure and tell the user what to do next."""
             "}\n"
             "Always include `kind` for each segment; include `fence` and `body` for blocks."
         )
-        user_prompt = "\n".join(summary_lines)
+        user_prompt = json.dumps({"execution_summary": summary_payload}, ensure_ascii=False)
 
         messages = [
             {"role": "system", "content": system_prompt},

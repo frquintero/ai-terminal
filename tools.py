@@ -601,24 +601,34 @@ class ReadFileTool(BaseTool):
         elif os.path.exists(app_dir_path):
             target_path = app_dir_path
         else:
+            error_msg = f"File not found in working directory or app directory: {file_path}"
             return {
                 "success": False,
-                "error": f"File not found in working directory or app directory: {file_path}",
-                "path": file_path
+                "error": error_msg,
+                "path": file_path,
+                "stdout": "",
+                "stderr": error_msg,
+                "raw_stdout": "",
+                "raw_stderr": error_msg
             }
         
         try:
             # Check file size before reading
             size = os.path.getsize(target_path)
             if size > self.MAX_BYTES:
+                error_msg = (
+                    f"File is {size} bytes; exceeds READ_FILE_MAX_BYTES={self.MAX_BYTES}. "
+                    f"Use run_command with head/tail/less for large files."
+                )
                 return {
                     "success": False,
-                    "error": (
-                        f"File is {size} bytes; exceeds READ_FILE_MAX_BYTES={self.MAX_BYTES}. "
-                        f"Use run_command with head/tail/less for large files."
-                    ),
+                    "error": error_msg,
                     "path": target_path,
-                    "size": size
+                    "size": size,
+                    "stdout": "",
+                    "stderr": error_msg,
+                    "raw_stdout": "",
+                    "raw_stderr": error_msg
                 }
             
             with open(target_path, 'r', encoding='utf-8') as f:
@@ -638,7 +648,9 @@ class ReadFileTool(BaseTool):
                 "success": False,
                 "error": error_msg,
                 "path": target_path,
+                "stdout": "",
                 "stderr": error_msg,
+                "raw_stdout": "",
                 "raw_stderr": error_msg
             }
         except Exception as e:
@@ -647,7 +659,9 @@ class ReadFileTool(BaseTool):
                 "success": False,
                 "error": error_msg,
                 "path": target_path,
+                "stdout": "",
                 "stderr": error_msg,
+                "raw_stdout": "",
                 "raw_stderr": error_msg
             }
 
@@ -3396,23 +3410,6 @@ class GetContextTool(BaseTool):
         if shell_cwd is not None and not isinstance(shell_cwd, str):
             shell_cwd = str(shell_cwd)
         
-        # Get git repository context
-        git_context = {}
-        try:
-            from utils.system_info import get_git_info
-            git_info = get_git_info()
-            if git_info:
-                git_context = {
-                    "in_repo": True,
-                    "branch": git_info.get("branch"),
-                    "repo_name": git_info.get("repo_name"),
-                    "uncommitted_changes": int(git_info.get("uncommitted_changes", 0)) if git_info.get("uncommitted_changes") else 0
-                }
-            else:
-                git_context = {"in_repo": False}
-        except Exception:
-            git_context = {"in_repo": False}
-        
         # Get available interpreters
         interpreters = {}
         for interpreter in ["python", "python3", "node", "ruby", "bash", "perl"]:
@@ -3473,19 +3470,8 @@ class GetContextTool(BaseTool):
             
             # Configuration state (new)
             "configuration": {
-                "sandbox": {
-                    "enabled": bool(os.getenv("SANDBOX_PYTHON")),
-                    "timeout_seconds": int(os.getenv("SANDBOX_TIMEOUT", "30")),
-                    "max_memory_mb": int(os.getenv("SANDBOX_MAX_MEM_MB", "1024")),
-                    "max_cpu_seconds": int(os.getenv("SANDBOX_MAX_CPU_SEC", "20")),
-                    "network_disabled": os.getenv("SANDBOX_DISABLE_NETWORK", "1") in ("1", "true", "yes"),
-                    "write_protected": os.getenv("SANDBOX_ALLOW_PROJECT_WRITES", "0") not in ("1", "true", "yes")
-                },
                 "isolation": isolation_config
             },
-            
-            # Repository context (new)
-            "repository": git_context,
             
             # Capabilities (new)
             "capabilities": {
@@ -3520,7 +3506,12 @@ class GetContextTool(BaseTool):
             except Exception:
                 pass
         
-        return context
+        payload = json.dumps(context, ensure_ascii=False)
+        return {
+            "stdout": payload,
+            "raw_stdout": payload,
+            "result": payload
+        }
 
 
 # ============================================================================
@@ -3689,15 +3680,25 @@ class SearchDBTool(BaseTool):
         # Validate inputs
         valid_targets = ["chat_history", "step_outputs", "interactions", "intention_cache"]
         if target not in valid_targets:
+            error_msg = f"Invalid target '{target}'. Must be one of: {', '.join(valid_targets)}"
             return {
                 "success": False,
-                "error": f"Invalid target '{target}'. Must be one of: {', '.join(valid_targets)}"
+                "error": error_msg,
+                "stdout": "",
+                "stderr": error_msg,
+                "raw_stdout": "",
+                "raw_stderr": error_msg
             }
         
         if not query or not query.strip():
+            error_msg = "Query cannot be empty"
             return {
                 "success": False,
-                "error": "Query cannot be empty"
+                "error": error_msg,
+                "stdout": "",
+                "stderr": error_msg,
+                "raw_stdout": "",
+                "raw_stderr": error_msg
             }
         
         # Enforce limit bounds
@@ -3743,24 +3744,41 @@ class SearchDBTool(BaseTool):
                 formatted = self._format_intention_results(results)
             
             else:
-                return {"success": False, "error": f"Unknown target: {target}"}
+                error_msg = f"Unknown target: {target}"
+                return {
+                    "success": False,
+                    "error": error_msg,
+                    "stdout": "",
+                    "stderr": error_msg,
+                    "raw_stdout": "",
+                    "raw_stderr": error_msg
+                }
             
             elapsed_ms = int((time.time() - start_time) * 1000)
             
             # Return success response
+            payload = json.dumps(formatted, indent=2, ensure_ascii=False)
             return {
                 "success": True,
                 "target": target,
                 "query": query,
                 "result_count": len(results),
                 "latency_ms": elapsed_ms,
-                "results": formatted
+                "results": formatted,
+                "stdout": payload,
+                "raw_stdout": payload,
+                "stderr": ""
             }
         
         except Exception as e:
+            error_msg = f"Search failed: {str(e)}"
             return {
                 "success": False,
-                "error": f"Search failed: {str(e)}"
+                "error": error_msg,
+                "stdout": "",
+                "stderr": error_msg,
+                "raw_stdout": "",
+                "raw_stderr": error_msg
             }
     
     def _search_intention_cache(self, memory: Any, query: str, limit: int) -> List[Dict[str, Any]]:

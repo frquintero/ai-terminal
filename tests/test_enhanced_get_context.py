@@ -43,7 +43,9 @@ def test_get_context_structure():
     )
     _SESSION_STATE.set_last_exit_code(0)
     
-    result = json.loads(GetContextTool().execute())
+    output = GetContextTool().execute()
+    assert "stdout" in output, "get_context must return stdout for strict mode"
+    result = json.loads(output["stdout"])
     
     required_fields = ["working_dir", "shell_cwd", "recent_writes"]
     for field in required_fields:
@@ -55,7 +57,6 @@ def test_get_context_structure():
         "available_tools",
         "recent_errors",
         "configuration",
-        "repository",
         "capabilities",
         "activity",
         "filesystem"
@@ -82,27 +83,12 @@ def test_get_context_structure():
     assert isinstance(available_tools["all"], list)
     
     config = result["configuration"]
-    assert "sandbox" in config and "isolation" in config
-    
-    sandbox = config["sandbox"]
-    sandbox_fields = [
-        "enabled",
-        "timeout_seconds",
-        "max_memory_mb",
-        "max_cpu_seconds",
-        "network_disabled",
-        "write_protected"
-    ]
-    for field in sandbox_fields:
-        assert field in sandbox, f"Missing sandbox field: {field}"
+    assert "isolation" in config
     
     isolation = config["isolation"]
     isolation_fields = ["requested", "enabled", "active", "rootfs_sha256", "status"]
     for field in isolation_fields:
         assert field in isolation, f"Missing isolation field: {field}"
-    
-    repository = result["repository"]
-    assert "in_repo" in repository
     
     capabilities = result["capabilities"]
     assert "interpreters_available" in capabilities
@@ -142,7 +128,9 @@ def test_bounded_history():
             error=f"Error {i}"
         )
     
-    result = json.loads(GetContextTool().execute())
+    output = GetContextTool().execute()
+    assert "stdout" in output
+    result = json.loads(output["stdout"])
     
     assert len(result["tool_history"]) == 10
     first_index = json.loads(result["tool_history"][0]["args"])["index"]
