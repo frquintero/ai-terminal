@@ -303,6 +303,88 @@ class TestOrchestratorIntegration(unittest.TestCase):
         )
 
     @patch("orchestrator.orchestrator.LLMClient")
+    def test_run_command_input_data_ref_streams_previous_stdout(self, mock_llm_client):
+        """input_data_ref lets Agent B pipe prior tool output into stdin."""
+        cycle_id = self.memory.create_cycle(
+            session_id=self.orchestrator.session_id,
+            query="augment csv"
+        )
+
+        read_call = SimpleNamespace(
+            id="call-read",
+            function=SimpleNamespace(
+                name="read_file",
+                arguments=json.dumps({"file_path": "data.csv"})
+            )
+        )
+        run_call = SimpleNamespace(
+            id="call-run",
+            function=SimpleNamespace(
+                name="run_command",
+                arguments=json.dumps({
+                    "command": "python3 -c \"print(input())\"",
+                    "input_data_ref": {"tool_call_id": "call-read", "channel": "stdout"}
+                })
+            )
+        )
+
+        mock_llm_client.return_value.call.side_effect = [
+            {"error": None, "message": SimpleNamespace(content=None, tool_calls=[read_call])},
+            {"error": None, "message": SimpleNamespace(content=None, tool_calls=[run_call])},
+            {"error": None, "message": SimpleNamespace(content="done", tool_calls=[])},
+            {"error": None, "message": SimpleNamespace(content={
+                "segments": [{"kind": "text", "text": "done"}],
+                "template_values": {}
+            })}
+        ]
+
+        file_body = "name,id\nalice,1\n"
+        executed_args = []
+
+        def fake_execute(tool_name, tool_args, **kwargs):
+            executed_args.append((tool_name, dict(tool_args)))
+            if tool_name == "read_file":
+                return {
+                    "success": True,
+                    "stdout": file_body,
+                    "stderr": "",
+                    "raw_stdout": file_body,
+                    "raw_stderr": "",
+                    "exit_code": 0,
+                    "output_preview": file_body,
+                    "error": None,
+                    "result": file_body,
+                    "agent_message": None
+                }
+            if tool_name == "run_command":
+                assert tool_args.get("input_data") == file_body
+                return {
+                    "success": True,
+                    "stdout": "updated csv",
+                    "stderr": "",
+                    "raw_stdout": "updated csv",
+                    "raw_stderr": "",
+                    "exit_code": 0,
+                    "output_preview": "updated csv",
+                    "error": None,
+                    "result": "updated csv",
+                    "agent_message": None
+                }
+            raise AssertionError(f"Unexpected tool {tool_name}")
+
+        with patch.object(self.orchestrator.tool_executor, "execute", side_effect=fake_execute):
+            summary = self.orchestrator._run_agent_b_tool_loop(
+                cycle_id=cycle_id,
+                query="augment csv",
+                plan={"intent": "augment csv", "success_criteria": []}
+            )
+
+        self.assertEqual(executed_args[0][0], "read_file")
+        self.assertEqual(executed_args[1][0], "run_command")
+        self.assertEqual(executed_args[1][1]["input_data"], file_body)
+        self.assertTrue(summary["success"])
+
+    @patch("orchestrator.orchestrator.LLMClient")
     def test_execution_plan_path_does_not_exit_early(self, mock_llm_client):
         """Ensure execution-plan responses proceed without touching undefined agent_response."""
         # Fake LLM returning a simple execution plan (Agent A format)

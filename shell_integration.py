@@ -296,6 +296,10 @@ class ShellIntegration:
             # Separator for stdout/stderr in the raw stream
             stream_sep = f"__AI_SEP_{self._token}__"
             
+            # Ensure heredoc terminators sit on their own line before appending our wrapper
+            if command and not command.endswith("\n"):
+                command = f"{command}\n"
+
             # Wrap command with markers and capture exit code + PWD
             # Format: START_MARKER\n...setup...\nCOMMAND... >out 2>err\n...readback...\nEND_MARKER<exitcode>:<pwd>
             wrapped = (
@@ -303,7 +307,7 @@ class ShellIntegration:
                 f'{cwd_reset}; '
                 f'echo {self._shq(self._start_marker)}; '
                 f'{stdin_setup}'
-                f'{{ {command}; }} {stdin_redirect} > {stdout_file} 2> {stderr_file}; '
+                f'{{ {command}}} {stdin_redirect} > {stdout_file} 2> {stderr_file}; '
                 f'__S=$?; '
                 f'cat {stdout_file}; echo "{stream_sep}"; cat {stderr_file}; '
                 f'rm -f {stdout_file} {stderr_file} {stdin_file}; '

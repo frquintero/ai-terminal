@@ -803,6 +803,8 @@ Describe the failure and tell the user what to do next."""
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_msg}
         ]
+
+        tool_outputs_by_call_id: Dict[str, Dict[str, Any]] = {}
         
         tools = self._get_tool_schemas("B")
         max_loops = 15
@@ -956,14 +958,36 @@ Describe the failure and tell the user what to do next."""
                 for tc in msg.tool_calls:
                     total_steps_attempted += 1
                     tool_name = tc.function.name
+                    tool_call_id = getattr(tc, "id", None)
                     parsed_outputs = None
                     try:
                         args = json.loads(tc.function.arguments)
                     except json.JSONDecodeError:
                         args = {}
+                    if not isinstance(args, dict):
+                        args = {}
                    
-                    output_format = args.pop("output_format", {}) if isinstance(args, dict) else {}
-                    
+                    output_format = args.pop("output_format", {})
+                    exec_args = dict(args)
+                    input_data_ref = exec_args.pop("input_data_ref", None)
+                    resolved_input_error = None
+                    resolved_input_data = None
+
+                    if input_data_ref is not None:
+                        if tool_name != "run_command":
+                            resolved_input_error = "input_data_ref is only supported on run_command"
+                        elif exec_args.get("input_data"):
+                            resolved_input_error = "Provide either input_data or input_data_ref, not both"
+                        else:
+                            ok, data_or_error = self._resolve_input_data_ref(
+                                input_data_ref,
+                                tool_outputs_by_call_id
+                            )
+                            if ok:
+                                resolved_input_data = data_or_error
+                            else:
+                                resolved_input_error = data_or_error
+                   
                     # TODO Enforcement: Validate tool call against current TODO
                     if not _validate_tool_call_against_todo(tool_name, args):
                         # Tool call not approved for current TODO - this would be a violation
@@ -1007,13 +1031,30 @@ Describe the failure and tell the user what to do next."""
                        current_step_id=step_id
                     )
     
+                    if resolved_input_data is not None:
+                        exec_args["input_data"] = resolved_input_data
+
                     try:
-                        exec_result = self.tool_executor.execute(
-                            tool_name=tool_name,
-                            tool_args=args,
-                            cycle_id=cycle_id,
-                            step_id=step_id
-                        )
+                        if resolved_input_error:
+                            preview = resolved_input_error[:self.tool_executor.MAX_OUTPUT_PREVIEW]
+                            exec_result = {
+                                "success": False,
+                                "stdout": "",
+                                "stderr": resolved_input_error,
+                                "raw_stdout": "",
+                                "raw_stderr": "",
+                                "exit_code": None,
+                                "output_preview": preview,
+                                "error": resolved_input_error,
+                                "result": ""
+                            }
+                        else:
+                            exec_result = self.tool_executor.execute(
+                                tool_name=tool_name,
+                                tool_args=exec_args,
+                                cycle_id=cycle_id,
+                                step_id=step_id
+                            )
                     except Exception as exec_error:
                         steps_failed += 1
                         description = f"Step {step_id}: {tool_name}"
@@ -1238,6 +1279,16 @@ Explain the failure to the user, call out the tool/args involved, and suggest ho
                        "success": success,
                        "events": exec_result.get("events")
                     })
+
+                    if tool_call_id:
+                        tool_outputs_by_call_id[tool_call_id] = {
+                            "tool_name": tool_name,
+                            "stdout": exec_result.get("stdout"),
+                            "stderr": exec_result.get("stderr"),
+                            "raw_stdout": exec_result.get("raw_stdout"),
+                            "raw_stderr": exec_result.get("raw_stderr"),
+                            "result": exec_result.get("result")
+                        }
                     
                     # Save step output
                     self.memory.save_step_output(
@@ -1820,6 +1871,38 @@ Explain the failure to the user, call out the tool/args involved, and suggest ho
         return (
             f"Tool {tool_name} completed with no output, which I interpret as zero results{intent_clause}."
         )
+
+    def _resolve_input_data_ref(
+        self,
+        ref: Dict[str, Any],
+        tool_outputs_by_call_id: Dict[str, Dict[str, Any]]
+    ) -> Tuple[bool, str]:
+        """
+        Resolve an input_data_ref spec into concrete stdin content.
+        """
+        if not isinstance(ref, dict):
+            return False, "input_data_ref must be an object with tool_call_id"
+        tool_call_id = ref.get("tool_call_id")
+        if not tool_call_id:
+            return False, "input_data_ref.tool_call_id is required"
+        channel = ref.get("channel", "stdout")
+        allowed_channels = {"stdout", "stderr", "result", "raw_stdout", "raw_stderr"}
+        if channel not in allowed_channels:
+            return False, f"input_data_ref.channel must be one of {sorted(allowed_channels)}"
+        prior = tool_outputs_by_call_id.get(tool_call_id)
+        if not prior:
+            return False, f"Tool call '{tool_call_id}' not found. References must point to earlier tool_call_id values."
+        data = prior.get(channel)
+        if data in (None, ""):
+            return False, f"No data available on channel '{channel}' for tool call '{tool_call_id}'"
+        if isinstance(data, (dict, list)):
+            try:
+                data = json.dumps(data)
+            except Exception:
+                data = str(data)
+        else:
+            data = str(data)
+        return True, data
 
     def _cache_execution(
         self,

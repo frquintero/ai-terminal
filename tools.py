@@ -2251,7 +2251,23 @@ class RunCommandTool(BaseTool):
                         },
                         "input_data": {
                             "type": "string",
-                            "description": "Optional data to pass to stdin"
+                            "description": "Optional literal data to pass to stdin. For large blobs, consider input_data_ref."
+                        },
+                        "input_data_ref": {
+                            "type": "object",
+                            "description": "Reference a previous tool call's output (by tool_call_id) to stream into stdin without copying the content into the prompt.",
+                            "properties": {
+                                "tool_call_id": {
+                                    "type": "string",
+                                    "description": "ID of the prior tool call whose output should be piped to stdin (as shown in the tool response history)."
+                                },
+                                "channel": {
+                                    "type": "string",
+                                    "enum": ["stdout", "stderr", "result", "raw_stdout", "raw_stderr"],
+                                    "description": "Which output channel to use from the referenced tool call (default: stdout)."
+                                }
+                            },
+                            "required": ["tool_call_id"]
                         }
                     },
                     "required": ["command"]
@@ -2286,7 +2302,7 @@ class RunCommandTool(BaseTool):
         else:
             return self.working_dir
 
-    def execute(self, command: str, input_data: str = None) -> Dict[str, Any]:
+    def execute(self, command: str, input_data: str = None, input_data_ref: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Execute shell command with safety guards.
         
@@ -2294,6 +2310,8 @@ class RunCommandTool(BaseTool):
         1. Interactive command detection → redirect to run_interactive
         2. Smart bypass for safe flags (--version, --help, -c for interpreters)
         """
+        # input_data_ref is resolved upstream (orchestrator) so we only accept it to keep the
+        # function signature aligned with the published JSON schema.
         if not command or not command.strip():
             return {
                 "stdout": "",

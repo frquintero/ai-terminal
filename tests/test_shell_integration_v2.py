@@ -58,3 +58,10 @@ class TestShellIntegrationV2:
         assert "world" in result["stdout"]
         assert "hello" not in result["stdout"]
         assert result["exit_code"] == 0
+
+    def test_heredoc_without_trailing_newline(self, shell):
+        cmd = "python3 - <<'PY'\nprint('heredoc ok')\nPY"
+        result = shell.run_command(cmd)
+
+        assert result["exit_code"] == 0
+        assert "heredoc ok" in result["stdout"]
