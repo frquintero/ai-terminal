@@ -670,6 +670,75 @@ class ReadFileTool(BaseTool):
                 "raw_stderr": error_msg
             }
 
+class PipeFromTool(BaseTool):
+    """
+    Prepare stdin data from a file without echoing the contents back to the agent.
+    Use when you only need to pipe a file into another command via input_data_ref.
+    """
+
+    MAX_BYTES = ReadFileTool.MAX_BYTES
+
+    @property
+    def name(self) -> str:
+        return "pipe_from"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Load file contents into a hidden stdin buffer for later piping via input_data_ref. "
+            "Use when you do not need to print the file contents in the chat."
+        )
+
+    @property
+    def schema(self) -> Dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": "pipe_from",
+                "description": "Prepare stdin content from a file without displaying it. Reference the resulting tool_call_id with input_data_ref when running commands.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "Path relative to the working directory (same resolution rules as read_file)."
+                        }
+                    },
+                    "required": ["file_path"]
+                }
+            }
+        }
+
+    def execute(self, file_path: str) -> Dict[str, Any]:
+        reader = ReadFileTool()
+        result = reader.execute(file_path)
+        if not result.get("success", True):
+            return result
+        content = result.get("stdout") or result.get("content") or ""
+        if len(content) > self.MAX_BYTES:
+            return {
+                "success": False,
+                "error": f"File exceeds MAX_BYTES ({self.MAX_BYTES}). Use filtered commands instead.",
+                "stdout": "",
+                "stderr": "File too large for pipe_from",
+                "raw_stdout": "",
+                "raw_stderr": "File too large for pipe_from"
+            }
+        summary = (
+            f"Prepared stdin buffer from {file_path} ({len(content)} bytes). "
+            "Reference this tool_call_id via input_data_ref when executing a command."
+        )
+        return {
+            "success": True,
+            "stdout": content,
+            "raw_stdout": content,
+            "stderr": "",
+            "raw_stderr": "",
+            "agent_message": summary,
+            "path": result.get("path"),
+            "size": result.get("size")
+        }
+
 
 class WriteFileTool(BaseTool):
     """
@@ -2233,7 +2302,11 @@ class RunCommandTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Execute a non-interactive shell command. Do not use for: interactive programs (vim, nano, top), or package managers without --noconfirm flag."
+        return (
+            "Execute a non-interactive shell command. Prefer piping prior tool output via input_data_ref "
+            "instead of pasting large blobs. Do not use for interactive programs (vim, nano, top) or package "
+            "managers without --noconfirm."
+        )
 
     @property
     def schema(self) -> Dict[str, Any]:
@@ -2241,7 +2314,11 @@ class RunCommandTool(BaseTool):
             "type": "function",
             "function": {
                 "name": "run_command",
-                "description": "Execute a non-interactive shell command. Package managers (yay/pacman) must include --noconfirm flag. Will timeout if used with interactive programs.",
+                "description": (
+                    "Execute a non-interactive shell command. Package managers (yay/pacman) must include --noconfirm flag. "
+                    "Will timeout if used with interactive programs. To pipe previous tool output into stdin, supply input_data_ref "
+                    "with that call's tool_call_id instead of copying the data."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {

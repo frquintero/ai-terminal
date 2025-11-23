@@ -31,7 +31,7 @@ class TestOrchestratorPrompts(unittest.TestCase):
         prompt = get_agent_a_system_prompt(["run_command", "read_file"])
         self.assertIn("Agent A", prompt)
         self.assertIn("Strategic Intent", prompt)
-        self.assertIn("Agent B toolbelt", prompt)
+        self.assertIn("Data Flow Guidance", prompt)
         self.assertIn("run_command", prompt)
 
 
@@ -383,6 +383,208 @@ class TestOrchestratorIntegration(unittest.TestCase):
         self.assertEqual(executed_args[1][0], "run_command")
         self.assertEqual(executed_args[1][1]["input_data"], file_body)
         self.assertTrue(summary["success"])
+
+    @patch("orchestrator.orchestrator.LLMClient")
+    def test_run_command_warns_when_stdin_missing_after_read_file(self, mock_llm_client):
+        """Agent B receives telemetry when it forgets to pipe read_file output into stdin."""
+        cycle_id = self.memory.create_cycle(
+            session_id=self.orchestrator.session_id,
+            query="process log"
+        )
+
+        read_call = SimpleNamespace(
+            id="call-read",
+            function=SimpleNamespace(
+                name="read_file",
+                arguments=json.dumps({"file_path": "log.txt"})
+            )
+        )
+        run_call = SimpleNamespace(
+            id="call-run",
+            function=SimpleNamespace(
+                name="run_command",
+                arguments=json.dumps({"command": "python3 process.py"})
+            )
+        )
+
+        mock_llm_client.return_value.call.side_effect = [
+            {"error": None, "message": SimpleNamespace(content=None, tool_calls=[read_call])},
+            {"error": None, "message": SimpleNamespace(content=None, tool_calls=[run_call])},
+            {"error": None, "message": SimpleNamespace(content="```json\n{\"segments\": []}\n```", tool_calls=[])},
+            {"error": None, "message": SimpleNamespace(content={"segments": [], "template_values": {}})}
+        ]
+
+        file_body = "line 1\nline 2\n"
+
+        def fake_execute(tool_name, tool_args, **kwargs):
+            if tool_name == "read_file":
+                return {
+                    "success": True,
+                    "stdout": file_body,
+                    "stderr": "",
+                    "raw_stdout": file_body,
+                    "raw_stderr": "",
+                    "exit_code": 0,
+                    "output_preview": file_body,
+                    "result": file_body,
+                    "agent_message": None
+                }
+            if tool_name == "run_command":
+                self.assertNotIn("input_data", tool_args)
+                return {
+                    "success": False,
+                    "stdout": "",
+                    "stderr": "Traceback (most recent call last): EOF when reading line",
+                    "raw_stdout": "",
+                    "raw_stderr": "Traceback (most recent call last): EOF when reading line",
+                    "exit_code": 1,
+                    "output_preview": "",
+                    "error": "exit 1",
+                    "result": ""
+                }
+            raise AssertionError(f"Unexpected tool {tool_name}")
+
+        with patch.object(self.orchestrator, "_emit_tool_output") as mock_emit, \
+             patch.object(self.orchestrator.tool_executor, "execute", side_effect=fake_execute):
+            summary = self.orchestrator._run_agent_b_tool_loop(
+                cycle_id=cycle_id,
+                query="process log",
+                plan={"intent": "process log", "success_criteria": []}
+            )
+
+        warning_payloads = [
+            call.args[0] for call in mock_emit.call_args_list
+            if call.args[0]["tool_name"] == "run_command"
+        ]
+        self.assertTrue(warning_payloads, "run_command payload missing")
+        self.assertIn("input_data_ref", warning_payloads[0]["warnings"][0])
+
+    @patch("orchestrator.orchestrator.LLMClient")
+    def test_pipe_from_streams_file_into_run_command(self, mock_llm_client):
+        """pipe_from prepares stdin without echoing content to the agent."""
+        cycle_id = self.memory.create_cycle(
+            session_id=self.orchestrator.session_id,
+            query="count file lines"
+        )
+
+        pipe_call = SimpleNamespace(
+            id="call-pipe",
+            function=SimpleNamespace(
+                name="pipe_from",
+                arguments=json.dumps({"file_path": "data.txt"})
+            )
+        )
+        run_call = SimpleNamespace(
+            id="call-run",
+            function=SimpleNamespace(
+                name="run_command",
+                arguments=json.dumps({
+                    "command": "wc -l",
+                    "input_data_ref": {"tool_call_id": "call-pipe"}
+                })
+            )
+        )
+
+        mock_llm_client.return_value.call.side_effect = [
+            {"error": None, "message": SimpleNamespace(content=None, tool_calls=[pipe_call])},
+            {"error": None, "message": SimpleNamespace(content=None, tool_calls=[run_call])},
+            {"error": None, "message": SimpleNamespace(content="done", tool_calls=[])},
+            {"error": None, "message": SimpleNamespace(content={
+                "segments": [{"kind": "text", "text": "done"}],
+                "template_values": {}
+            })}
+        ]
+
+        file_body = "alpha\nbeta\n"
+        executed = []
+
+        def fake_execute(tool_name, tool_args, **kwargs):
+            executed.append((tool_name, dict(tool_args)))
+            if tool_name == "pipe_from":
+                return {
+                    "success": True,
+                    "stdout": file_body,
+                    "stderr": "",
+                    "raw_stdout": file_body,
+                    "raw_stderr": "",
+                    "exit_code": 0,
+                    "output_preview": "",
+                    "agent_message": "stdin ready"
+                }
+            if tool_name == "run_command":
+                self.assertEqual(tool_args.get("input_data"), file_body)
+                return {
+                    "success": True,
+                    "stdout": "2 data.txt",
+                    "stderr": "",
+                    "raw_stdout": "2 data.txt",
+                    "raw_stderr": "",
+                    "exit_code": 0,
+                    "output_preview": "2 data.txt",
+                    "agent_message": None
+                }
+            raise AssertionError(f"Unexpected tool {tool_name}")
+
+        with patch.object(self.orchestrator.tool_executor, "execute", side_effect=fake_execute):
+            summary = self.orchestrator._run_agent_b_tool_loop(
+                cycle_id=cycle_id,
+                query="count file lines",
+                plan={"intent": "count file lines", "success_criteria": []}
+            )
+
+        self.assertEqual(executed[0][0], "pipe_from")
+        self.assertEqual(executed[1][0], "run_command")
+        self.assertTrue(summary["success"])
+
+    @patch("orchestrator.orchestrator.LLMClient")
+    def test_tool_snapshot_metadata_persisted_with_step_output(self, mock_llm_client):
+        """tool_outputs_by_call_id metadata (hashes/lengths) is persisted for debugging."""
+        cycle_id = self.memory.create_cycle(
+            session_id=self.orchestrator.session_id,
+            query="show env"
+        )
+        run_call = SimpleNamespace(
+            id="call-run",
+            function=SimpleNamespace(
+                name="run_command",
+                arguments=json.dumps({"command": "printf 'ok'"})
+            )
+        )
+        mock_llm_client.return_value.call.side_effect = [
+            {"error": None, "message": SimpleNamespace(content=None, tool_calls=[run_call])},
+            {"error": None, "message": SimpleNamespace(content="done", tool_calls=[])},
+            {"error": None, "message": SimpleNamespace(content={
+                "segments": [{"kind": "text", "text": "done"}],
+                "template_values": {}
+            })}
+        ]
+
+        def fake_execute(tool_name, tool_args, **kwargs):
+            return {
+                "success": True,
+                "stdout": "ok",
+                "stderr": "",
+                "raw_stdout": "ok",
+                "raw_stderr": "",
+                "exit_code": 0,
+                "output_preview": "ok",
+                "agent_message": None
+            }
+
+        with patch.object(self.orchestrator.tool_executor, "execute", side_effect=fake_execute):
+            summary = self.orchestrator._run_agent_b_tool_loop(
+                cycle_id=cycle_id,
+                query="show env",
+                plan={"intent": "show env", "success_criteria": []}
+            )
+
+        self.assertTrue(summary["success"])
+        step_outputs = self.memory.get_step_outputs(cycle_id)
+        self.assertTrue(step_outputs, "expected step outputs recorded")
+        snapshot_meta = step_outputs[0]["parsed_outputs"]["snapshot_meta"]
+        self.assertIn("stdout", snapshot_meta)
+        self.assertIn("sha256", snapshot_meta["stdout"])
+        self.assertEqual(snapshot_meta["stdout"]["len"], 2)
 
     @patch("orchestrator.orchestrator.LLMClient")
     def test_execution_plan_path_does_not_exit_early(self, mock_llm_client):

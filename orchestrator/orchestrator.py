@@ -6,6 +6,7 @@ Every user query now enters through Agent A, which decides between
 direct responses or structured plans that Agent B executes.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -805,6 +806,7 @@ Describe the failure and tell the user what to do next."""
         ]
 
         tool_outputs_by_call_id: Dict[str, Dict[str, Any]] = {}
+        last_data_source: Optional[Dict[str, Any]] = None
         
         tools = self._get_tool_schemas("B")
         max_loops = 15
@@ -1171,6 +1173,49 @@ Explain the failure to the user, call out the tool/args involved, and suggest ho
                             "error": str(exec_error)
                         }
                     
+                    snapshot_meta = self._build_output_snapshot(exec_result)
+                    parsed_payload_for_memory: Optional[Any] = exec_result.get("events")
+                    stdin_warning: Optional[str] = None
+                    is_run_command = tool_name == "run_command"
+                    provided_input_ref = args.get("input_data_ref")
+                    provided_literal_input = args.get("input_data")
+                    if is_run_command:
+                        if provided_input_ref and last_data_source:
+                            ref_id = None
+                            if isinstance(provided_input_ref, dict):
+                                ref_id = provided_input_ref.get("tool_call_id")
+                            if ref_id and ref_id == last_data_source.get("tool_call_id"):
+                                last_data_source = None
+                        needs_warning = (
+                            last_data_source is not None
+                            and not provided_literal_input
+                            and not provided_input_ref
+                            and resolved_input_data is None
+                            and exec_result.get("exit_code") not in (None, 0)
+                            and (step_id - last_data_source.get("step_id", step_id)) <= 2
+                        )
+                        if needs_warning:
+                            source_path = last_data_source.get("file_path") or "previous output"
+                            source_tool = last_data_source.get("tool_name", "read_file")
+                            source_id = last_data_source.get("tool_call_id")
+                            exit_code = exec_result.get("exit_code")
+                            stdin_warning = (
+                                f"{tool_name} exited {exit_code} with empty stdin even though "
+                                f"{source_tool} ({source_path}) just produced data (tool_call_id '{source_id}'). "
+                                "Re-run with input_data_ref pointing at that call to pipe the content."
+                            )
+                            last_data_source = None
+                        elif not provided_input_ref and resolved_input_data is None:
+                            # Do not let stale read_file references linger forever once a command runs.
+                            last_data_source = None
+                    if stdin_warning:
+                        prior_agent_msg = exec_result.get("agent_message")
+                        if prior_agent_msg:
+                            exec_result["agent_message"] = f"{stdin_warning}\n\n{prior_agent_msg}"
+                        else:
+                            exec_result["agent_message"] = stdin_warning
+                        exec_result.setdefault("warnings", []).append(stdin_warning)
+                    
                     if exec_result.get("stdout"):
                         last_stdout = exec_result.get("stdout")
                     if exec_result.get("raw_stdout"):
@@ -1236,6 +1281,7 @@ Explain the failure to the user, call out the tool/args involved, and suggest ho
                             )
                         except OutputParserError:
                             parsed_outputs, rendered_outputs = {}, {}
+                        parsed_payload_for_memory = parsed_outputs
     
                         for key, fmt in output_format.items():
                             rendered_value = rendered_outputs.get(key)
@@ -1267,7 +1313,19 @@ Explain the failure to the user, call out the tool/args involved, and suggest ho
                                     "raw_stdout": exec_result.get("raw_stdout")
                                 }
                             output_value_types[key] = fmt
-    
+                    if snapshot_meta:
+                        if parsed_payload_for_memory is None:
+                            parsed_payload_for_memory = {"snapshot_meta": snapshot_meta}
+                        elif isinstance(parsed_payload_for_memory, dict):
+                            payload_copy = dict(parsed_payload_for_memory)
+                            payload_copy["snapshot_meta"] = snapshot_meta
+                            parsed_payload_for_memory = payload_copy
+                        else:
+                            parsed_payload_for_memory = {
+                                "events": parsed_payload_for_memory,
+                                "snapshot_meta": snapshot_meta
+                            }
+
                     # Emit tool output event
                     self._emit_tool_output({
                        "route": "PLANNER",
@@ -1277,7 +1335,8 @@ Explain the failure to the user, call out the tool/args involved, and suggest ho
                        "stdout": exec_result.get("stdout"),
                        "stderr": exec_result.get("stderr"),
                        "success": success,
-                       "events": exec_result.get("events")
+                       "events": exec_result.get("events"),
+                       "warnings": exec_result.get("warnings")
                     })
 
                     if tool_call_id:
@@ -1287,7 +1346,8 @@ Explain the failure to the user, call out the tool/args involved, and suggest ho
                             "stderr": exec_result.get("stderr"),
                             "raw_stdout": exec_result.get("raw_stdout"),
                             "raw_stderr": exec_result.get("raw_stderr"),
-                            "result": exec_result.get("result")
+                            "result": exec_result.get("result"),
+                            "snapshot": snapshot_meta
                         }
                     
                     # Save step output
@@ -1304,9 +1364,21 @@ Explain the failure to the user, call out the tool/args involved, and suggest ho
                        raw_stdout=exec_result.get("raw_stdout"),
                        raw_stderr=exec_result.get("raw_stderr"),
                        output_format=output_format or None,
-                       parsed_outputs=parsed_outputs if success and output_format else exec_result.get("events"),
+                       parsed_outputs=parsed_payload_for_memory,
                        artifact_path=exec_result.get("artifact_path")
                     )
+
+                    if (
+                        success
+                        and tool_call_id
+                        and tool_name in {"read_file", "pipe_from"}
+                    ):
+                        last_data_source = {
+                            "tool_call_id": tool_call_id,
+                            "file_path": args.get("file_path"),
+                            "step_id": step_id,
+                            "tool_name": tool_name
+                        }
                     
                     # Append tool result to messages for next turn
                     tool_content = (
@@ -1871,6 +1943,36 @@ Explain the failure to the user, call out the tool/args involved, and suggest ho
         return (
             f"Tool {tool_name} completed with no output, which I interpret as zero results{intent_clause}."
         )
+
+    def _build_output_snapshot(self, exec_result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Build lightweight hashes/lengths for each channel so tool snapshots survive log truncation.
+        """
+        snapshot: Dict[str, Any] = {}
+        channels = ("stdout", "stderr", "raw_stdout", "raw_stderr", "result")
+        for channel in channels:
+            data = exec_result.get(channel)
+            if data in (None, "", b""):
+                continue
+            if isinstance(data, (dict, list)):
+                try:
+                    serialized = json.dumps(data, sort_keys=True)
+                except Exception:
+                    serialized = str(data)
+            else:
+                serialized = str(data)
+            digest = hashlib.sha256(serialized.encode("utf-8", errors="ignore")).hexdigest()
+            snapshot[channel] = {
+                "len": len(serialized),
+                "sha256": digest
+            }
+        artifact_path = exec_result.get("artifact_path")
+        if artifact_path:
+            snapshot["artifact_path"] = artifact_path
+        exit_code = exec_result.get("exit_code")
+        if exit_code is not None:
+            snapshot["exit_code"] = exit_code
+        return snapshot or None
 
     def _resolve_input_data_ref(
         self,
