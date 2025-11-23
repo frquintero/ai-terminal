@@ -733,6 +733,10 @@ class WriteFileTool(BaseTool):
             if dirpath:
                 os.makedirs(dirpath, exist_ok=True)
             
+            # Ensure content ends with newline
+            if content and not content.endswith('\n'):
+                content += '\n'
+            
             with open(isolated_path, 'w', encoding='utf-8') as f:
                 f.write(content)
             
@@ -751,6 +755,106 @@ class WriteFileTool(BaseTool):
             }
         except Exception as e:
             error_msg = f"Error writing file: {str(e)}"
+            return {
+                "success": False,
+                "error": error_msg,
+                "path": isolated_path,
+                "stderr": error_msg,
+                "raw_stderr": error_msg
+            }
+
+
+class AppendFileTool(BaseTool):
+    """
+    Append content to a file in the isolated working directory.
+    Automatically ensures a newline exists before appending if the file is not empty.
+    """
+    
+    @property
+    def name(self) -> str:
+        return "append_file"
+
+    @property
+    def description(self) -> str:
+        return f"Append content to a file in the isolated working directory ({WORKING_DIR_PREFIX}), ensuring newline separation."
+
+    @property
+    def schema(self) -> Dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": "append_file",
+                "description": "Append content to a file. Automatically prepends a newline if the existing file doesn't end with one.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": f"Path relative to working directory (WITHOUT '{WORKING_DIR_PREFIX}/' prefix)."
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The content to append"
+                        }
+                    },
+                    "required": ["file_path", "content"]
+                }
+            }
+        }
+
+    def execute(self, file_path: str, content: str) -> Dict[str, Any]:
+        working_dir = _get_working_dir_path()
+        isolated_path = os.path.join(working_dir, file_path)
+        
+        try:
+            # Ensure parent dirs exist
+            dirpath = os.path.dirname(isolated_path)
+            if dirpath:
+                os.makedirs(dirpath, exist_ok=True)
+            
+            # Check if file exists and needs a newline
+            needs_newline = False
+            if os.path.exists(isolated_path):
+                try:
+                    with open(isolated_path, 'rb') as f:
+                        f.seek(0, os.SEEK_END)
+                        if f.tell() > 0:
+                            f.seek(-1, os.SEEK_CUR)
+                            last_char = f.read(1)
+                            if last_char != b'\n':
+                                needs_newline = True
+                except Exception:
+                    pass # If read fails, assume we just append
+            
+            final_content = content
+            if needs_newline:
+                final_content = "\n" + content
+            
+            # Ensure appended content ends with newline
+            if final_content and not final_content.endswith('\n'):
+                final_content += '\n'
+            
+            with open(isolated_path, 'a', encoding='utf-8') as f:
+                f.write(final_content)
+            
+            # Track event
+            _RECENT_WRITES.append(file_path)
+            _record_file_event("append", file_path, "append_file", absolute_path=isolated_path)
+            
+            msg = f"File appended successfully: {isolated_path}"
+            if needs_newline:
+                msg += " (added missing newline)"
+                
+            return {
+                "success": True,
+                "path": isolated_path,
+                "size": len(final_content),
+                "message": msg,
+                "stdout": msg,
+                "raw_stdout": msg
+            }
+        except Exception as e:
+            error_msg = f"Error appending file: {str(e)}"
             return {
                 "success": False,
                 "error": error_msg,

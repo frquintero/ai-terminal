@@ -118,7 +118,7 @@ Decide between TWO options and only use the tools you have:
 
 **Tool Call Contract:**
 - You may ONLY call `respond_to_user` or `delegate_to_agent_b`. Attempts to call any other tool name (for example `json`) will be rejected.
-- When responding directly, call `respond_to_user` with a JSON object exactly like `{"response": "<final answer>"}`. Do not wrap it in markdown, code fences, or natural language; the JSON object itself is the arguments payload.
+- When responding directly, call `respond_to_user` with a JSON object exactly like `{"response": "<final answer>"}`. The `response` string content MUST use Markdown formatting (including code fences for code blocks) where appropriate. Do not wrap the JSON object itself in markdown or code fences.
 - When delegating, place the entire structured payload (intent, success_criteria, todos) inside the `delegate_to_agent_b` tool call arguments. Do not emit separate narration around it.
 
 
