@@ -137,15 +137,15 @@ The system uses two distinct agent personas, which can be powered by the same or
     *   **Role**: Product Manager / User Liaison.
     *   **Input**: User query, Chat History, System Context (OS, CWD, Time).
     *   **Tools**:
-        *   `delegate_to_agent_b(intent, success_criteria)`: Used for tasks requiring system access.
+        *   `delegate_to_agent_b(intent, success_criteria, todos)`: Used for tasks requiring system access, with a structured TODO list (including descriptions, success criteria, and optional subtasks) to enforce execution boundaries and prevent scope creep.
         *   `respond_to_user(response)`: Used for direct conversational answers.
     *   **Configuration**: Uses a higher temperature for more natural conversation.
 
 *   **Agent B (Execution)**
     *   **Role**: Senior DevOps Engineer.
-    *   **Input**: Agent A's "Intent", "Success Criteria", and available system tools.
+    *   **Input**: Agent A's "Intent", "Success Criteria", and structured TODO list.
     *   **Tools**: Native system tools (`run_command`, `read_file`, `write_file`, etc.).
-    *   **Execution**: Operates in a loop (Think -> Tool Call -> Observation -> Think) until the intent is satisfied.
+    *   **Execution**: Operates in a loop (Think -> Tool Call -> Observation -> Think) until the intent is satisfied, adhering strictly to the TODO list for plan fidelity and resource efficiency.
     *   **Configuration**: Uses a low temperature (near 0) for precise, deterministic code generation.
 
 ### 3. Tool Executor (`tool_executor.py`)
@@ -194,14 +194,14 @@ Handles the rendering of the terminal interface.
     *   The Orchestrator calls Agent A with the query and history.
     *   **Decision Point (Native Tool Call)**:
         *   *Scenario 1 (Chat)*: Agent A calls `respond_to_user`. The cycle ends, and the text is shown.
-        *   *Scenario 2 (Action)*: Agent A calls `delegate_to_agent_b` with an `intent` and `success_criteria`.
+        *   *Scenario 2 (Action)*: Agent A calls `delegate_to_agent_b` with an `intent`, `success_criteria`, and structured `todos` list for precise execution planning.
 4.  **Agent B (Execution Loop)**:
     *   If delegated, the Orchestrator starts the Agent B loop.
     *   **Loop**:
-        *   Agent B analyzes the intent and calls a tool (e.g., `run_command`).
+        *   Agent B analyzes the intent, validates against the current TODO item, and calls a tool (e.g., `run_command`).
         *   `ToolExecutor` runs the tool and returns the output.
-        *   Agent B observes the output and decides the next step.
-    *   **Completion**: Agent B provides a final response summarizing the actions.
+        *   Agent B observes the output, updates TODO progress, and decides the next step.
+    *   **Completion**: Agent B provides a final response summarizing the actions, ensuring all TODO items are satisfied.
 5.  **Final Response**:
     *   The final response is displayed to the user with full Markdown formatting.
 6.  **Persistence**: All steps, tool outputs, and metrics are saved to the database.
@@ -211,7 +211,7 @@ Handles the rendering of the terminal interface.
 *   `main.py`: Entry point. Initializes the environment, config, and REPL loop.
 *   `config.py`: Handles environment variables, model selection, and agent-specific settings.
 *   `orchestrator/orchestrator.py`: Core logic for the dual-agent flow and loop management.
-*   `orchestrator/prompts.py`: System prompts and tool definitions for Agent A and Agent B.
+*   `orchestrator/prompts.py`: System prompts and tool definitions for Agent A and Agent B, including Tool Call Contract for strict tool usage enforcement and TODO Enforcement Rules for plan adherence.
 *   `memory/schema.py`: Database schema definitions.
 *   `tools.py`: Definitions of available tools (e.g., `run_command`, `read_file`).
 *   `ui_formatter.py`: UI rendering logic using `rich`.
