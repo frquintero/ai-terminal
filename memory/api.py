@@ -7,6 +7,7 @@ All operations are transactional and thread-safe.
 
 import json
 import logging
+import re
 import sqlite3
 import threading
 import uuid
@@ -1474,3 +1475,24 @@ class Memory:
             })
         
         return results
+    def _sanitize_fts5_query(self, query: Optional[str]) -> str:
+        """
+        Normalize user-provided search strings for SQLite FTS5.
+        
+        - Blank queries become '*' (match all) to avoid syntax errors
+        - Double quotes are escaped
+        - Multi-word queries without operators are wrapped in quotes to preserve intent
+        """
+        if query is None:
+            return "*"
+        text = str(query).strip()
+        if not text:
+            return "*"
+        escaped = text.replace('"', '""')
+        has_operator = bool(re.search(r"\b(AND|OR|NOT|NEAR/?\d*)\b", text, re.IGNORECASE))
+        has_wildcard = "*" in text
+        if has_operator or has_wildcard or '"' in text:
+            return escaped
+        if " " in escaped:
+            return f"\"{escaped}\""
+        return escaped

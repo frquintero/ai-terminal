@@ -12,7 +12,6 @@ import unittest
 import uuid
 from pathlib import Path
 from unittest.mock import Mock, patch
-
 from types import SimpleNamespace
 
 
@@ -22,6 +21,7 @@ from orchestrator.orchestrator import Orchestrator, OrchestratorResult, Orchestr
 from orchestrator.plan_validator import PlanValidator
 from orchestrator.prompts import get_agent_a_system_prompt
 from orchestrator.routes import Route
+from tools import GetContextTool, _SESSION_STATE
 
 
 class TestOrchestratorPrompts(unittest.TestCase):
@@ -461,6 +461,104 @@ class TestOrchestratorIntegration(unittest.TestCase):
         self.assertIn("input_data_ref", warning_payloads[0]["warnings"][0])
 
     @patch("orchestrator.orchestrator.LLMClient")
+    def test_run_command_strips_null_input_data(self, mock_llm_client):
+        """Optional stdin parameters are omitted instead of sending null."""
+        cycle_id = self.memory.create_cycle(
+            session_id=self.orchestrator.session_id,
+            query="list workspace"
+        )
+
+        run_call = SimpleNamespace(
+            id="call-run",
+            function=SimpleNamespace(
+                name="run_command",
+                arguments=json.dumps({"command": "ls", "input_data": None})
+            )
+        )
+
+        mock_llm_client.return_value.call.side_effect = [
+            {"error": None, "message": SimpleNamespace(content=None, tool_calls=[run_call])},
+            {"error": None, "message": SimpleNamespace(content="done", tool_calls=[])},
+            {"error": None, "message": SimpleNamespace(content={
+                "segments": [{"kind": "text", "text": "done"}],
+                "template_values": {}
+            })}
+        ]
+
+        captured_args = []
+
+        def fake_execute(tool_name, tool_args, **kwargs):
+            captured_args.append((tool_name, dict(tool_args)))
+            return {
+                "success": True,
+                "stdout": "README.md\nsrc\n",
+                "stderr": "",
+                "raw_stdout": "README.md\nsrc\n",
+                "raw_stderr": "",
+                "exit_code": 0,
+                "output_preview": "README.md\nsrc\n",
+                "error": None,
+                "result": "README.md\nsrc\n",
+                "agent_message": None
+            }
+
+        with patch.object(self.orchestrator.tool_executor, "execute", side_effect=fake_execute):
+            summary = self.orchestrator._run_agent_b_tool_loop(
+                cycle_id=cycle_id,
+                query="list workspace",
+                plan={"intent": "list workspace", "success_criteria": []}
+            )
+
+        self.assertTrue(summary["success"])
+        self.assertEqual(len(captured_args), 1)
+        self.assertEqual(captured_args[0][0], "run_command")
+        self.assertNotIn("input_data", captured_args[0][1])
+
+    @patch("orchestrator.orchestrator.LLMClient")
+    def test_schema_validation_error_aborts_cycle(self, mock_llm_client):
+        """Schema validation failures immediately abort execution."""
+        cycle_id = self.memory.create_cycle(
+            session_id=self.orchestrator.session_id,
+            query="ls"
+        )
+
+        run_call = SimpleNamespace(
+            id="call-run",
+            function=SimpleNamespace(
+                name="run_command",
+                arguments=json.dumps({"command": "ls"})
+            )
+        )
+
+        mock_llm_client.return_value.call.side_effect = [
+            {"error": None, "message": SimpleNamespace(content=None, tool_calls=[run_call])}
+        ]
+
+        def fake_execute(tool_name, tool_args, **kwargs):
+            self.assertEqual(tool_name, "run_command")
+            return {
+                "success": False,
+                "stdout": None,
+                "stderr": "Tool call validation failed: /input_data expected string",
+                "raw_stdout": None,
+                "raw_stderr": None,
+                "exit_code": None,
+                "output_preview": "Tool call validation failed: /input_data expected string",
+                "error": "Tool call validation failed: /input_data expected string",
+                "result": ""
+            }
+
+        with patch.object(self.orchestrator.tool_executor, "execute", side_effect=fake_execute):
+            with self.assertRaises(OrchestratorProcessError) as ctx:
+                self.orchestrator._run_agent_b_tool_loop(
+                    cycle_id=cycle_id,
+                    query="ls",
+                    plan={"intent": "ls", "success_criteria": []}
+                )
+
+        self.assertIn("Tool call validation failed", str(ctx.exception))
+
+    @patch("orchestrator.orchestrator.LLMClient")
     def test_pipe_from_streams_file_into_run_command(self, mock_llm_client):
         """pipe_from prepares stdin without echoing content to the agent."""
         cycle_id = self.memory.create_cycle(
@@ -536,6 +634,85 @@ class TestOrchestratorIntegration(unittest.TestCase):
         self.assertEqual(executed[0][0], "pipe_from")
         self.assertEqual(executed[1][0], "run_command")
         self.assertTrue(summary["success"])
+
+    @patch("orchestrator.orchestrator.LLMClient")
+    def test_tool_history_captures_tool_call_ids(self, mock_llm_client):
+        """Agent context exposes recent tool_call_ids for input_data_ref reuse."""
+        _SESSION_STATE.reset("history-session")
+        cycle_id = self.memory.create_cycle(
+            session_id=self.orchestrator.session_id,
+            query="split file"
+        )
+
+        pipe_call = SimpleNamespace(
+            id="call-pipe",
+            function=SimpleNamespace(
+                name="pipe_from",
+                arguments=json.dumps({"file_path": "data.txt"})
+            )
+        )
+        run_call = SimpleNamespace(
+            id="call-run",
+            function=SimpleNamespace(
+                name="run_command",
+                arguments=json.dumps({
+                    "command": "python3 -c \"print(input())\"",
+                    "input_data_ref": {"tool_call_id": "call-pipe"}
+                })
+            )
+        )
+
+        mock_llm_client.return_value.call.side_effect = [
+            {"error": None, "message": SimpleNamespace(content=None, tool_calls=[pipe_call])},
+            {"error": None, "message": SimpleNamespace(content=None, tool_calls=[run_call])},
+            {"error": None, "message": SimpleNamespace(content="done", tool_calls=[])},
+            {"error": None, "message": SimpleNamespace(content={
+                "segments": [{"kind": "text", "text": "done"}],
+                "template_values": {}
+            })}
+        ]
+
+        stdin_payload = "alpha\nbeta\n"
+
+        def fake_execute(tool_name, tool_args, **_):
+            if tool_name == "pipe_from":
+                return {
+                    "success": True,
+                    "stdout": stdin_payload,
+                    "stderr": "",
+                    "raw_stdout": stdin_payload,
+                    "raw_stderr": "",
+                    "exit_code": 0,
+                    "output_preview": "",
+                    "result": stdin_payload
+                }
+            if tool_name == "run_command":
+                assert tool_args.get("input_data") == stdin_payload
+                return {
+                    "success": True,
+                    "stdout": "processed",
+                    "stderr": "",
+                    "raw_stdout": "processed",
+                    "raw_stderr": "",
+                    "exit_code": 0,
+                    "output_preview": "processed",
+                    "result": "processed"
+                }
+            raise AssertionError(f"Unexpected tool {tool_name}")
+
+        with patch.object(self.orchestrator.tool_executor, "execute", side_effect=fake_execute):
+            self.orchestrator._run_agent_b_tool_loop(
+                cycle_id=cycle_id,
+                query="split file",
+                plan={"intent": "split file", "success_criteria": []}
+            )
+
+        context_result = GetContextTool().execute()
+        context_payload = json.loads(context_result["stdout"])
+        history = context_payload["tool_history"]
+        tool_ids = {entry.get("tool_call_id") for entry in history if entry.get("tool_call_id")}
+        self.assertIn("call-pipe", tool_ids)
+        self.assertIn("call-run", tool_ids)
 
     @patch("orchestrator.orchestrator.LLMClient")
     def test_tool_snapshot_metadata_persisted_with_step_output(self, mock_llm_client):

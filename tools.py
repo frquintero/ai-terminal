@@ -267,7 +267,11 @@ class SessionState:
         args: Dict[str, Any],
         success: bool,
         exit_code: Optional[int] = None,
-        error: Optional[str] = None
+        error: Optional[str] = None,
+        *,
+        tool_call_id: Optional[str] = None,
+        step_id: Optional[int] = None,
+        output_preview: Optional[str] = None
     ):
         """
         Record a tool execution.
@@ -278,6 +282,9 @@ class SessionState:
             success: Whether execution succeeded
             exit_code: Exit code for commands (run_command, run_python_sandbox)
             error: Error message if failed
+            tool_call_id: Optional tool_call_id provided by the LLM (used for input_data_ref)
+            step_id: Optional orchestrator step identifier
+            output_preview: Optional short preview of stdout/stderr/result
         """
         self.total_tool_calls += 1
         
@@ -298,6 +305,18 @@ class SessionState:
         
         if error:
             entry["error"] = error
+        
+        if tool_call_id:
+            entry["tool_call_id"] = tool_call_id
+        
+        if step_id is not None:
+            entry["step_id"] = step_id
+        
+        if output_preview:
+            preview = output_preview
+            if len(preview) > 200:
+                preview = preview[:197] + "..."
+            entry["output_preview"] = preview
         
         self.tool_history.append(entry)
     

@@ -27,7 +27,7 @@
        4. Observation: Tool output (`stdout`/`stderr`) fed back as "tool" role message.
        5. Repeat: Analyzes result vs success_criteria, decides next step.
      - Completion: When satisfied, stops calling tools.
-     - Final Narration: Orchestrator makes one final, tool-free call to Agent B for structured JSON response with final summary & output segments.
+    - Final Narration: Orchestrator makes one final, tool-free call to Agent B for structured JSON response with final summary & output segments. This response must be plain assistant content—legacy “`json` tool” wrappers are invalid and will be rejected/logged.
 
 
 ## Memory System
@@ -140,6 +140,7 @@ The system uses two distinct agent personas, which can be powered by the same or
         *   `delegate_to_agent_b(intent, success_criteria, todos)`: Used for tasks requiring system access, with a structured TODO list (including descriptions, success criteria, and optional subtasks) to enforce execution boundaries and prevent scope creep.
         *   `respond_to_user(response)`: Used for direct conversational answers.
     *   **Configuration**: Uses a higher temperature for more natural conversation.
+    *   **SQLite3 Guidance**: Explicitly directs TODOs to use proper SQLite3 patterns (`-batch`, inline SQL, piped stdin) to keep commands in the non-interactive path.
 
 *   **Agent B (Execution)**
     *   **Role**: Senior DevOps Engineer.
@@ -147,6 +148,7 @@ The system uses two distinct agent personas, which can be powered by the same or
     *   **Tools**: Native system tools (`run_command`, `read_file`, `write_file`, etc.).
     *   **Execution**: Operates in a loop (Think -> Tool Call -> Observation -> Think) until the intent is satisfied, adhering strictly to the TODO list for plan fidelity and resource efficiency.
     *   **Configuration**: Uses a low temperature (near 0) for precise, deterministic code generation.
+    *   **SQLite3 Guidance**: Always includes `-batch` or inline SQL (or feeds stdin) for SQLite3 commands to ensure they exit immediately; otherwise switches to `run_interactive`.
 
 ### 3. Tool Executor (`tool_executor.py`)
 A dedicated component for safely executing the steps defined by Agent B.
@@ -158,17 +160,19 @@ A dedicated component for safely executing the steps defined by Agent B.
 
 #### PTY-Backed Interactive Sessions
 
-Version 3 adds a PTY-backed execution path for commands that expect live dialogue (`man`, pagers, password prompts, repls). `run_interactive` (see `tools.py`) now launches an `InteractiveSession` powered by `pexpect`, which streams output incrementally, detects prompts with regex patterns, and keeps a `session_id` so the Tool Executor and orchestrator can resume the same conversation. The orchestrator forwards those structured prompt events directly to Agent B, allowing it to decide when to send keystrokes, exit, or continue piping additional commands without involving Agent A. The advanced command parser (`command_parser.py`) implements a full shell lexer and AST parser that understands redirections, pipelines, heredocs, and environment overrides (e.g., `MANPAGER=cat`), ensuring non-interactive variants continue to flow through the standard `run_command` path while blocking potentially dangerous interactive commands. This tighter integration eliminates TTY deadlocks and gives users real-time feedback during complex interactive workflows.
+Version 3 adds a PTY-backed execution path for commands that expect live dialogue (`man`, pagers, password prompts, repls). `run_interactive` (see `tools.py`) now launches an `InteractiveSession` powered by `pexpect`, which streams output incrementally, detects prompts with regex patterns, and keeps a `session_id` so the Tool Executor and orchestrator can resume the same conversation. The orchestrator forwards those structured prompt events directly to Agent B, allowing it to decide when to send keystrokes, exit, or continue piping additional commands without involving Agent A. The advanced command parser (`command_parser.py`) implements a full shell lexer and AST parser that understands redirections, pipelines, heredocs, and environment overrides (e.g., `MANPAGER=cat`), ensuring non-interactive variants continue to flow through the standard `run_command` path while blocking potentially dangerous interactive commands through explicit policy evaluation. Database CLIs (MySQL, PostgreSQL, Redis, Mongo) now support non-interactive execution via execute flags (`-e`, `-c`, `--eval`) or piped input, while SQLite3 has deterministic policies allowing batch execution with `-batch` flags, inline SQL arguments, or bound stdin while blocking interactive sessions.
 
 ### 3.5 Command Parser (`command_parser.py`)
-A robust shell command analysis system that safely determines whether commands are interactive or non-interactive.
+A robust shell command analysis system that safely determines whether commands are interactive or non-interactive using a deterministic, policy-driven approach.
 *   **Features**:
     *   **Shell Lexer**: Tokenizes shell syntax including quoting, operators, line continuations, and heredocs.
     *   **AST Parser**: Builds abstract syntax trees for commands, understanding pipelines, redirections, and control structures.
     *   **Context Analysis**: Extracts command contexts with executable, arguments, environment variables, and I/O binding information.
-    *   **Interactive Detection**: Classifies commands as interactive (REPLs, editors, pagers) or non-interactive based on comprehensive rules.
+    *   **Policy-Driven Interactive Detection**: Uses explicit policies (not heuristics or regex) to classify commands as interactive or non-interactive based on structured rules for each executable type.
+    *   **Special Handlers**: Includes deterministic handlers for complex cases like SQLite3, which allows batch execution with `-batch` flags, inline SQL arguments, or bound stdin while blocking interactive sessions with parameter-consuming options. Agent prompts provide explicit guidance to both planners and executors on proper SQLite3 usage patterns.
     *   **Fail-Safe Design**: Blocks ambiguous or malformed commands to prevent security risks.
-*   **Philosophy**: "Go upstream" - solves parsing at the source rather than adding downstream patches, enabling complex shell scripts while maintaining safety.
+*   **Policy Engine**: Implements `PolicyEngine.evaluate()` that applies explicit allow/block rules for interpreters (Python, Node, Ruby, Perl, PHP, Lua, Shell) and database CLIs (MySQL, PostgreSQL, Redis, Mongo, SQLite3) based on required flags, script extensions, and stdin requirements. SQLite3 has a special deterministic handler that allows execution only when `-batch` is present, stdin is bound, or inline SQL arguments are provided, while blocking interactive sessions with parameter-consuming options.
+*   **Philosophy**: "Go upstream" - solves parsing at the source rather than adding downstream patches, enabling complex shell scripts while maintaining safety through deterministic policies rather than guesswork.
 
 ### 4. Memory System (`memory/api.py`, `memory/schema.py`)
 A unified interface for persistent state, backed by SQLite (`logs/orchestrator.db`).
@@ -218,13 +222,13 @@ Handles the rendering of the terminal interface.
 
 ## Key Files
 
-*   `main.py`: Entry point. Initializes the environment, config, and REPL loop.
+*   `README.md`: User documentation including command policy hints for SQLite3 and database CLIs, with guidance on proper usage patterns to stay in the non-interactive execution path.
 *   `config.py`: Handles environment variables, model selection, and agent-specific settings.
 *   `orchestrator/orchestrator.py`: Core logic for the dual-agent flow and loop management.
-*   `orchestrator/prompts.py`: System prompts and tool definitions for Agent A and Agent B, including Tool Call Contract for strict tool usage enforcement and TODO Enforcement Rules for plan adherence.
+*   **Agent Prompts**: Updated for both Agent A and Agent B roles to provide explicit guidance on SQLite3 usage patterns (batch flags, inline SQL, piped stdin) and reinforce that bare `sqlite3 <db>` should use `run_interactive`.
 *   `memory/schema.py`: Database schema definitions.
 *   `tools.py`: Definitions of available tools (e.g., `run_command`, `read_file`).
-*   `command_parser.py`: Advanced shell command parser with lexer and AST analysis for safe interactive command detection.
+*   `command_parser.py`: Advanced shell command parser with lexer and AST analysis for policy-driven interactive command detection.
 *   `ui_formatter.py`: UI rendering logic using `rich`.
 
 ## Configuration (`.env`)

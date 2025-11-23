@@ -6,7 +6,6 @@ Philosophy: Fail-safe by blocking when ambiguous.
 """
 
 import os
-import re
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Tuple, List, Set, Dict, Optional
@@ -18,7 +17,20 @@ from typing import Tuple, List, Set, Dict, Optional
 
 def is_assignment(token: str) -> bool:
     """Check if token is environment variable assignment (NAME=value or NAME+=value)"""
-    return bool(re.match(r'^[A-Za-z_][A-Za-z0-9_]*\+?=', token))
+    if '=' not in token:
+        return False
+    name, _ = token.split('=', 1)
+    if name.endswith('+'):
+        name = name[:-1]
+    if not name:
+        return False
+    first = name[0]
+    if not (first.isalpha() or first == '_'):
+        return False
+    for char in name[1:]:
+        if not (char.isalnum() or char == '_'):
+            return False
+    return True
 
 
 def basename(token: str) -> str:
@@ -36,15 +48,7 @@ NONINTERACTIVE_PAGERS = {
 
 def _is_noninteractive_pager(pager: str) -> bool:
     normalized = pager.strip().lower()
-    if not normalized:
-        return False
-    if normalized in NONINTERACTIVE_PAGERS:
-        return True
-    if normalized.startswith("cat "):
-        return True
-    if normalized.startswith("/bin/cat"):
-        return True
-    return False
+    return bool(normalized and normalized in NONINTERACTIVE_PAGERS)
 
 
 def _extract_man_pager(args: List[str], env_vars: Dict[str, str]) -> str:
@@ -724,18 +728,14 @@ def analyze_command(command: str) -> CommandAnalysis:
             continue
 
         contexts.append(context)
-        is_interactive, reason_text = is_interactive_command(
-            context.executable,
-            context.args,
-            context.env_vars,
-            stdin_bound=context.stdin_bound
-        )
-        if is_interactive:
-            return CommandAnalysis(True, reason_text, context, contexts)
+        verdict = POLICY_ENGINE.evaluate(context)
+        last_reason = verdict.reason
+        if verdict.blocked:
+            return CommandAnalysis(True, verdict.reason, context, contexts)
 
     if contexts:
         primary = contexts[-1]
-        return CommandAnalysis(False, f"'{primary.executable}' not in interactive set", primary, contexts)
+        return CommandAnalysis(False, last_reason or f"'{primary.executable}' allowed by policy", primary, contexts)
 
     fallback_reason = last_reason or "Assignment-only command (allowed)"
     return CommandAnalysis(False, fallback_reason, None, [])
@@ -758,157 +758,367 @@ def tokenize_command_words(command: str) -> List[str]:
 
 
 # ============================================================================
-# Interactive Command Detection
+# Policy-Driven Interactive Command Detection
 # ============================================================================
-
-# Commands that are always interactive (editors, pagers, monitors)
-ALWAYS_INTERACTIVE = {
-    'vim', 'vi', 'nvim', 'emacs',
-    'nano', 'ed', 'joe',
-    'less', 'more', 'man',
-    'top', 'htop', 'iotop',
-    'tmux', 'screen',
-    'ssh', 'telnet',
-    'mysql', 'psql', 'mongo', 'redis-cli',
-    'irb',  # Ruby REPL (no script mode)
-}
-
-# Shells (check for -c flag)
-SHELLS = {'bash', 'sh', 'zsh', 'fish', 'dash', 'ksh'}
-
-# Python interpreters (check for -c, -m, or script)
-PYTHONS = {'python', 'python2', 'python3', 'ipython', 'pypy', 'pypy3'}
-
-# Node.js interpreters (check for -e, -p, or script)
-NODES = {'node', 'nodejs'}
-
-# Ruby interpreters (check for -e or script)
-RUBIES = {'ruby', 'irb'}
+@dataclass(frozen=True)
+class ExecutablePolicy:
+    allow_flags: Tuple[str, ...] = tuple()
+    allow_flag_prefixes: Tuple[str, ...] = tuple()
+    allow_short_flags: Tuple[str, ...] = tuple()
+    block_flags: Tuple[str, ...] = tuple()
+    block_flag_prefixes: Tuple[str, ...] = tuple()
+    block_short_flags: Tuple[str, ...] = tuple()
+    script_extensions: Tuple[str, ...] = tuple()
+    allow_extensionless_scripts: bool = False
+    allow_any_script_token: bool = False
+    allow_stdin: bool = False
+    allow_dash_stdin: bool = False
+    default_block_reason: str = ""
 
 
-def parse_env_assignments(env_tokens: List[str]) -> Dict[str, str]:
-    """
-    Convert NAME=VALUE tokens into dict.
-    Supports NAME+=VALUE by stripping '+='.
-    """
-    env = {}
-    for token in env_tokens:
-        if '=' not in token:
+@dataclass(frozen=True)
+class PolicyVerdict:
+    blocked: bool
+    reason: str
+
+
+def _first_non_option_arg(args: List[str]) -> Optional[str]:
+    """Return first positional argument after option parsing rules."""
+    idx = 0
+    while idx < len(args):
+        token = args[idx]
+        if token == '--':
+            idx += 1
+            break
+        if token.startswith('-') and token != '-':
+            idx += 1
             continue
-        name, value = token.split('=', 1)
-        name = name.rstrip('+')
-        env[name] = value
-    return env
+        return token
+    if idx < len(args):
+        return args[idx]
+    return None
 
 
-def is_interactive_command(
-    cmd: str,
-    args: List[str],
-    env_vars: Dict[str, str] = None,
-    stdin_bound: bool = False
-) -> Tuple[bool, str]:
+def _token_contains_short_flag(token: str, flag: str) -> bool:
+    return token.startswith('-') and not token.startswith('--') and flag in token[1:]
+
+
+def _matches_extension(token: str, extensions: Tuple[str, ...]) -> bool:
+    if not extensions:
+        return False
+    _, ext = os.path.splitext(token)
+    return ext in extensions
+
+
+def _sqlite_positional_args(args: List[str]) -> List[str]:
     """
-    Determine if command is interactive based on command name and arguments.
-    
-    Returns: (is_interactive, reason)
+    Return sqlite3 positional arguments while accounting for options that consume values.
     """
-    env_vars = env_vars or {}
-    cmd_base = basename(cmd)
-    
-    # Context-aware overrides for commands typically interactive
-    if cmd_base in ALWAYS_INTERACTIVE:
-        if cmd_base == 'man':
-            pager = _extract_man_pager(args, env_vars)
-            if pager and _is_noninteractive_pager(pager):
-                # Allow if pager forced to cat-like program
-                pass
-            else:
-                return True, f"'{cmd_base}' uses a pager by default"
-        else:
-            return True, f"'{cmd_base}' is an editor/pager/monitor"
-    
-    # Shells - interactive unless -c is present
-    if cmd_base in SHELLS:
-        if '-c' in args:
-            return False, f"Shell '{cmd_base}' with -c (non-interactive)"
-        return True, f"Shell '{cmd_base}' without -c"
-    
-    # Python - interactive unless -c/-m, script, or stdin already bound
-    if cmd_base in PYTHONS:
-        # Check for interactive flag
-        if '-i' in args:
-            return True, f"Python with -i flag"
-        
-        # Check for non-interactive modes
-        if '-c' in args or '-m' in args:
-            return False, f"Python with -c/-m (non-interactive)"
-        
-        # Check for script argument
-        for arg in args:
-            if not arg.startswith('-') and arg.endswith('.py'):
-                return False, f"Python with script ({arg})"
-        
-        if stdin_bound:
-            return False, "Python reading from stdin (non-interactive)"
+    positional: List[str] = []
+    idx = 0
+    options_with_counts = {
+        '-cmd': 1, '--cmd': 1,
+        '-init': 1, '--init': 1,
+        '-separator': 1, '--separator': 1,
+        '-newline': 1, '--newline': 1,
+        '-nullvalue': 1, '--nullvalue': 1,
+        '-lookaside': 2, '--lookaside': 2,
+        '-pagecache': 2, '--pagecache': 2,
+        '-maxsize': 1, '--maxsize': 1,
+        '-mmap': 1, '--mmap': 1,
+        '-vfs': 1, '--vfs': 1,
+    }
 
-        # Bare python → likely REPL
-        return True, f"Bare Python (likely REPL)"
-    
-    # Node.js - interactive unless -e/-p, script, or stdin piping present
-    if cmd_base in NODES:
-        # Check for interactive flag
-        if '-i' in args or '--interactive' in args:
-            return True, f"Node with -i/--interactive flag"
-        
-        # Check for non-interactive modes
-        if '-e' in args or '--eval' in args or '-p' in args or '--print' in args:
-            return False, f"Node with -e/-p (non-interactive)"
-        
-        # Check for script argument (common extensions + extensionless)
-        for arg in args:
-            if not arg.startswith('-'):
-                # Accept .js, .mjs, .cjs, .jsx, .ts, .tsx, or extensionless
-                # For extensionless: check basename without leading dot
-                arg_base = basename(arg)
-                arg_name = arg_base.lstrip('.')  # Remove leading dots for hidden files
-                if (arg.endswith(('.js', '.mjs', '.cjs', '.jsx', '.ts', '.tsx')) or 
-                    '.' not in arg_name):
-                    return False, f"Node with script ({arg})"
-        
-        if stdin_bound:
-            return False, "Node reading from stdin (non-interactive)"
+    def _matches_long_with_value(token: str) -> Optional[str]:
+        if not token.startswith('--'):
+            return None
+        if '=' not in token:
+            return None
+        candidate = token.split('=', 1)[0]
+        return candidate if candidate in options_with_counts else None
 
-        # Bare node → likely REPL
-        return True, f"Bare Node (likely REPL)"
-    
-    # Ruby - interactive unless -e, script, or stdin piping present
-    if cmd_base in RUBIES:
-        # irb is always interactive
-        if cmd_base == 'irb':
-            return True, f"irb is always interactive"
-        
-        # Check for non-interactive modes
-        if '-e' in args:
-            return False, f"Ruby with -e (non-interactive)"
-        
-        # Check for script argument (common extensions + extensionless)
-        for arg in args:
-            if not arg.startswith('-'):
-                # Accept .rb or extensionless scripts
-                # For extensionless: check basename without leading dot
-                arg_base = basename(arg)
-                arg_name = arg_base.lstrip('.')  # Remove leading dots for hidden files
-                if arg.endswith('.rb') or '.' not in arg_name:
-                    return False, f"Ruby with script ({arg})"
-        
-        if stdin_bound:
-            return False, "Ruby reading from stdin (non-interactive)"
+    while idx < len(args):
+        token = args[idx]
+        if token == '--':
+            idx += 1
+            positional.extend(args[idx:])
+            break
 
-        # Bare ruby → likely REPL
-        return True, f"Bare Ruby (likely REPL)"
-    
-    # Default: not in interactive set
-    return False, f"'{cmd_base}' not in interactive set"
+        matched_long = _matches_long_with_value(token)
+        if matched_long:
+            idx += 1
+            continue
+
+        if token in options_with_counts:
+            consume = options_with_counts[token]
+            idx += 1 + consume
+            continue
+
+        if token.startswith('-') and token != '-':
+            idx += 1
+            continue
+
+        positional.append(token)
+        idx += 1
+
+    return positional
+
+
+class PolicyEngine:
+    """Deterministic command policy evaluator."""
+
+    def __init__(self) -> None:
+        self._always_block = {
+            'vim', 'vi', 'nvim', 'emacs',
+            'nano', 'ed', 'joe',
+            'less', 'more',
+            'top', 'htop', 'iotop',
+            'tmux', 'screen',
+            'ssh', 'telnet',
+            'irb',
+        }
+        self._man_allowed_pagers = NONINTERACTIVE_PAGERS
+        self._policies: Dict[str, ExecutablePolicy] = {}
+        self._special_handlers = {
+            'man': self._handle_man,
+            'sqlite3': self._handle_sqlite3,
+        }
+        self._install_policies()
+
+    def _set_policy(self, names: Tuple[str, ...], policy: ExecutablePolicy) -> None:
+        for name in names:
+            self._policies[name] = policy
+
+    def _install_policies(self) -> None:
+        python_policy = ExecutablePolicy(
+            allow_flags=('-c', '-m'),
+            allow_short_flags=(),
+            block_flags=('-i',),
+            block_short_flags=('i',),
+            script_extensions=('.py', '.pyw'),
+            allow_extensionless_scripts=True,
+            allow_stdin=True,
+            allow_dash_stdin=True,
+            default_block_reason="Python requires -c/-m/script/stdin for non-interactive execution"
+        )
+        self._set_policy(
+            ('python', 'python2', 'python3', 'ipython', 'pypy', 'pypy3'),
+            python_policy
+        )
+
+        node_policy = ExecutablePolicy(
+            allow_flags=('-e', '--eval', '-p', '--print'),
+            allow_flag_prefixes=('--eval=', '--print='),
+            allow_short_flags=('e', 'p'),
+            block_flags=('--interactive',),
+            block_short_flags=('i',),
+            script_extensions=('.js', '.mjs', '.cjs', '.jsx', '.ts', '.tsx'),
+            allow_extensionless_scripts=True,
+            allow_stdin=True,
+            allow_dash_stdin=True,
+            default_block_reason="Node.js requires -e/-p/script/stdin for non-interactive execution"
+        )
+        self._set_policy(('node', 'nodejs'), node_policy)
+
+        ruby_policy = ExecutablePolicy(
+            allow_flags=('-e',),
+            allow_short_flags=('e',),
+            script_extensions=('.rb',),
+            allow_extensionless_scripts=True,
+            allow_stdin=True,
+            allow_dash_stdin=True,
+            default_block_reason="Ruby requires -e/script/stdin for non-interactive execution"
+        )
+        self._set_policy(('ruby',), ruby_policy)
+
+        shell_policy = ExecutablePolicy(
+            allow_flags=('-c',),
+            script_extensions=('.sh', '.bash', '.zsh', '.ksh'),
+            allow_extensionless_scripts=True,
+            allow_any_script_token=True,
+            allow_stdin=True,
+            allow_dash_stdin=True,
+            default_block_reason="Shell requires -c/script/stdin for non-interactive execution"
+        )
+        self._set_policy(
+            ('bash', 'sh', 'zsh', 'fish', 'dash', 'ksh'),
+            shell_policy
+        )
+
+        perl_policy = ExecutablePolicy(
+            allow_flags=('-e', '-E'),
+            allow_short_flags=('e', 'E'),
+            script_extensions=('.pl', '.pm', '.perl'),
+            allow_extensionless_scripts=True,
+            allow_stdin=True,
+            allow_dash_stdin=True,
+            default_block_reason="Perl requires -e/script/stdin for non-interactive execution"
+        )
+        self._set_policy(('perl', 'perl5'), perl_policy)
+
+        php_policy = ExecutablePolicy(
+            allow_flags=('-r',),
+            allow_short_flags=('r',),
+            script_extensions=('.php', '.phtml', '.phpt'),
+            allow_extensionless_scripts=True,
+            allow_stdin=True,
+            allow_dash_stdin=True,
+            default_block_reason="PHP requires -r/script/stdin for non-interactive execution"
+        )
+        self._set_policy(('php', 'php8', 'php7', 'php-cli'), php_policy)
+
+        lua_policy = ExecutablePolicy(
+            allow_flags=('-e',),
+            allow_short_flags=('e',),
+            script_extensions=('.lua',),
+            allow_extensionless_scripts=True,
+            allow_stdin=True,
+            allow_dash_stdin=True,
+            default_block_reason="Lua requires -e/script/stdin for non-interactive execution"
+        )
+        self._set_policy(('lua', 'lua5.1', 'lua5.2', 'lua5.3', 'lua5.4', 'luajit'), lua_policy)
+
+        mysql_policy = ExecutablePolicy(
+            allow_flags=('-e', '--execute', '--init-command'),
+            allow_flag_prefixes=('--execute=', '--init-command='),
+            allow_stdin=True,
+            allow_dash_stdin=True,
+            default_block_reason="mysql requires -e/--execute or stdin for non-interactive execution"
+        )
+        self._set_policy(('mysql',), mysql_policy)
+
+        psql_policy = ExecutablePolicy(
+            allow_flags=('-c', '--command', '-f', '--file'),
+            allow_flag_prefixes=('--command=', '--file='),
+            allow_short_flags=('c', 'f'),
+            allow_stdin=True,
+            allow_dash_stdin=True,
+            default_block_reason="psql requires -c/-f/STDIN for non-interactive execution"
+        )
+        self._set_policy(('psql',), psql_policy)
+
+        redis_policy = ExecutablePolicy(
+            allow_flags=('--eval', '--pipe'),
+            allow_flag_prefixes=('--eval=',),
+            allow_short_flags=('x',),
+            script_extensions=('.lua',),
+            allow_stdin=True,
+            allow_dash_stdin=True,
+            default_block_reason="redis-cli requires --eval/-x/STDIN for non-interactive execution"
+        )
+        self._set_policy(('redis-cli',), redis_policy)
+
+        mongo_policy = ExecutablePolicy(
+            allow_flags=('--eval',),
+            allow_flag_prefixes=('--eval=',),
+            script_extensions=('.js',),
+            allow_stdin=True,
+            allow_dash_stdin=True,
+            default_block_reason="mongo requires --eval/script/STDIN for non-interactive execution"
+        )
+        self._set_policy(('mongo', 'mongosh'), mongo_policy)
+
+    def evaluate(self, context: CommandContext) -> PolicyVerdict:
+        cmd = basename(context.executable)
+        if cmd in self._always_block:
+            return PolicyVerdict(True, f"'{cmd}' is restricted to run_interactive")
+
+        handler = self._special_handlers.get(cmd)
+        if handler:
+            return handler(context)
+
+        policy = self._policies.get(cmd)
+        if policy:
+            return self._evaluate_policy(cmd, context, policy)
+
+        return PolicyVerdict(False, f"'{cmd}' allowed (no interactive policy)")
+
+    def _handle_man(self, context: CommandContext) -> PolicyVerdict:
+        pager = _extract_man_pager(context.args, context.env_vars)
+        if pager:
+            normalized = pager.strip().lower()
+            if normalized in self._man_allowed_pagers:
+                return PolicyVerdict(False, f"'man' pager forced to '{normalized}'")
+        return PolicyVerdict(True, "'man' requires a pager (run_interactive only)")
+
+    def _handle_sqlite3(self, context: CommandContext) -> PolicyVerdict:
+        args = context.args
+        if any(flag in args for flag in ('-batch', '--batch')):
+            return PolicyVerdict(False, "'sqlite3' allowed via -batch flag")
+        if context.stdin_bound:
+            return PolicyVerdict(False, "'sqlite3' allowed (stdin already bound)")
+
+        positional = _sqlite_positional_args(args)
+        if len(positional) >= 2:
+            return PolicyVerdict(False, "'sqlite3' allowed via inline SQL argument")
+
+        return PolicyVerdict(True, "sqlite3 requires SQL input (-batch/SQL arg/stdin)")
+
+    def _evaluate_policy(
+        self,
+        cmd: str,
+        context: CommandContext,
+        policy: ExecutablePolicy
+    ) -> PolicyVerdict:
+        args = context.args
+        matched_block = self._match_flag(args, policy.block_flags, policy.block_flag_prefixes, policy.block_short_flags)
+        if matched_block:
+            return PolicyVerdict(True, f"'{cmd}' blocked because flag {matched_block} forces interactivity")
+
+        matched_allow = self._match_flag(args, policy.allow_flags, policy.allow_flag_prefixes, policy.allow_short_flags)
+        if matched_allow:
+            return PolicyVerdict(False, f"'{cmd}' allowed via flag {matched_allow}")
+
+        script_token = _first_non_option_arg(args)
+        if script_token:
+            if script_token == '-' and policy.allow_dash_stdin and context.stdin_bound:
+                return PolicyVerdict(False, f"'{cmd}' reading script from stdin via '-'")
+            if script_token != '-':
+                if policy.allow_any_script_token:
+                    return PolicyVerdict(False, f"'{cmd}' script argument '{script_token}'")
+                if _matches_extension(script_token, policy.script_extensions):
+                    return PolicyVerdict(False, f"'{cmd}' script '{script_token}'")
+                if policy.allow_extensionless_scripts:
+                    base = basename(script_token).lstrip('.')
+                    if base and '.' not in base:
+                        return PolicyVerdict(False, f"'{cmd}' script '{script_token}' (extensionless)")
+
+        if context.stdin_bound and policy.allow_stdin:
+            return PolicyVerdict(False, f"'{cmd}' allowed (stdin already bound)")
+
+        if policy.default_block_reason:
+            return PolicyVerdict(True, f"{policy.default_block_reason} (command: '{cmd}')")
+
+        return PolicyVerdict(False, f"'{cmd}' allowed by default")
+
+    def _match_flag(
+        self,
+        args: List[str],
+        flags: Tuple[str, ...],
+        prefixes: Tuple[str, ...] = tuple(),
+        short_flags: Tuple[str, ...] = tuple()
+    ) -> Optional[str]:
+        if not args:
+            return None
+        stop_scanning = False
+        for token in args:
+            if token == '--':
+                stop_scanning = True
+                continue
+            if stop_scanning:
+                continue
+            if token in flags:
+                return token
+            for prefix in prefixes:
+                if token.startswith(prefix):
+                    return prefix
+            for short_flag in short_flags:
+                if _token_contains_short_flag(token, short_flag):
+                    return f"-{short_flag}"
+        return None
+
+
+POLICY_ENGINE = PolicyEngine()
 
 
 # ============================================================================

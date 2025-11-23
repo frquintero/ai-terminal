@@ -1029,12 +1029,24 @@ Execution style:
                     
                     # Record tool call in session state
                     result_output = result if isinstance(result, str) else str(result)
+                    preview_content = None
+                    if isinstance(result, dict):
+                        preview_content = (
+                            result.get("stdout")
+                            or result.get("stderr")
+                            or result.get("result")
+                            or result.get("agent_message")
+                        )
+                    if not preview_content:
+                        preview_content = result_output
                     _SESSION_STATE.record_tool_call(
                         tool_name=tool_name,
                         args=args,
                         success=success,
                         exit_code=exit_code,
-                        error=error_msg
+                        error=error_msg,
+                        tool_call_id=tool_call_id,
+                        output_preview=preview_content
                     )
                     self._record_tool_result_event(
                         tool_name=tool_name,

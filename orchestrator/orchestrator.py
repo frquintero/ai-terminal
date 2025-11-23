@@ -33,7 +33,7 @@ from orchestrator.plan_schema import detect_response_type
 from orchestrator.output_parser import OutputParser, OutputParserError
 from orchestrator.routes import Route
 from tool_executor import ToolExecutor
-from tools import TOOLS
+from tools import TOOLS, _SESSION_STATE
 
 
 class OrchestratorResult:
@@ -968,6 +968,9 @@ class Orchestrator:
                             else:
                                 resolved_input_error = data_or_error
                    
+                    exec_args = self._strip_null_values(exec_args)
+                    args = self._strip_null_values(args)
+
                     # TODO Enforcement: Validate tool call against current TODO
                     if not _validate_tool_call_against_todo(tool_name, args):
                         # Tool call not approved for current TODO - this would be a violation
@@ -1026,8 +1029,8 @@ class Orchestrator:
                                 "exit_code": None,
                                 "output_preview": preview,
                                 "error": resolved_input_error,
-                                "result": ""
-                            }
+                                    "result": ""
+                                }
                         else:
                             exec_result = self.tool_executor.execute(
                                 tool_name=tool_name,
@@ -1127,6 +1130,22 @@ class Orchestrator:
                                 "traceback": traceback.format_exc()
                             },
                             root_error=exec_error
+                        )
+                    
+                    validation_error_text = self._extract_schema_validation_error(exec_result)
+                    if validation_error_text:
+                        raise OrchestratorProcessError(
+                            "Tool call validation failed",
+                            process="agent_b_tool_executor",
+                            stage="execution",
+                            facts={
+                                "tool_name": tool_name,
+                                "tool_args": self._json_safe(args),
+                                "tool_call_id": tool_call_id,
+                                "error": validation_error_text,
+                                "executor_result": self._json_safe(exec_result)
+                            },
+                            error_code="tool_use_failed"
                         )
                     
                     snapshot_meta = self._build_output_snapshot(exec_result)
@@ -1324,6 +1343,25 @@ class Orchestrator:
                        artifact_path=exec_result.get("artifact_path")
                     )
 
+                    preview_payload = (
+                        exec_result.get("output_preview")
+                        or exec_result.get("stdout")
+                        or exec_result.get("stderr")
+                        or exec_result.get("result")
+                    )
+                    if preview_payload is not None:
+                        preview_payload = str(preview_payload)
+                    _SESSION_STATE.record_tool_call(
+                        tool_name=tool_name,
+                        args=args,
+                        success=success,
+                        exit_code=exec_result.get("exit_code"),
+                        error=step_error,
+                        tool_call_id=tool_call_id,
+                        step_id=step_id,
+                        output_preview=preview_payload
+                    )
+
                     if (
                         success
                         and tool_call_id
@@ -1412,11 +1450,12 @@ class Orchestrator:
         )
         final_text = self._segments_to_text(response_segments_filled)
 
+        total_steps = len(step_results)
         failed_steps = len([
             s for s in step_results
             if not s.get("success") and not s.get("informative_negative")
         ])
-        completed_steps = len(step_results) - failed_steps
+        completed_steps = total_steps - failed_steps
 
         # Determine overall success:
         # - If all steps succeeded: Success
@@ -1424,7 +1463,7 @@ class Orchestrator:
         # - If we recovered from a "json" tool hallucination (steps_failed might be > 0 but we caught it): Success
         # - If we have a valid final response despite intermediate errors: Success (weak success)
         
-        is_success = failed_steps == 0
+        is_success = total_steps > 0 and failed_steps == 0
         
         # If we have a valid final response and at least one successful step, consider it a success
         # This handles cases where we retried or recovered.
@@ -1434,7 +1473,7 @@ class Orchestrator:
         return {
             "steps_completed": completed_steps,
             "steps_failed": failed_steps,
-            "total_steps": len(step_results),
+            "total_steps": total_steps,
             "step_results": step_results,
             "success": is_success,
             "final_response": final_text,
@@ -1499,6 +1538,26 @@ class Orchestrator:
 
         return [{"kind": "text", "text": note}]
 
+    @staticmethod
+    def _strip_null_values(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Remove keys with None values so optional arguments stay omitted."""
+        if not isinstance(payload, dict):
+            return payload
+        return {key: value for key, value in payload.items() if value is not None}
+
+    @staticmethod
+    def _extract_schema_validation_error(
+        exec_result: Optional[Dict[str, Any]]
+    ) -> Optional[str]:
+        """Detect schema validation failures in executor responses."""
+        if not isinstance(exec_result, dict) or exec_result.get("success"):
+            return None
+        for field in ("error", "stderr", "result", "output_preview"):
+            value = exec_result.get(field)
+            if isinstance(value, str) and "Tool call validation failed" in value:
+                return value
+        return None
+
     def _execute_plan(
         self,
         cycle_id: str,
@@ -1556,11 +1615,16 @@ class Orchestrator:
                 "error": step.get("error")
             })
 
+        steps_run = len(step_results)
+        steps_successful = steps_run > 0 and all(
+            step.get("success") or step.get("informative_negative")
+            for step in step_results
+        )
         summary_payload = {
             "intent": plan.get("intent"),
             "success_criteria": plan.get("success_criteria") or [],
-            "overall_success": all(step.get("success") for step in step_results) if step_results else True,
-            "steps_run": len(step_results),
+            "overall_success": steps_successful,
+            "steps_run": steps_run,
             "steps": steps_summary,
             "agent_notes": agent_b_notes,
         }
