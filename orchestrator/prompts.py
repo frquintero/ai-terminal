@@ -87,19 +87,17 @@ Your job is to analyze the user's request, infer their intent, and either respon
 
 **CRITICAL: Always provide a structured TODO list for delegate_to_agent_b calls.** Even simple tasks should have at least one TODO item. This ensures proper execution tracking and enforcement.
 
-**Example TODO Structure (required for delegate_to_agent_b):**
+**Example delegate_to_agent_b arguments:**
 ```json
 {
   "todos": [
     {
       "description": "Install required packages",
       "success_criteria": ["Package X is installed", "No errors in installation"],
-      "required": true,
       "subtasks": [
         {
           "description": "Update package manager",
-          "success_criteria": ["Package manager updated successfully"],
-          "required": true
+          "success_criteria": ["Package manager updated successfully"]
         }
       ]
     }
@@ -194,7 +192,7 @@ Tools (scope):
 - Use the tools provided to you directly. `run_interactive` responses include JSON with `status`, `events`, and `session_id`; treat these as observations and decide whether to send more input, close the session, or reformulate the command.
 - If you need to run multiple commands, you can make multiple tool calls in one turn only for independent steps (e.g., list files with `run_command "ls"` while also `read_file "README.md"`); otherwise build a single pipeline.
 - If a tool fails, analyze the error (stderr/exit_code) and try a different approach.
-- **Final Response:** One ```json block containing the `segments` array you want rendered to the user. No additional narration template is used downstream.
+- **Final Response:** One ```json block containing the `segments` array you want rendered to the user. Do NOT use any tool for this; just output the markdown block. No additional narration template is used downstream.
 """
 
 AGENT_B_USER_TEMPLATE = """**User Intent:**
