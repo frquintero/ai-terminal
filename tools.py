@@ -16,7 +16,6 @@ import ipaddress
 import json
 import os
 import re
-import shlex
 import shutil
 import socket
 import subprocess
@@ -29,7 +28,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse, quote_plus
 import pexpect
 
 from shell_integration import ShellIntegration
-from command_parser import parse_command
+from command_parser import analyze_command, tokenize_command_words
 
 # v1.3 legacy imports (deprecated in v2.0, gated behind USE_EVENT_MEMORY flag)
 # These modules are kept for historical reference only
@@ -384,6 +383,15 @@ def _classify_path_location(path: str) -> str:
     return "external"
 
 
+def _shell_quote(value: str) -> str:
+    """Minimal shell quoting helper to avoid importing shlex."""
+    if value == "":
+        return "''"
+    if re.match(r'^[A-Za-z0-9@%_=+:,./-]+$', value):
+        return value
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
 def _record_file_event(
     operation: str,
     requested_path: str,
@@ -413,10 +421,7 @@ def _record_file_event(
 
 def _extract_path_candidates(command: str, base_dir: str) -> List[Dict[str, Any]]:
     """Heuristically extract path-like tokens from the command string."""
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        tokens = command.split()
+    tokens = tokenize_command_words(command)
     candidates: List[Dict[str, Any]] = []
     skip_tokens = {"|", "||", "&&", ";", ">", ">>", "<"}
 
@@ -1844,7 +1849,7 @@ class HttpRequestTool(BaseTool):
             safe_parts.append(part)
             if lowered in sensitive_flags:
                 skip_next = True
-        return " ".join(shlex.quote(p) for p in safe_parts)
+        return " ".join(_shell_quote(p) for p in safe_parts)
 
     def _extract_latency(self, metrics: Dict[str, Any]) -> Dict[str, float]:
         latency = {}
@@ -2289,88 +2294,46 @@ class RunCommandTool(BaseTool):
         1. Interactive command detection → redirect to run_interactive
         2. Smart bypass for safe flags (--version, --help, -c for interpreters)
         """
-        try:
-            # Parse command tokens
-            tokens = shlex.split(command) if command.strip() else []
-            if not tokens:
-                return {
-                    "stdout": "",
-                    "stderr": "Error: Empty command",
-                    "exit_code": 1
-                }
-            
-            # Control operators that delimit simple commands in a pipeline
-            CONTROL_OPS = {'|', '||', '&&', ';'}
-            
-            # Extract first simple command (before any pipe/control operator)
-            first_cmd_tokens = []
-            for t in tokens:
-                if t in CONTROL_OPS:
-                    break
-                first_cmd_tokens.append(t)
-            
-            if not first_cmd_tokens:
-                return {
-                    "stdout": "",
-                    "stderr": "Error: Empty command",
-                    "exit_code": 1
-                }
-            
-            # Identify the actual command being executed
-            base = first_cmd_tokens[0]
-            base_name = os.path.basename(base)
+        if not command or not command.strip():
+            return {
+                "stdout": "",
+                "stderr": "Error: Empty command",
+                "exit_code": 1
+            }
 
-            # ----------------------------------------------------------------
-            # GUARD: Interactive command detection using robust parser
-            # ----------------------------------------------------------------
-            is_interactive, reason = parse_command(command)
-            
-            if is_interactive:
-                # Extract command name for error message
-                try:
-                    cmd_name = shlex.split(command)[0] if command else "command"
-                except:
-                    cmd_name = "command"
-                
+        try:
+            analysis = analyze_command(command)
+
+            if analysis.is_interactive:
+                cmd_name = analysis.primary_context.executable if analysis.primary_context else "command"
                 return {
                     "stdout": "",
-                    "stderr": f"Error: Interactive command detected - {reason}. Use run_interactive tool to avoid timeout.",
+                    "stderr": f"Error: Interactive command detected - {analysis.reason}. Use run_interactive tool to avoid timeout ({cmd_name}).",
                     "exit_code": 126
                 }
             
-            # Execute command via shell integration
-            # Force reset to working directory before each command (stateless cwd)
-            # If isolation is enabled, shell mounts working_dir to /workspace, so use that
             if self.shell.isolation_enabled:
                 reset_dir = "/workspace"
             else:
                 reset_dir = self.working_dir
             
-            # ShellIntegration.run_command now returns a Dict
             result = self.shell.run_command(command, input_data=input_data, reset_dir=reset_dir)
-            
-            # Result is already a dict with stdout, stderr, exit_code, cwd
-            # We can return it directly or wrap it if needed.
-            # The ToolExecutor expects a dict, so this is perfect.
             
             try:
                 _record_shell_snapshot(
                     command=command,
                     exit_code=result.get("exit_code"),
                     shell_cwd=result.get("cwd"),
-                    working_dir=self.working_dir,
+                    working_dir=reset_dir,
                 )
             except Exception:
                 pass
             
-            # Ensure raw_stdout/raw_stderr are present for strict mode
             if "raw_stdout" not in result:
                 result["raw_stdout"] = result.get("stdout", "")
             if "raw_stderr" not in result:
                 result["raw_stderr"] = result.get("stderr", "")
 
-            # Fallback: some platforms return empty string for platform.processor()
-            # If the caller asked for that and got no stdout, try a more reliable probe.
             if (
                 result.get("exit_code") == 0
                 and not (result.get("stdout") or "").strip()
@@ -4062,8 +4025,11 @@ def _build_tools():
     return tools
 
 
-# Global tool registry - automatically populated
-TOOLS: Dict[str, BaseTool] = _build_tools()
+# Global tool registry - automatically populated (can be skipped for tests)
+if os.getenv("AI_TERMINAL_SKIP_TOOL_REGISTRY") == "1":
+    TOOLS: Dict[str, BaseTool] = {}
+else:
+    TOOLS = _build_tools()
 
 
 def get_tool_schemas() -> List[Dict[str, Any]]:

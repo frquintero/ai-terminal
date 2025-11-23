@@ -41,9 +41,10 @@ else:
 **File**: `tools.py:139-150`
 
 ```python
-first_token = shlex.split(command)[0] if command.strip() else ""
-if first_token in InteractiveCommandTool.INTERACTIVE_COMMANDS:
-    return f"Error: '{first_token}' is an interactive command. Use run_interactive tool instead to avoid timeout."
+analysis = analyze_command(command)
+if analysis.is_interactive:
+    cmd = analysis.primary_context.executable if analysis.primary_context else "command"
+    return f"Error: Interactive command detected ({cmd}). Use run_interactive tool instead to avoid timeout."
 ```
 
 ### 4. 🔴 **run_interactive unusable in headless environments**

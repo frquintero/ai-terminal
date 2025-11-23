@@ -158,7 +158,17 @@ A dedicated component for safely executing the steps defined by Agent B.
 
 #### PTY-Backed Interactive Sessions
 
-Version 3 adds a PTY-backed execution path for commands that expect live dialogue (`man`, pagers, password prompts, repls). `run_interactive` (see `tools.py`) now launches an `InteractiveSession` powered by `pexpect`, which streams output incrementally, detects prompts with regex patterns, and keeps a `session_id` so the Tool Executor and orchestrator can resume the same conversation. The orchestrator forwards those structured prompt events directly to Agent B, allowing it to decide when to send keystrokes, exit, or continue piping additional commands without involving Agent A. The command parser also understands env overrides such as `MANPAGER=cat`, ensuring non-interactive variants continue to flow through the standard `run_command` path. This tighter integration eliminates TTY deadlocks and gives users real-time feedback during complex interactive workflows.
+Version 3 adds a PTY-backed execution path for commands that expect live dialogue (`man`, pagers, password prompts, repls). `run_interactive` (see `tools.py`) now launches an `InteractiveSession` powered by `pexpect`, which streams output incrementally, detects prompts with regex patterns, and keeps a `session_id` so the Tool Executor and orchestrator can resume the same conversation. The orchestrator forwards those structured prompt events directly to Agent B, allowing it to decide when to send keystrokes, exit, or continue piping additional commands without involving Agent A. The advanced command parser (`command_parser.py`) implements a full shell lexer and AST parser that understands redirections, pipelines, heredocs, and environment overrides (e.g., `MANPAGER=cat`), ensuring non-interactive variants continue to flow through the standard `run_command` path while blocking potentially dangerous interactive commands. This tighter integration eliminates TTY deadlocks and gives users real-time feedback during complex interactive workflows.
+
+### 3.5 Command Parser (`command_parser.py`)
+A robust shell command analysis system that safely determines whether commands are interactive or non-interactive.
+*   **Features**:
+    *   **Shell Lexer**: Tokenizes shell syntax including quoting, operators, line continuations, and heredocs.
+    *   **AST Parser**: Builds abstract syntax trees for commands, understanding pipelines, redirections, and control structures.
+    *   **Context Analysis**: Extracts command contexts with executable, arguments, environment variables, and I/O binding information.
+    *   **Interactive Detection**: Classifies commands as interactive (REPLs, editors, pagers) or non-interactive based on comprehensive rules.
+    *   **Fail-Safe Design**: Blocks ambiguous or malformed commands to prevent security risks.
+*   **Philosophy**: "Go upstream" - solves parsing at the source rather than adding downstream patches, enabling complex shell scripts while maintaining safety.
 
 ### 4. Memory System (`memory/api.py`, `memory/schema.py`)
 A unified interface for persistent state, backed by SQLite (`logs/orchestrator.db`).
@@ -214,6 +224,7 @@ Handles the rendering of the terminal interface.
 *   `orchestrator/prompts.py`: System prompts and tool definitions for Agent A and Agent B, including Tool Call Contract for strict tool usage enforcement and TODO Enforcement Rules for plan adherence.
 *   `memory/schema.py`: Database schema definitions.
 *   `tools.py`: Definitions of available tools (e.g., `run_command`, `read_file`).
+*   `command_parser.py`: Advanced shell command parser with lexer and AST analysis for safe interactive command detection.
 *   `ui_formatter.py`: UI rendering logic using `rich`.
 
 ## Configuration (`.env`)
