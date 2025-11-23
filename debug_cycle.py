@@ -125,7 +125,7 @@ class CycleDebugger:
             cursor = self.conn.execute(
                 """
                 SELECT cycle_id, route, query_text, '0.0' as confidence, created_at, 
-                       error_message, error_type, stage, payload_json
+                       error_message, error_type, stage, process, error_code, facts_json
                 FROM cycle_failures 
                 WHERE cycle_id = ?
                 """,
@@ -219,12 +219,11 @@ class CycleDebugger:
             print(f"  Stage:      {metadata.get('stage')}")
             print(f"  Message:    {metadata.get('error_message')}")
             
-            if metadata.get('payload_json'):
+            if metadata.get('facts_json'):
                 try:
-                    payload = json.loads(metadata['payload_json'])
-                    print("\n💥 FAILURE PAYLOAD:")
-                    # Extract execution result if present
-                    exec_result = payload.get('execution_result')
+                    facts = json.loads(metadata['facts_json'])
+                    print("\n💥 FAILURE FACTS:")
+                    exec_result = (facts or {}).get('execution_result') if isinstance(facts, dict) else None
                     if exec_result:
                         steps = exec_result.get('step_results', [])
                         for step in steps:
@@ -232,13 +231,13 @@ class CycleDebugger:
                             print(f"    Success: {step.get('success')}")
                             if step.get('error'):
                                 print(f"    Error:   {step.get('error')}")
-                    
-                    # Extract agent response if present
-                    agent_response = payload.get('agent_response')
+                    agent_response = (facts or {}).get('agent_response') if isinstance(facts, dict) else None
                     if agent_response:
                         print(f"\n  Agent Response Preview: {self._truncate(agent_response, 200)}")
+                    if not isinstance(facts, dict):
+                        print(json.dumps(facts, indent=2))
                 except Exception as e:
-                    print(f"  Payload parsing error: {e}")
+                    print(f"  Facts parsing error: {e}")
         
         print(f"\n📋 METADATA:")
         print(f"  Route:      {metadata['route']}")

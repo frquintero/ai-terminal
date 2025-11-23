@@ -12,7 +12,7 @@ from typing import Optional
 
 DEFAULT_DB_PATH = Path("logs/orchestrator.db")
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 CREATE_TABLES = """
 -- Schema version tracking
@@ -45,26 +45,41 @@ CREATE TABLE IF NOT EXISTS router_decisions (
     FOREIGN KEY (session_id) REFERENCES sessions(session_id)
 );
 
--- Failure snapshots (only unsuccessful cycles)
 CREATE TABLE IF NOT EXISTS cycle_failures (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     cycle_id TEXT NOT NULL UNIQUE,
     session_id TEXT,
     query_text TEXT,
+    process TEXT,
     route TEXT,
     stage TEXT,
     error_type TEXT,
+    error_code TEXT,
     error_message TEXT NOT NULL,
-    payload_json TEXT,
-    agent_response_preview TEXT,
-    execution_result_json TEXT,
-    response_segments_json TEXT,
-    context_json TEXT,
+    facts_json TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_cycle_failures_created_at
     ON cycle_failures(created_at DESC);
+
+-- LLM call failure telemetry
+CREATE TABLE IF NOT EXISTS llm_call_fails (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle_id TEXT,
+    session_id TEXT,
+    agent_role TEXT,
+    model_provider TEXT,
+    model_name TEXT,
+    parameters_json TEXT,
+    request_messages_json TEXT,
+    response_payload_json TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_call_fails_cycle
+    ON llm_call_fails(cycle_id);
 
 -- Intention cache (for CACHED route zero-LLM execution)
 CREATE TABLE IF NOT EXISTS intention_cache (

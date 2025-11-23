@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 
 from memory import Memory
-from memory.schema import get_schema_version
+from memory.schema import get_schema_version, SCHEMA_VERSION
 
 
 @pytest.fixture
@@ -48,7 +48,9 @@ class TestMemorySchema:
             'task_state',
             'step_outputs',
             'chat_history',
-            'llm_traces'
+            'llm_traces',
+            'cycle_failures',
+            'llm_call_fails'
         ]
         
         cursor = memory.conn.execute(
@@ -62,7 +64,7 @@ class TestMemorySchema:
     def test_schema_version(self, memory):
         """Verify schema version is tracked."""
         version = get_schema_version(memory.conn)
-        assert version == 5
+        assert version == SCHEMA_VERSION
     
     def test_foreign_keys_enabled(self, memory):
         """Verify foreign key constraints are enabled."""
@@ -580,18 +582,20 @@ class TestCycleFailures:
             cycle_id=cycle_id,
             session_id=session_id,
             query_text='bad query',
+            process='orchestrator',
             route='PLANNER',
             stage='orchestrator',
             error_type='RuntimeError',
+            error_code=None,
             error_message='Boom',
-            payload={'detail': 'trace'}
+            facts={'detail': 'trace'}
         )
 
         failure = memory.get_cycle_failure(cycle_id)
         assert failure is not None
         assert failure['cycle_id'] == cycle_id
         assert failure['stage'] == 'orchestrator'
-        assert failure['payload']['detail'] == 'trace'
+        assert failure['facts']['detail'] == 'trace'
 
     def test_delete_cycle_clears_failure_snapshot(self, memory):
         session_id = 'failure-session-2'
@@ -601,9 +605,11 @@ class TestCycleFailures:
             cycle_id=cycle_id,
             session_id=session_id,
             query_text='bad query',
+            process='orchestrator',
             route='PLANNER',
             stage='orchestrator',
             error_type='RuntimeError',
+            error_code=None,
             error_message='Boom'
         )
 
@@ -611,6 +617,31 @@ class TestCycleFailures:
 
         memory.delete_cycle(cycle_id)
         assert memory.get_cycle_failure(cycle_id) is None
+
+
+class TestLLMFailureLogging:
+    """Telemetry for failed LLM calls should persist."""
+
+    def test_record_llm_call_failure(self, memory):
+        memory.record_llm_call_failure(
+            cycle_id="cycle-llm",
+            session_id="session-llm",
+            agent_role="A",
+            model_provider="groq",
+            model_name="llama3",
+            parameters={"temperature": 0, "max_tokens": 10},
+            request_messages=[{"role": "user", "content": "hi"}],
+            response_payload={"error": "timeout"},
+            error_message="timeout"
+        )
+
+        failures = memory.get_llm_call_failures(cycle_id="cycle-llm")
+        assert len(failures) == 1
+        record = failures[0]
+        assert record["agent_role"] == "A"
+        assert record["model_provider"] == "groq"
+        assert record["parameters"]["temperature"] == 0
+        assert record["response_payload"]["error"] == "timeout"
 
 
 class TestMetricsRecording:

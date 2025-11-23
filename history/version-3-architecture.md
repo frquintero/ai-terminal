@@ -354,14 +354,14 @@ Errors are handled with a "fail gracefully, log thoroughly, recover if possible"
    - LLM errors: Retry with backoff; if persistent, fall back to Agent A for error explanation.
 
 2. **Recovery Mechanisms**:
-   - **Tool Failures**: Call Agent A to generate a user-friendly error message, including tool hints (e.g., "Tool `read_file` failed: file not found").
+   - **Tool Failures**: Surface structured telemetry (tool name, args, stderr) and stop the cycle; no automatic narration.
    - **Loop Continuation**: On step failure, log and continue if not critical; abort on max failures.
-   - **Fallback Responses**: For fatal errors, use Agent A to narrate the issue (e.g., "A system error occurred; please retry").
+   - **Fatal Errors**: Record the issue in `cycle_failures` and return a minimal user notice pointing to the logged cycle.
    - **Partial Success**: Save completed steps even if the cycle fails overall.
 
 3. **User Communication**:
-   - Errors are explained contextually (e.g., "Command `ls` failed with exit code 2: No such file or directory").
-   - Avoid generic messages; use Agent A for natural language summaries.
+   - Users receive a short notice (e.g., "Cycle `<id>` failed. See cycle_failures for details.") instead of AI-generated explanations.
+   - Investigation details live exclusively in telemetry tables.
 
 4. **Safety Measures**:
    - Never expose internal errors to users.
@@ -372,7 +372,8 @@ Errors are handled with a "fail gracefully, log thoroughly, recover if possible"
 All errors are logged for debugging and improvement:
 
 1. **Database Logging**:
-   - `cycle_failures` table: Stores snapshots with `stage`, `error_type`, `error_message`, `payload` (e.g., traceback, execution results).
+   - `cycle_failures` table: Stores structured telemetry (`process`, `stage`, `error_type`, `error_code`, `facts_json`) for each failed cycle.
+   - `llm_call_fails` table: Captures every failed LLM invocation (role, provider/model, parameters, full prompt, raw provider error) for debugging outages.
    - `step_outputs`: Logs per-step errors, including `stderr`, `exit_code`, and parsed errors.
    - `interactions`: Raw LLM responses for auditing.
 
@@ -381,8 +382,7 @@ All errors are logged for debugging and improvement:
    - Status updates: "Planning failed", "Execution error".
 
 3. **Failure Snapshots**:
-   - `_build_failure_snapshot()`: Captures full context (query, route, agent response, execution result) for post-mortem analysis.
-
+   - Failure context is stored as structured `facts_json` instead of narrated summaries; Agent A is never invoked for fallbacks.
 4. **Metrics**:
    - Tracks error rates in `cycle_metrics` and `step_metrics`.
 

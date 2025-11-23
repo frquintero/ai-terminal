@@ -64,6 +64,7 @@ class LLMClient:
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
         cycle_id: Optional[str] = None,
+        session_id: Optional[str] = None,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         max_retries: int = 3
@@ -268,6 +269,40 @@ class LLMClient:
                     max_tokens=max_tokens
                 )
 
+        if self.memory:
+            parameters_snapshot = {
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "tool_choice": tool_choice,
+                "tool_names": [
+                    tool.get("function", {}).get("name")
+                    for tool in (tools or [])
+                    if isinstance(tool, dict)
+                ],
+                "attempts": (attempt + 1) if last_error else 0,
+                "max_retries": max_retries
+            }
+            response_snapshot = {
+                "error_text": error_text,
+                "failed_generation": failed_generation,
+                "raw_error": str(last_error) if last_error else None,
+                "trace_id": trace_id
+            }
+            try:
+                self.memory.record_llm_call_failure(
+                    cycle_id=cycle_id,
+                    session_id=session_id,
+                    agent_role=self.role,
+                    model_provider=getattr(self.config, "agent_type", None),
+                    model_name=self.config.model,
+                    parameters=self._safe_payload(parameters_snapshot),
+                    request_messages=self._safe_payload(messages),
+                    response_payload=self._safe_payload(response_snapshot),
+                    error_message=error_text
+                )
+            except Exception:
+                pass
+
         return {
             "message": None,
             "usage": None,
@@ -305,6 +340,15 @@ class LLMClient:
             if match:
                 return match.group(1)
         return None
+    
+    @staticmethod
+    def _safe_payload(payload: Any) -> Any:
+        """Return a JSON-serializable structure for logging."""
+        try:
+            serialized = json.dumps(payload, default=str)
+            return json.loads(serialized)
+        except Exception:
+            return str(payload)
     
     def _is_retryable_error(self, error: Exception) -> bool:
         """

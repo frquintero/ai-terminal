@@ -35,15 +35,27 @@ try:
         print("No interactions found for this cycle.")
 
     # Also check cycle_failures just in case
-    cursor.execute("SELECT context_json FROM cycle_failures WHERE cycle_id LIKE ?", (f"{cycle_id_prefix}%",))
+    cursor.execute("""
+        SELECT process, stage, error_type, error_code, error_message, facts_json
+        FROM cycle_failures
+        WHERE cycle_id LIKE ?
+    """, (f"{cycle_id_prefix}%",))
     row = cursor.fetchone()
-    if row and row[0]:
-        print("\n--- Cycle Failure Context ---")
-        try:
-            ctx = json.loads(row[0])
-            print(json.dumps(ctx, indent=2))
-        except:
-            print("Could not parse context JSON")
+    if row:
+        print("\n--- Cycle Failure Telemetry ---")
+        print(f"Process: {row[0]}")
+        print(f"Stage: {row[1]}")
+        print(f"Error Type: {row[2]}")
+        print(f"Error Code: {row[3]}")
+        print(f"Error Message: {row[4]}")
+        facts_json = row[5]
+        if facts_json:
+            try:
+                facts = json.loads(facts_json)
+                print("Facts:")
+                print(json.dumps(facts, indent=2))
+            except Exception:
+                print("Could not parse facts JSON")
 
 except Exception as e:
     print(f"Error: {e}")

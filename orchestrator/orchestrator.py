@@ -73,6 +73,32 @@ class OrchestratorResult:
         }
 
 
+class OrchestratorProcessError(Exception):
+    """Represents a failure in a specific orchestrator process (Agent A, Agent B, executor, etc.)."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        process: str,
+        stage: str,
+        facts: Optional[Dict[str, Any]] = None,
+        error_code: Optional[str] = None,
+        root_error: Optional[BaseException] = None
+    ):
+        super().__init__(message)
+        self.process = process
+        self.stage = stage
+        self.facts = facts or {}
+        self.error_code = error_code
+        self.root_error = root_error
+
+    @property
+    def root_error_type(self) -> str:
+        if self.root_error:
+            return self.root_error.__class__.__name__
+        return self.__class__.__name__
+
 class Orchestrator:
     """
     Main orchestrator for the dual-agent architecture.
@@ -241,34 +267,19 @@ class Orchestrator:
                     txn.commit()
                 else:
                     failure_context = {
+                        "process": "executor",
                         "stage": "execution",
                         "error_type": "CycleFailure",
                         "error_message": result.error or "Cycle marked unsuccessful",
-                        "payload": {
-                            "execution_result": result.execution_result,
+                        "facts": {
+                            "execution_result": self._json_safe(result.execution_result),
                             "agent_response": result.agent_response
                         }
                     }
 
-            except Exception as e:
+            except OrchestratorProcessError as e:
                 latency_ms = int((time.time() - start_time) * 1000)
-                error_msg = f"Error during orchestration: {str(e)}"
-                fallback_context = f"""The user asked: {query}
-
-A fatal orchestrator error occurred before the cycle could finish.
-
-Stage: orchestrator
-Success: False
-
-Details:
-{error_msg}
-
-Explain what happened and advise the user to retry after checking logs."""
-                agent_response = self._call_agent_a_direct_response(
-                    cycle_id=cycle_id,
-                    user_context=fallback_context
-                )
-
+                agent_response = self._build_failure_notice(cycle_id)
                 result = OrchestratorResult(
                     cycle_id=cycle_id,
                     route=route_value,
@@ -279,10 +290,53 @@ Explain what happened and advise the user to retry after checking logs."""
                     response_segments=[{"kind": "text", "text": agent_response}]
                 )
                 failure_context = {
+                    "process": e.process,
+                    "stage": e.stage,
+                    "error_type": e.root_error_type,
+                    "error_code": e.error_code,
+                    "error_message": str(e),
+                    "facts": e.facts
+                }
+                cycle_success = False
+            except PlanValidationError as e:
+                latency_ms = int((time.time() - start_time) * 1000)
+                agent_response = self._build_failure_notice(cycle_id)
+                result = OrchestratorResult(
+                    cycle_id=cycle_id,
+                    route=route_value,
+                    query=query,
+                    agent_response=agent_response,
+                    latency_ms=latency_ms,
+                    error=str(e),
+                    response_segments=[{"kind": "text", "text": agent_response}]
+                )
+                failure_context = {
+                    "process": "agent_a_planner",
+                    "stage": "planning",
+                    "error_type": "PlanValidationError",
+                    "error_message": str(e),
+                    "facts": {"detail": str(e)}
+                }
+                cycle_success = False
+
+            except Exception as e:
+                latency_ms = int((time.time() - start_time) * 1000)
+                agent_response = self._build_failure_notice(cycle_id)
+                result = OrchestratorResult(
+                    cycle_id=cycle_id,
+                    route=route_value,
+                    query=query,
+                    agent_response=agent_response,
+                    latency_ms=latency_ms,
+                    error=str(e),
+                    response_segments=[{"kind": "text", "text": agent_response}]
+                )
+                failure_context = {
+                    "process": "orchestrator",
                     "stage": "orchestrator",
                     "error_type": e.__class__.__name__,
-                    "error_message": error_msg,
-                    "payload": {
+                    "error_message": str(e),
+                    "facts": {
                         "traceback": traceback.format_exc()
                     }
                 }
@@ -294,11 +348,13 @@ Explain what happened and advise the user to retry after checking logs."""
         if not cycle_success and cycle_id:
             if failure_context is None:
                 failure_context = {
+                    "process": "executor",
                     "stage": "execution",
                     "error_type": "CycleFailure",
                     "error_message": result.error if result else "Cycle failed",
-                    "payload": {
-                        "execution_result": getattr(result, "execution_result", None)
+                    "facts": {
+                        "execution_result": self._json_safe(getattr(result, "execution_result", None)),
+                        "agent_response": getattr(result, "agent_response", None)
                     }
                 }
             self._record_cycle_failure(
@@ -308,8 +364,18 @@ Explain what happened and advise the user to retry after checking logs."""
                 failure_context=failure_context,
                 result=result
             )
+            if result:
+                failure_notice = self._build_failure_notice(cycle_id)
+                result.agent_response = failure_notice
+                result.response_segments = [{"kind": "text", "text": failure_notice}]
 
         return result
+
+    def _build_failure_notice(self, cycle_id: Optional[str]) -> str:
+        identifier = cycle_id or "unknown-cycle"
+        return (
+            f"Cycle {identifier} failed. Detailed telemetry is stored in cycle_failures."
+        )
 
     def _record_cycle_metric(
         self,
@@ -350,79 +416,6 @@ Explain what happened and advise the user to retry after checking logs."""
         else:
             metrics = get_metrics()
             metrics.record_cycle_metric(cycle_metric)
-    
-    def _call_agent_a_direct_response(
-        self,
-        cycle_id: str,
-        user_context: str
-    ) -> str:
-        """
-        Call Agent A once with the unified system prompt and ask for a direct response.
-        
-        Args:
-            cycle_id: Cycle ID for logging
-            user_context: Instructional payload describing what to explain to the user
-        
-        Returns:
-            Final narration content extracted from Agent A's {"response": "..."} JSON payload
-        """
-        available_tools = sorted(TOOLS.keys())
-        tool_schemas = self._get_tool_schemas("B")
-        system_context = self.context_builder.build_for_role(
-            role="A",
-            session_id=self.session_id,
-            tool_registry=TOOLS,
-            shell_cwd=self._get_effective_shell_cwd()
-        )
-        system_prompt = system_context + "\n\n" + get_agent_a_system_prompt(tool_schemas)
-        
-        user_context_msg = (
-            f"{user_context.strip()}\n\n"
-            "Use the 'respond_to_user' tool to explain this to the user."
-        )
-        
-        user_prompt = get_agent_a_user_message(user_context_msg)
-        
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
-        
-        llm_client = LLMClient(
-            config=self.config,
-            role="A",
-            memory=self.memory
-        )
-        llm_result = llm_client.call(
-            messages=messages, 
-            cycle_id=cycle_id, 
-            temperature=self.config.agent_a_temperature,
-            tools=AGENT_A_TOOLS
-        )
-        
-        if llm_result["error"]:
-            return f"[Agent A response failed: {llm_result['error']}]\n\n{user_context}"
-        
-        msg = llm_result["message"]
-        content = msg.content or ""
-        
-        if hasattr(msg, "tool_calls") and msg.tool_calls:
-            for tc in msg.tool_calls:
-                if tc.function.name == "respond_to_user":
-                    try:
-                        args = json.loads(tc.function.arguments)
-                        return self._auto_fence_code(args.get("response", ""))
-                    except Exception:
-                        pass
-        
-        # Use PlanValidator to robustly parse Agent A's response
-        validator = PlanValidator(available_tools=[])
-        payload, _ = validator.validate_with_hints(content)
-        
-        if payload and isinstance(payload, dict) and "response" in payload:
-            return self._auto_fence_code(payload["response"])
-        
-        return self._auto_fence_code(content or user_context)
     
     def _run_agent_a_cycle(self, cycle_id: str, query: str) -> OrchestratorResult:
         """
@@ -483,6 +476,7 @@ Explain what happened and advise the user to retry after checking logs."""
         llm_result = llm_client.call(
             messages=messages,
             cycle_id=cycle_id,
+            session_id=self.session_id,
             temperature=self.config.agent_a_temperature,
             tools=AGENT_A_TOOLS
         )
@@ -615,43 +609,26 @@ Explain what happened and advise the user to retry after checking logs."""
                 response_segments=response_segments
             )
         
+        except OrchestratorProcessError:
+            raise
         except Exception as e:
-            # Mark as error
             self.memory.update_task_status(
                 cycle_id=cycle_id,
                 status="error",
                 error_message=str(e)
             )
-            
-            # Call Agent A to explain error
             tool_hint = self._extract_tool_hint(str(e))
-            tool_line = (
-                f"Tool mentioned in error: {tool_hint}"
-                if tool_hint else
-                "No specific tool was mentioned in the error."
-            )
-            error_context = f"""The user asked: {query}
-
-A failure occurred while executing the plan steps.
-Stage: Agent B execution loop.
-{tool_line}
-
-Error:
-{str(e)}
-
-Describe the failure and tell the user what to do next."""
-            agent_response = self._call_agent_a_direct_response(
-                cycle_id=cycle_id,
-                user_context=error_context
-            )
-            
-            return OrchestratorResult(
-                cycle_id=cycle_id,
-                route=Route.PLANNER.value,
-                query=query,
-                agent_response=agent_response,
-                error=str(e),
-                response_segments=[{"kind": "text", "text": agent_response}]
+            facts = {
+                "tool_hint": tool_hint,
+                "exception": str(e),
+                "traceback": traceback.format_exc()
+            }
+            raise OrchestratorProcessError(
+                "Agent B execution failed",
+                process="agent_b_execution",
+                stage="execution",
+                facts=facts,
+                root_error=e
             )
     
     def _auto_fence_code(self, text: str) -> str:
@@ -916,6 +893,7 @@ Describe the failure and tell the user what to do next."""
                     messages=messages,
                     tools=tools,
                     cycle_id=cycle_id,
+                    session_id=self.session_id,
                     temperature=self.config.agent_b_temperature
                 )
                 
@@ -1107,18 +1085,6 @@ Describe the failure and tell the user what to do next."""
                             # Never let logging failures mask the primary executor error
                             pass
 
-                        failure_prompt = f"""The user asked: {query}
-
-Agent B attempted to execute a tool, but ToolExecutor failed.
-Stage: Agent B execution loop (tool execution).
-Tool: {tool_name}
-Args: {self._json_safe(args)}
-
-Error:
-{exec_error}
-
-Explain the failure to the user, call out the tool/args involved, and suggest how to fix or retry."""
-                        
                         # Handling "json" tool hallucination gracefully (Robustness Fix)
                         # If the error is about the "json" tool not existing, but we can parse the args,
                         # we treat it as a successful final response.
@@ -1145,33 +1111,23 @@ Explain the failure to the user, call out the tool/args involved, and suggest ho
                                         "response_segments": response_segments,
                                         "agent_b_final_raw": json.dumps(args),
                                         "missing_segments": False,
-                                        "error": None
-                                    }
+                                    "error": None
+                                }
                             except Exception:
                                 pass # Fall through to normal error handling
 
-                        agent_response = self._call_agent_a_direct_response(
-                            cycle_id=cycle_id,
-                            user_context=failure_prompt
+                        raise OrchestratorProcessError(
+                            f"ToolExecutor failed for {tool_name}",
+                            process="agent_b_tool_executor",
+                            stage="execution",
+                            facts={
+                                "tool_name": tool_name,
+                                "tool_args": self._json_safe(args),
+                                "error": str(exec_error),
+                                "traceback": traceback.format_exc()
+                            },
+                            root_error=exec_error
                         )
-
-                        return {
-                            "steps_completed": steps_completed,
-                            "steps_failed": steps_failed,
-                            "total_steps": total_steps_attempted,
-                            "step_results": step_results,
-                            "success": False,
-                            "final_response": agent_response,
-                            "narration_template": agent_response,
-                            "output_values": output_values,
-                            "output_value_types": output_value_types,
-                            "output_value_sources": output_value_sources,
-                            "template_values": template_values,
-                            "response_segments": [{"kind": "text", "text": agent_response}],
-                            "agent_b_final_raw": agent_response,
-                            "missing_segments": False,
-                            "error": str(exec_error)
-                        }
                     
                     snapshot_meta = self._build_output_snapshot(exec_result)
                     parsed_payload_for_memory: Optional[Any] = exec_result.get("events")
@@ -1394,27 +1350,22 @@ Explain the failure to the user, call out the tool/args involved, and suggest ho
                        "content": tool_content
                     })
             
+        except OrchestratorProcessError:
+            raise
         except Exception as e:
-            # CRASH LANDING: Capture partial progress
-            # If we don't catch here, the exception bubbles up, rolling back the DB transaction
-            # and erasing all traces of what Agent B actually did.
-            return {
-                "steps_completed": steps_completed,
-                "steps_failed": steps_failed + 1,
-                "total_steps": total_steps_attempted + 1,
-                "step_results": step_results,
-                "success": False,
-                "final_response": f"Agent B crashed: {str(e)}",
-                "narration_template": f"Agent B crashed: {str(e)}",
-                "output_values": output_values,
-                "output_value_types": output_value_types,
-                "output_value_sources": output_value_sources,
-                "template_values": template_values,
-                "response_segments": [{"kind": "text", "text": f"Agent B crashed: {str(e)}"}],
-                "agent_b_final_raw": str(e),
-                "missing_segments": False,
-                "error": str(e)
-            }
+            raise OrchestratorProcessError(
+                "Agent B loop crashed",
+                process="agent_b_loop",
+                stage="execution",
+                facts={
+                    "steps_completed": steps_completed,
+                    "steps_failed": steps_failed,
+                    "total_steps_attempted": total_steps_attempted,
+                    "error": str(e),
+                    "traceback": traceback.format_exc()
+                },
+                root_error=e
+            )
 
         # Mark any remaining TODOs as completed if execution was successful
         if steps_failed == 0 and todos:
@@ -1642,6 +1593,7 @@ Explain the failure to the user, call out the tool/args involved, and suggest ho
             tools=None,
             tool_choice=None,
             cycle_id=cycle_id,
+            session_id=self.session_id,
             temperature=self.config.agent_b_temperature
         )
 
@@ -1753,38 +1705,6 @@ Explain the failure to the user, call out the tool/args involved, and suggest ho
                 if content:
                     parts.append(str(content))
         return "\n".join([p for p in parts if p])
-
-    def _build_failure_snapshot(
-        self,
-        *,
-        cycle_id: str,
-        query: str,
-        route_value: str,
-        failure_context: Dict[str, Any],
-        result: Optional[OrchestratorResult]
-    ) -> Tuple[Dict[str, Any], Optional[str], Optional[Dict[str, Any]], Optional[List[Dict[str, Any]]]]:
-        agent_response = getattr(result, "agent_response", None) if result else None
-        execution_result = getattr(result, "execution_result", None) if result else None
-        response_segments = getattr(result, "response_segments", None) if result else None
-        snapshot = {
-            "cycle_id": cycle_id,
-            "query": query,
-            "route": route_value,
-            "stage": failure_context.get("stage") if failure_context else None,
-            "error_type": failure_context.get("error_type") if failure_context else None,
-            "error_message": failure_context.get("error_message") if failure_context else None,
-            "payload": failure_context.get("payload") if failure_context else None,
-            "agent_response": agent_response,
-            "response_segments": response_segments,
-            "execution_result": execution_result,
-            "system_state": self.system_state
-        }
-        return (
-            self._json_safe(snapshot),
-            agent_response,
-            self._json_safe(execution_result) if execution_result is not None else None,
-            self._json_safe(response_segments) if response_segments is not None else None
-        )
 
     def _json_safe(self, data: Any) -> Any:
         """Best-effort JSON-safe conversion, falling back to repr for unknown types."""
@@ -2072,26 +1992,21 @@ Explain the failure to the user, call out the tool/args involved, and suggest ho
     ) -> None:
         """Persist an unsuccessful cycle snapshot for debugging."""
         try:
-            snapshot, agent_response, execution_result, response_segments = self._build_failure_snapshot(
-                cycle_id=cycle_id,
-                query=query,
-                route_value=route_value,
-                failure_context=failure_context,
-                result=result
-            )
             self.memory.record_cycle_failure(
                 cycle_id=cycle_id,
                 session_id=self.session_id,
                 query_text=query,
+                process=failure_context.get("process"),
                 route=route_value,
                 stage=failure_context.get("stage"),
                 error_type=failure_context.get("error_type"),
+                error_code=failure_context.get("error_code"),
                 error_message=failure_context.get("error_message") or "Cycle failed",
-                payload=failure_context.get("payload"),
-                agent_response=agent_response,
-                execution_result=execution_result,
-                response_segments=response_segments,
-                context=snapshot
+                facts=self._json_safe({
+                    "context": failure_context.get("facts"),
+                    "execution_result": getattr(result, "execution_result", None),
+                    "agent_response": getattr(result, "agent_response", None)
+                })
             )
         except Exception:
             # Never let failure logging explode user experience

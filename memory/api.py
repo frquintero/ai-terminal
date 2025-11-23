@@ -334,69 +334,55 @@ class Memory:
         cycle_id: str,
         session_id: str,
         query_text: str,
+        process: Optional[str],
         route: Optional[str],
         stage: Optional[str],
         error_type: Optional[str],
+        error_code: Optional[str],
         error_message: str,
-        payload: Optional[Dict[str, Any]] = None,
-        agent_response: Optional[str] = None,
-        execution_result: Optional[Dict[str, Any]] = None,
-        response_segments: Optional[List[Dict[str, Any]]] = None,
-        context: Optional[Dict[str, Any]] = None
+        facts: Optional[Dict[str, Any]] = None
     ):
         """
         Persist failure snapshot outside the success-only transaction tables.
         """
-        payload_json = json.dumps(payload) if payload is not None else None
-        execution_result_json = json.dumps(execution_result) if execution_result is not None else None
-        response_segments_json = json.dumps(response_segments) if response_segments is not None else None
-        context_json = json.dumps(context) if context is not None else None
-        agent_response_preview = (agent_response or None)
-        if agent_response_preview:
-            agent_response_preview = agent_response_preview[:1000]
+        facts_json = json.dumps(facts) if facts is not None else None
         self.conn.execute(
             """
             INSERT INTO cycle_failures (
                 cycle_id,
                 session_id,
                 query_text,
+                process,
                 route,
                 stage,
                 error_type,
+                error_code,
                 error_message,
-                payload_json,
-                agent_response_preview,
-                execution_result_json,
-                response_segments_json,
-                context_json
+                facts_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(cycle_id) DO UPDATE SET
                 session_id=excluded.session_id,
                 query_text=excluded.query_text,
+                process=excluded.process,
                 route=excluded.route,
                 stage=excluded.stage,
                 error_type=excluded.error_type,
+                error_code=excluded.error_code,
                 error_message=excluded.error_message,
-                payload_json=excluded.payload_json,
-                agent_response_preview=excluded.agent_response_preview,
-                execution_result_json=excluded.execution_result_json,
-                response_segments_json=excluded.response_segments_json,
-                context_json=excluded.context_json
+                facts_json=excluded.facts_json
             """,
             (
                 cycle_id,
                 session_id,
                 query_text,
+                process,
                 route,
                 stage,
                 error_type,
+                error_code,
                 error_message,
-                payload_json,
-                agent_response_preview,
-                execution_result_json,
-                response_segments_json,
-                context_json
+                facts_json
             )
         )
         self._commit_or_defer()
@@ -407,13 +393,8 @@ class Memory:
         """
         cursor = self.conn.execute(
             """
-            SELECT cycle_id, session_id, query_text, route, stage,
-                   error_type, error_message, payload_json,
-                   agent_response_preview,
-                   execution_result_json,
-                   response_segments_json,
-                   context_json,
-                   created_at
+            SELECT cycle_id, session_id, query_text, process, route, stage,
+                   error_type, error_code, error_message, facts_json, created_at
             FROM cycle_failures
             WHERE cycle_id = ?
             """,
@@ -427,17 +408,110 @@ class Memory:
             "cycle_id": row[0],
             "session_id": row[1],
             "query_text": row[2],
-            "route": row[3],
-            "stage": row[4],
-            "error_type": row[5],
-            "error_message": row[6],
-            "payload": json.loads(row[7]) if row[7] else None,
-            "agent_response_preview": row[8],
-            "execution_result": json.loads(row[9]) if row[9] else None,
-            "response_segments": json.loads(row[10]) if row[10] else None,
-            "context": json.loads(row[11]) if row[11] else None,
-            "created_at": row[12]
+            "process": row[3],
+            "route": row[4],
+            "stage": row[5],
+            "error_type": row[6],
+            "error_code": row[7],
+            "error_message": row[8],
+            "facts": json.loads(row[9]) if row[9] else None,
+            "created_at": row[10]
         }
+
+    def record_llm_call_failure(
+        self,
+        *,
+        cycle_id: Optional[str],
+        session_id: Optional[str],
+        agent_role: Optional[str],
+        model_provider: Optional[str],
+        model_name: Optional[str],
+        parameters: Optional[Dict[str, Any]],
+        request_messages: Optional[List[Dict[str, Any]]],
+        response_payload: Optional[Dict[str, Any]],
+        error_message: str
+    ) -> None:
+        """Persist telemetry for failed LLM calls."""
+        parameters_json = json.dumps(parameters) if parameters is not None else None
+        request_json = json.dumps(request_messages) if request_messages is not None else None
+        response_json = json.dumps(response_payload) if response_payload is not None else None
+        self.conn.execute(
+            """
+            INSERT INTO llm_call_fails (
+                cycle_id,
+                session_id,
+                agent_role,
+                model_provider,
+                model_name,
+                parameters_json,
+                request_messages_json,
+                response_payload_json,
+                error_message
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                cycle_id,
+                session_id,
+                agent_role,
+                model_provider,
+                model_name,
+                parameters_json,
+                request_json,
+                response_json,
+                error_message
+            )
+        )
+        self._commit_or_defer()
+
+    def get_llm_call_failures(
+        self,
+        *,
+        cycle_id: Optional[str] = None,
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Return recent LLM call failures (optionally filtered by cycle)."""
+        if cycle_id:
+            cursor = self.conn.execute(
+                """
+                SELECT cycle_id, session_id, agent_role, model_provider, model_name,
+                       parameters_json, request_messages_json, response_payload_json,
+                       error_message, created_at
+                FROM llm_call_fails
+                WHERE cycle_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (cycle_id, limit)
+            )
+        else:
+            cursor = self.conn.execute(
+                """
+                SELECT cycle_id, session_id, agent_role, model_provider, model_name,
+                       parameters_json, request_messages_json, response_payload_json,
+                       error_message, created_at
+                FROM llm_call_fails
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,)
+            )
+
+        results: List[Dict[str, Any]] = []
+        for row in cursor.fetchall():
+            results.append({
+                "cycle_id": row[0],
+                "session_id": row[1],
+                "agent_role": row[2],
+                "model_provider": row[3],
+                "model_name": row[4],
+                "parameters": json.loads(row[5]) if row[5] else None,
+                "request_messages": json.loads(row[6]) if row[6] else None,
+                "response_payload": json.loads(row[7]) if row[7] else None,
+                "error_message": row[8],
+                "created_at": row[9]
+            })
+        return results
     
     def purge_all_data(
         self,

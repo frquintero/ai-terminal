@@ -145,6 +145,68 @@ def migrate_v5_to_v6(conn: sqlite3.Connection):
     conn.commit()
 
 
+def migrate_v6_to_v7(conn: sqlite3.Connection):
+    """
+    Rebuild cycle_failures to remove fallback narratives and store factual telemetry only.
+    Purges existing records by recreating the table with the new schema.
+    """
+    conn.execute("DROP INDEX IF EXISTS idx_cycle_failures_created_at")
+    conn.execute("DROP TABLE IF EXISTS cycle_failures")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cycle_failures (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cycle_id TEXT NOT NULL UNIQUE,
+            session_id TEXT,
+            query_text TEXT,
+            process TEXT,
+            route TEXT,
+            stage TEXT,
+            error_type TEXT,
+            error_code TEXT,
+            error_message TEXT NOT NULL,
+            facts_json TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cycle_failures_created_at
+        ON cycle_failures(created_at DESC)
+        """
+    )
+    conn.commit()
+
+
+def migrate_v7_to_v8(conn: sqlite3.Connection):
+    """Add llm_call_fails table for detailed LLM failure telemetry."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS llm_call_fails (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cycle_id TEXT,
+            session_id TEXT,
+            agent_role TEXT,
+            model_provider TEXT,
+            model_name TEXT,
+            parameters_json TEXT,
+            request_messages_json TEXT,
+            response_payload_json TEXT,
+            error_message TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_llm_call_fails_cycle
+        ON llm_call_fails(cycle_id)
+        """
+    )
+    conn.commit()
+
+
 # Registry of all migrations (version, description, migration function)
 MIGRATIONS: List[Migration] = [
     (2, "Expand step_outputs for structured outputs", migrate_v1_to_v2),
@@ -152,6 +214,8 @@ MIGRATIONS: List[Migration] = [
     (4, "Swap route_metrics for route-less cycle_metrics", migrate_v3_to_v4),
     (5, "Add cycle_failures table for unsuccessful cycles", migrate_v4_to_v5),
     (6, "Enrich cycle_failures with debug snapshots", migrate_v5_to_v6),
+    (7, "Rebuild cycle_failures for telemetry-only logging", migrate_v6_to_v7),
+    (8, "Add llm_call_fails telemetry table", migrate_v7_to_v8),
 ]
 
 

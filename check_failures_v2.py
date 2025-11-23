@@ -10,27 +10,35 @@ try:
     cycle_id_prefix = "040a8866"
     
     print(f"Checking cycle_failures for {cycle_id_prefix}...")
-    cursor.execute("SELECT * FROM cycle_failures WHERE cycle_id LIKE ?", (f"{cycle_id_prefix}%",))
+    cursor.execute("""
+        SELECT cycle_id, query_text, process, stage, error_type, error_code,
+               error_message, facts_json, created_at
+        FROM cycle_failures
+        WHERE cycle_id LIKE ?
+    """, (f"{cycle_id_prefix}%",))
     rows = cursor.fetchall()
     
     if rows:
         for row in rows:
             print("\n--- Failure Record Corrected ---")
-            print(f"Cycle ID: {row[1]}")
-            print(f"Query: {row[3]}")
-            print(f"Stage: {row[5]}")
-            print(f"Error Type: {row[6]}")
-            print(f"Error Message: {row[7]}")
+            print(f"Cycle ID: {row[0]}")
+            print(f"Query: {row[1]}")
+            print(f"Process: {row[2]}")
+            print(f"Stage: {row[3]}")
+            print(f"Error Type: {row[4]}")
+            print(f"Error Code: {row[5]}")
+            print(f"Error Message: {row[6]}")
+            print(f"Created At: {row[8]}")
             
-            print("\n--- Execution Result (row[10]) ---")
-            exec_res_json = row[10]
-            if exec_res_json:
+            print("\n--- Facts ---")
+            facts_json = row[7]
+            if facts_json:
                 try:
-                    exec_res = json.loads(exec_res_json)
-                    print(json.dumps(exec_res, indent=2))
+                    facts = json.loads(facts_json)
+                    print(json.dumps(facts, indent=2))
                 except Exception as e:
                     print(f"JSON parse error: {e}")
-                    print(exec_res_json[:500]) # print preview
+                    print(facts_json[:500]) # print preview
             else:
                 print("None")
 

@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 from config import Config
 from memory.api import Memory
-from orchestrator.orchestrator import Orchestrator, OrchestratorResult
+from orchestrator.orchestrator import Orchestrator, OrchestratorResult, OrchestratorProcessError
 from orchestrator.plan_validator import PlanValidator
 from orchestrator.prompts import get_agent_a_system_prompt
 from orchestrator.routes import Route
@@ -214,15 +214,16 @@ class TestOrchestratorIntegration(unittest.TestCase):
 
     def test_exception_logs_failure_snapshot(self):
         """Failures triggered by exceptions are persisted to cycle_failures."""
-        with patch.object(self.orchestrator, "_run_agent_a_cycle", side_effect=RuntimeError("boom")), \
-             patch.object(self.orchestrator, "_call_agent_a_direct_response", return_value="fallback"):
+        with patch.object(self.orchestrator, "_run_agent_a_cycle", side_effect=RuntimeError("boom")):
             result = self.orchestrator.handle_query("boom")
 
         self.assertIsNotNone(result.error)
+        self.assertIn("Cycle", result.agent_response)
         failure = self.memory.get_cycle_failure(result.cycle_id)
         self.assertIsNotNone(failure)
         self.assertEqual(failure["error_type"], "RuntimeError")
         self.assertEqual(failure["stage"], "orchestrator")
+        self.assertEqual(failure["process"], "orchestrator")
 
     def test_unsuccessful_execution_logs_failure_snapshot(self):
         """Planner cycles that finish with success=False are logged."""
@@ -242,7 +243,7 @@ class TestOrchestratorIntegration(unittest.TestCase):
         self.assertIsNotNone(failure)
         self.assertEqual(failure["stage"], "execution")
         self.assertEqual(failure["error_type"], "CycleFailure")
-        self.assertIn("tool failed", failure["payload"]["execution_result"]["error"])
+        self.assertIn("tool failed", failure["facts"]["execution_result"]["error"])
 
     @patch("orchestrator.orchestrator.LLMClient")
     def test_agent_b_loop_returns_structured_outputs(self, mock_llm_client):
@@ -685,8 +686,8 @@ class TestAgentBFallbacks(unittest.TestCase):
         os.unlink(self.temp_db.name)
 
     @patch("orchestrator.orchestrator.LLMClient")
-    def test_tool_executor_failure_routed_to_agent_a(self, mock_llm_client):
-        """ToolExecutor exceptions should be handed to Agent A for user-facing explanation."""
+    def test_tool_executor_failure_raises_process_error(self, mock_llm_client):
+        """ToolExecutor exceptions bubble as OrchestratorProcessError for logging."""
         tool_call = SimpleNamespace(
             id="call-err",
             function=SimpleNamespace(
@@ -699,18 +700,16 @@ class TestAgentBFallbacks(unittest.TestCase):
             {"error": None, "message": SimpleNamespace(content="```json\n{\"segments\":[{\"kind\":\"text\",\"text\":\"should not reach\"}]}\n```", tool_calls=[])}
         ]
 
-        with patch.object(self.orchestrator, "_call_agent_a_direct_response", return_value="Tool executor failed") as mock_agent_a, \
-             patch.object(self.orchestrator.tool_executor, "execute", side_effect=RuntimeError("bad args")):
-            summary = self.orchestrator._run_agent_b_tool_loop(
-                cycle_id="c-fail",
-                query="list files",
-                plan={"intent": "list files", "success_criteria": []}
-            )
+        with patch.object(self.orchestrator.tool_executor, "execute", side_effect=RuntimeError("bad args")):
+            with self.assertRaises(OrchestratorProcessError) as ctx:
+                self.orchestrator._run_agent_b_tool_loop(
+                    cycle_id="c-fail",
+                    query="list files",
+                    plan={"intent": "list files", "success_criteria": []}
+                )
 
-        mock_agent_a.assert_called_once()
-        self.assertFalse(summary["success"])
-        self.assertEqual(summary["final_response"], "Tool executor failed")
-        self.assertIn("Tool executor failed", summary["response_segments"][0]["text"])
+        self.assertEqual(ctx.exception.process, "agent_b_tool_executor")
+        self.assertIn("bad args", ctx.exception.facts.get("error"))
 
     @patch("orchestrator.orchestrator.LLMClient")
     def test_informative_exit_codes_not_treated_as_fatal(self, mock_llm_client):
@@ -793,12 +792,10 @@ class TestAgentBFallbacks(unittest.TestCase):
             "output_value_types": {},
             "output_value_sources": {},
             "template_values": {}
-        }) as mock_execute, \
-             patch.object(self.orchestrator, "_call_agent_a_direct_response") as mock_agent_a_fallback:
+        }) as mock_execute:
             result = self.orchestrator._run_agent_a_cycle(cycle_id=cycle_id, query="list files")
 
         mock_execute.assert_called_once()
-        mock_agent_a_fallback.assert_not_called()
         self.assertEqual(result.agent_response, "Agent B failed")
 
 
