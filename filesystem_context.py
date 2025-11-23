@@ -26,8 +26,8 @@ class FilesystemContextStore:
 
     def __init__(
         self,
-        db_path: Optional[str | Path] = None,
-        jsonl_dir: Optional[str | Path] = None,
+        db_path: Union[str, Path] = None,
+        jsonl_dir: Union[str, Path] = None,
     ):
         default_db = Path(os.getenv("FS_CONTEXT_DB_PATH", "logs/session_logs.db"))
         default_jsonl = Path(os.getenv("FS_CONTEXT_JSONL_DIR", "logs/fs_context"))
@@ -80,7 +80,7 @@ class FilesystemContextStore:
             self._conn.executescript(schema)
             self._conn.commit()
 
-    def record_snapshot(self, session_id: str | None, payload: Dict[str, Any]) -> None:
+    def record_snapshot(self, session_id: Optional[str], payload: Dict[str, Any]) -> None:
         """Persist a filesystem snapshot for the active session."""
         if not session_id:
             return
@@ -109,7 +109,7 @@ class FilesystemContextStore:
             self._conn.commit()
         self._append_jsonl(session_id, {"type": "snapshot", **payload, "created_at": created_at})
 
-    def record_file_event(self, session_id: str | None, event: Dict[str, Any]) -> None:
+    def record_file_event(self, session_id: Optional[str], event: Dict[str, Any]) -> None:
         """Persist a file read/write event."""
         if not session_id:
             return
@@ -146,7 +146,7 @@ class FilesystemContextStore:
         enriched["type"] = "file_event"
         self._append_jsonl(session_id, enriched)
 
-    def get_latest_snapshot(self, session_id: str | None) -> Optional[Dict[str, Any]]:
+    def get_latest_snapshot(self, session_id: Optional[str]) -> Optional[Dict[str, Any]]:
         """Return the most recent snapshot for the given session."""
         if not session_id:
             return None
@@ -175,7 +175,7 @@ class FilesystemContextStore:
             "metadata": metadata,
         }
 
-    def get_recent_events(self, session_id: str | None, limit: int = 20) -> List[Dict[str, Any]]:
+    def get_recent_events(self, session_id: Optional[str], limit: int = 20) -> List[Dict[str, Any]]:
         """Return recent file events for the session."""
         if not session_id:
             return []

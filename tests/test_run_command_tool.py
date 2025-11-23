@@ -12,7 +12,7 @@ class StubShell:
         self.commands = []
         self.last_exit_code = 0
 
-    def run_command(self, command: str, reset_dir: str | None = None) -> str:
+    def run_command(self, command: str, reset_dir: Optional[str] = None) -> str:
         """Record command invocations instead of executing them."""
         self.commands.append({"command": command, "reset_dir": reset_dir})
         return "ok"

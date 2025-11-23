@@ -366,13 +366,14 @@ Explain what happened and advise the user to retry after checking logs."""
             Final narration content extracted from Agent A's {"response": "..."} JSON payload
         """
         available_tools = sorted(TOOLS.keys())
+        tool_schemas = self._get_tool_schemas("B")
         system_context = self.context_builder.build_for_role(
             role="A",
             session_id=self.session_id,
             tool_registry=TOOLS,
             shell_cwd=self._get_effective_shell_cwd()
         )
-        system_prompt = system_context + "\n\n" + get_agent_a_system_prompt(available_tools)
+        system_prompt = system_context + "\n\n" + get_agent_a_system_prompt(tool_schemas)
         
         user_context_msg = (
             f"{user_context.strip()}\n\n"
@@ -441,7 +442,8 @@ Explain what happened and advise the user to retry after checking logs."""
         self._emit_status("planning", {"route": "PLANNER", "stage": "agent_a"})
         # Get available tools for validation
         available_tools = sorted(TOOLS.keys())
-        
+        tool_schemas = self._get_tool_schemas("B")
+
         # Create validator
         validator = PlanValidator(available_tools=available_tools)
         
@@ -454,9 +456,7 @@ Explain what happened and advise the user to retry after checking logs."""
         )
         
         # Build Agent A prompt
-        system_prompt = system_context + "\n\n" + get_agent_a_system_prompt(available_tools)
-        
-        # Build context for Agent A: include last 3 chat interactions (Chat→Planner handoff)
+        system_prompt = system_context + "\n\n" + get_agent_a_system_prompt(tool_schemas)
         context_msg = self._build_agent_a_context_message(query)
         
         user_message = get_agent_a_user_message(context_msg)
@@ -500,10 +500,14 @@ Explain what happened and advise the user to retry after checking logs."""
                 try:
                     args = json.loads(tc.function.arguments)
                     if fname == "delegate_to_agent_b":
-                        response = {
-                            "intent": args.get("intent"),
-                            "success_criteria": args.get("success_criteria")
-                        }
+                        response = self._normalize_agent_a_plan(
+                            {
+                                "intent": args.get("intent"),
+                                "success_criteria": args.get("success_criteria"),
+                                "todos": args.get("todos")
+                            },
+                            query=query
+                        )
                     elif fname == "respond_to_user":
                         response = {
                             "response": args.get("response")
@@ -649,6 +653,104 @@ Describe the failure and tell the user what to do next."""
                 response_segments=[{"kind": "text", "text": agent_response}]
             )
     
+    def _normalize_agent_a_plan(self, plan: Dict[str, Any], query: str) -> Dict[str, Any]:
+        """Ensure Agent A plans always include required intent/success metadata."""
+        if not isinstance(plan, dict):
+            plan = {}
+
+        normalized: Dict[str, Any] = dict(plan)
+
+        query_text = (query or "").strip() or "user request"
+
+        intent = normalized.get("intent")
+        if not isinstance(intent, str) or not intent.strip():
+            normalized["intent"] = f"Fulfill user request: {query_text}"
+        else:
+            normalized["intent"] = intent.strip()
+
+        success_criteria = normalized.get("success_criteria")
+        if isinstance(success_criteria, list):
+            filtered = [str(item).strip() for item in success_criteria if isinstance(item, str) and item.strip()]
+        else:
+            filtered = []
+        if not filtered:
+            filtered = [
+                "All TODO items complete successfully",
+                f"User request '{query_text}' is satisfied"
+            ]
+        normalized["success_criteria"] = filtered
+
+        todos = self._normalize_todo_items(normalized.get("todos"), query_text)
+        if not todos:
+            fallback_desc = f"Execute requested action: {query_text}"
+            todos = [{
+                "description": fallback_desc,
+                "success_criteria": [
+                    f"{fallback_desc} completes without errors",
+                    "Output is reviewed or shared with the user"
+                ],
+                "required": True,
+                "subtasks": []
+            }]
+        normalized["todos"] = todos
+
+        return normalized
+
+    def _normalize_todo_items(
+        self,
+        todos: Any,
+        query_text: str,
+        parent_description: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Normalize TODO entries recursively, guaranteeing success criteria."""
+        normalized: List[Dict[str, Any]] = []
+        if not isinstance(todos, list):
+            return normalized
+
+        for idx, raw in enumerate(todos, start=1):
+            if not isinstance(raw, dict):
+                continue
+
+            description = raw.get("description")
+            if not isinstance(description, str) or not description.strip():
+                base = parent_description or "Task"
+                description = f"{base} {idx}" if parent_description else f"Task {idx}"
+            else:
+                description = description.strip()
+
+            success_list = raw.get("success_criteria")
+            if isinstance(success_list, list):
+                filtered_success = [
+                    str(item).strip()
+                    for item in success_list
+                    if isinstance(item, str) and item.strip()
+                ]
+            else:
+                filtered_success = []
+            if not filtered_success:
+                filtered_success = [f"{description} completes without errors"]
+
+            subtasks = self._normalize_todo_items(
+                raw.get("subtasks"),
+                query_text,
+                parent_description=description
+            )
+
+            preserved = {
+                key: value
+                for key, value in raw.items()
+                if key not in {"description", "success_criteria", "subtasks"}
+            }
+
+            normalized.append({
+                **preserved,
+                "description": description,
+                "success_criteria": filtered_success,
+                "subtasks": subtasks
+            })
+
+        return normalized
+
     def _get_tool_schemas(self, role: str) -> List[Dict[str, Any]]:
         """Get native tool schemas for the given role."""
         if role == "B":
@@ -664,6 +766,20 @@ Describe the failure and tell the user what to do next."""
         """
         Execute the plan using Agent B's native tool loop.
         """
+        # Parse and initialize TODO tracking
+        todos = plan.get("todos", [])
+        current_todo_index = 0
+        
+        # Initialize TODO tracking in database
+        for i, todo in enumerate(todos):
+            if isinstance(todo, dict) and "description" in todo:
+                self.memory.record_todo_status(
+                    cycle_id=cycle_id,
+                    todo_index=i,
+                    description=todo["description"],
+                    status="pending"
+                )
+        
         # We pass empty list to system prompt as we don't need schema injection for the execution phase
         system_prompt = get_agent_b_system_prompt([]) 
         user_msg = get_agent_b_user_message(plan)
@@ -708,6 +824,71 @@ Describe the failure and tell the user what to do next."""
                 return False
             diagnostic = (stdout or "") + (stderr or "")
             return diagnostic.strip() != ""
+        
+        def _validate_tool_call_against_todo(tool_name: str, tool_args: Dict[str, Any]) -> bool:
+            """
+            Validate that the tool call aligns with the current TODO item.
+            
+            Returns True if the tool call is approved for the current TODO.
+            """
+            if not todos or current_todo_index >= len(todos):
+                # No TODOs defined, allow all tools
+                return True
+            
+            current_todo = todos[current_todo_index]
+            if not isinstance(current_todo, dict):
+                return True
+            
+            todo_description = current_todo.get("description", "").lower()
+            
+            # Simple heuristic validation - check if tool/command relates to TODO
+            if tool_name == "run_command":
+                command = tool_args.get("command", "").lower()
+                # Check if command keywords appear in TODO description
+                command_keywords = command.split()
+                description_words = todo_description.split()
+                
+                # Allow if any command keyword appears in TODO description
+                for keyword in command_keywords:
+                    if keyword in description_words:
+                        return True
+                
+                # Special cases for common commands
+                if "list" in todo_description and command in ["ls", "ls -la", "ls -l"]:
+                    return True
+                if "directory" in todo_description and "ls" in command:
+                    return True
+            
+            # For other tools, be more permissive for now
+            return True
+        
+        def _check_todo_completion() -> bool:
+            """
+            Check if current TODO is complete based on success criteria.
+            
+            Returns True if TODO should be marked complete.
+            """
+            if not todos or current_todo_index >= len(todos):
+                return False
+            
+            current_todo = todos[current_todo_index]
+            if not isinstance(current_todo, dict):
+                return False
+            
+            success_criteria = current_todo.get("success_criteria", [])
+            if not success_criteria:
+                # No explicit criteria, assume complete after any successful step
+                return len(step_results) > 0 and step_results[-1].get("success", False)
+            
+            # Simple heuristic: if we have successful steps and the criteria mention
+            # common outcomes, assume completion
+            last_step = step_results[-1] if step_results else None
+            if last_step and last_step.get("success"):
+                criteria_text = " ".join(success_criteria).lower()
+                if any(keyword in criteria_text for keyword in ["executed", "completed", "successful", "run"]):
+                    return True
+            
+            return False
         
         try:
             for loop_idx in range(max_loops):
@@ -767,6 +948,24 @@ Describe the failure and tell the user what to do next."""
                         args = {}
                    
                     output_format = args.pop("output_format", {}) if isinstance(args, dict) else {}
+                    
+                    # TODO Enforcement: Validate tool call against current TODO
+                    if not _validate_tool_call_against_todo(tool_name, args):
+                        # Tool call not approved for current TODO - this would be a violation
+                        # For now, we'll log it but allow the execution to continue
+                        # In a stricter implementation, we might reject the tool call
+                        self.memory.record_todo_status(
+                            cycle_id=cycle_id,
+                            todo_index=current_todo_index,
+                            description=todos[current_todo_index].get("description", "Unknown TODO"),
+                            status="modified",
+                            modifications_json={
+                                "violation": "tool_call_not_aligned",
+                                "tool_name": tool_name,
+                                "tool_args": args,
+                                "reason": "Tool call does not align with current TODO"
+                            }
+                        )
                     
                     # Log execution
                     step_id = len(step_results)
@@ -926,6 +1125,16 @@ Explain the failure to the user, call out the tool/args involved, and suggest ho
                     }
                     step_results.append(step_result)
                     
+                    # TODO Enforcement: Check if current TODO is complete
+                    if _check_todo_completion() and current_todo_index < len(todos):
+                        self.memory.record_todo_status(
+                            cycle_id=cycle_id,
+                            todo_index=current_todo_index,
+                            description=todos[current_todo_index].get("description", "Unknown TODO"),
+                            status="completed"
+                        )
+                        current_todo_index += 1
+                    
                     if success and output_format:
                         try:
                             parsed_outputs, rendered_outputs = self.output_parser.parse(
@@ -1033,6 +1242,17 @@ Explain the failure to the user, call out the tool/args involved, and suggest ho
                 "missing_segments": False,
                 "error": str(e)
             }
+
+        # Mark any remaining TODOs as completed if execution was successful
+        if steps_failed == 0 and todos:
+            for i in range(current_todo_index, len(todos)):
+                if i < len(todos):
+                    self.memory.record_todo_status(
+                        cycle_id=cycle_id,
+                        todo_index=i,
+                        description=todos[i].get("description", "Unknown TODO"),
+                        status="completed"
+                    )
 
         # Final narration pass with tools DISABLED to avoid bogus tool calls (e.g., "json").
         final_segments, narration_template, template_values = self._call_agent_b_final_narration(

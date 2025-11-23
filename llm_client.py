@@ -12,6 +12,7 @@ import uuid
 import re
 from typing import Any, Dict, List, Optional
 
+import httpx
 import openai
 
 from config import Config
@@ -53,7 +54,8 @@ class LLMClient:
         
         self.client = openai.OpenAI(
             base_url=getattr(config, "base_url", None),
-            api_key=getattr(config, "api_key", None)
+            api_key=getattr(config, "api_key", None),
+            http_client=httpx.Client(trust_env=False)
         )
     
     def call(

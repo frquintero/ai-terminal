@@ -13,7 +13,7 @@ import atexit
 import os
 import uuid
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from rich.live import Live
 
 class MiniAgent:
@@ -273,7 +273,7 @@ Execution style:
             },
         )
 
-    def _record_tool_call_event(self, tool_name: str, args: dict, tool_call_id: str | None):
+    def _record_tool_call_event(self, tool_name: str, args: dict, tool_call_id: Optional[str]):
         args_preview = self._truncate_preview(json.dumps(args, ensure_ascii=False), 400)
         payload = {
             "tool": tool_name,
@@ -285,7 +285,7 @@ Execution style:
     def _record_tool_result_event(
         self,
         tool_name: str,
-        tool_call_id: str | None,
+        tool_call_id: Optional[str],
         success: bool,
         result_str: str,
         exit_code: Optional[int] = None,
@@ -380,7 +380,7 @@ Execution style:
         return {"role": "system", "content": "\n".join(content_lines)}
 
     @staticmethod
-    def _extract_json_object(text: str) -> str | None:
+    def _extract_json_object(text: str) -> Optional[str]:
         """Extract the first balanced JSON object from text (supports fences)."""
         if not text:
             return None
@@ -404,7 +404,7 @@ Execution style:
         return None
 
     @staticmethod
-    def _parse_react_directives(content: str | None) -> dict:
+    def _parse_react_directives(content: Optional[str]) -> dict:
         """Parse Thought/Action/Final Answer directives from assistant content."""
         parsed = {"thought": None, "action": None, "final_answer": None}
         if not content:
@@ -439,13 +439,13 @@ Execution style:
         return parsed
 
     @classmethod
-    def _render_user_facing_content(cls, content: str | None) -> str:
+    def _render_user_facing_content(cls, content: Optional[str]) -> str:
         """Redact Action payloads while preserving Thought/Final Answer for UI display."""
         text = (content or "").strip()
         if not text:
             return ""
         parsed = cls._parse_react_directives(text)
-        sections: list[str] = []
+        sections: List[str] = []
         thought = parsed.get("thought")
         final_answer = parsed.get("final_answer")
         if thought:
@@ -461,7 +461,7 @@ Execution style:
     def _strip_action_blocks(text: str) -> str:
         """Remove Action JSON blocks from assistant text."""
         lines = text.splitlines()
-        cleaned_lines: list[str] = []
+        cleaned_lines: List[str] = []
         skipping = False
         fence_mode = False
         for line in lines:
@@ -489,8 +489,8 @@ Execution style:
         tool_name: str,
         result: str,
         success: bool,
-        exit_code: int | None,
-        error_msg: str | None
+        exit_code: Optional[int],
+        error_msg: Optional[str]
     ) -> str:
         """Format observation payload for ReAct loop history."""
         preview = result
@@ -525,9 +525,9 @@ Execution style:
 
     @staticmethod
     def _build_plan_reminder_text(
-        thought: str | None,
-        executed_actions: list[str]
-    ) -> str | None:
+        thought: Optional[str],
+        executed_actions: List[str]
+    ) -> Optional[str]:
         """Create reminder text tying next actions to the previous Thought."""
         if not thought:
             return None
@@ -541,8 +541,8 @@ Execution style:
 
     def _append_plan_reminder(
         self,
-        thought: str | None,
-        executed_actions: list[str]
+        thought: Optional[str],
+        executed_actions: List[str]
     ):
         reminder = self._build_plan_reminder_text(thought, executed_actions)
         if reminder:
@@ -554,8 +554,8 @@ Execution style:
         Returns metadata describing assistant/tool relationships without mutating content.
         """
         normalized_messages = []
-        assistant_tool_calls: list[dict[str, Any]] = []
-        tool_messages: list[dict[str, Any]] = []
+        assistant_tool_calls: List[Dict[str, Any]] = []
+        tool_messages: List[Dict[str, Any]] = []
         
         for msg in self.message_history:
             if not isinstance(msg, dict):
@@ -587,7 +587,7 @@ Execution style:
             "tool_messages": tool_messages
         }
 
-    def _mark_pending_tool_history(self, tool_call_ids: list[str]):
+    def _mark_pending_tool_history(self, tool_call_ids: List[str]):
         if not tool_call_ids:
             return
         self._pending_tool_history = {
@@ -711,9 +711,9 @@ Execution style:
             self._log("TRACE_WARNING", f"Failed to log OpenAI response summary {trace_id}: {e}")
 
     @staticmethod
-    def _normalize_tool_calls(tool_calls: list) -> list[dict]:
+    def _normalize_tool_calls(tool_calls: list) -> List[Dict[str, Any]]:
         """Normalize tool call payloads into plain dicts with stable IDs."""
-        normalized: list[dict] = []
+        normalized: List[Dict[str, Any]] = []
         for tc in tool_calls:
             fn = getattr(tc, "function", None)
             name = None
@@ -779,7 +779,7 @@ Execution style:
         
         return out
     
-    def _truncate_tool_outputs(self, messages: list[dict]):
+    def _truncate_tool_outputs(self, messages: List[Dict[str, Any]]):
         for msg in messages:
             if not isinstance(msg, dict):
                 continue
@@ -819,7 +819,7 @@ Execution style:
         max_other = max(self.MAX_HISTORY_MESSAGES - 1, 0)
 
         if max_other <= 0:
-            recent: list[dict] = []
+            recent: List[Dict[str, Any]] = []
         else:
             recent = messages[-max_other:] if len(messages) > max_other else messages
             
@@ -948,7 +948,7 @@ Execution style:
                 if len(normalized_tool_calls) > 1 or step_count > 0:
                     ui.step_indicator(step_count + 1, max_steps, "Processing tools")
                 
-                executed_actions: list[str] = []
+                executed_actions: List[str] = []
                 for tool_call in normalized_tool_calls:
                     tool_name = (tool_call.get("function") or {}).get("name")
                     tool_call_id = tool_call.get("id")

@@ -40,7 +40,7 @@ class EventLog:
     def __init__(
         self,
         session_id: str,
-        base_dir: str | Path = "logs/events",
+        base_dir: Union[str, Path] = "logs/events",
         retention_days: int = 7,
     ):
         self.session_id = session_id

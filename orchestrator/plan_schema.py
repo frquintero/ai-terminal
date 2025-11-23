@@ -163,6 +163,23 @@ EXAMPLE_PLAN_SIMPLE = {
     ]
 }
 
+EXAMPLE_PLAN_MULTI_STEP = {
+    "intent": "List files and check disk usage",
+    "success_criteria": [
+        "File listing completes",
+        "Disk usage is reported"
+    ]
+}
+
+EXAMPLE_PLAN_INVALID_NO_STEPS = {
+    "intent": "",
+    "success_criteria": []
+}
+
+EXAMPLE_PLAN_INVALID_MISSING_FIELD = {
+    "intent": "Test missing field"
+}
+
 EXAMPLE_PLAN_INVALID_WRONG_TYPE = {
     "intent": 123,
     "success_criteria": "not-an-array"

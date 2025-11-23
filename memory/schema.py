@@ -12,7 +12,7 @@ from typing import Optional
 
 DEFAULT_DB_PATH = Path("logs/orchestrator.db")
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 CREATE_TABLES = """
 -- Schema version tracking
@@ -292,6 +292,21 @@ CREATE TABLE IF NOT EXISTS llm_metrics (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- TODO tracking for enforcement metrics
+CREATE TABLE IF NOT EXISTS todo_tracking (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle_id TEXT NOT NULL,
+    todo_index INTEGER NOT NULL,
+    description TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'in_progress', 'completed', 'modified', 'failed')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT,
+    modifications_json TEXT,
+    FOREIGN KEY (cycle_id) REFERENCES task_state(cycle_id),
+    UNIQUE(cycle_id, todo_index)
+);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_router_decisions_cycle_id ON router_decisions(cycle_id);
 CREATE INDEX IF NOT EXISTS idx_router_decisions_session_id ON router_decisions(session_id);
@@ -303,6 +318,8 @@ CREATE INDEX IF NOT EXISTS idx_chat_history_cycle_id ON chat_history(cycle_id);
 CREATE INDEX IF NOT EXISTS idx_llm_traces_cycle_id ON llm_traces(cycle_id);
 CREATE INDEX IF NOT EXISTS idx_intention_cache_tool ON intention_cache(tool_name);
 CREATE INDEX IF NOT EXISTS idx_intention_cache_success ON intention_cache(success_flag);
+CREATE INDEX IF NOT EXISTS idx_todo_tracking_cycle_id ON todo_tracking(cycle_id);
+CREATE INDEX IF NOT EXISTS idx_todo_tracking_status ON todo_tracking(status);
 """
 
 

@@ -38,7 +38,7 @@ class HistorySQLExecutor:
         " replace ",
     }
 
-    def __init__(self, db_path: Optional[str | Path] = None):
+    def __init__(self, db_path: Union[str, Path] = None):
         default_path = Path(os.getenv("HISTORY_DB_PATH", "logs/history/history.db"))
         self.db_path = Path(db_path) if db_path else default_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

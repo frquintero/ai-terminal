@@ -1327,30 +1327,76 @@ class Memory:
         
         return results
     
-    def _sanitize_fts5_query(self, query: str) -> str:
+    def record_todo_status(
+        self,
+        cycle_id: str,
+        todo_index: int,
+        description: str,
+        status: str,
+        modifications_json: Optional[Dict[str, Any]] = None
+    ):
         """
-        Sanitize user query for FTS5 MATCH syntax.
-        
-        Handles special characters that have meaning in FTS5:
-        - Wraps queries with special chars in double quotes
-        - Preserves explicit quotes/operators from user
+        Record or update TODO item status.
         
         Args:
-            query: Raw user search query
+            cycle_id: Cycle ID
+            todo_index: Index of TODO in the plan's todos array
+            description: TODO description
+            status: pending|in_progress|completed|modified|failed
+            modifications_json: JSON of modifications made (if status=modified)
+        """
+        modifications_str = json.dumps(modifications_json) if modifications_json else None
+        
+        self.conn.execute(
+            """
+            INSERT INTO todo_tracking 
+            (cycle_id, todo_index, description, status, modifications_json)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(cycle_id, todo_index) DO UPDATE SET
+                status = excluded.status,
+                modifications_json = excluded.modifications_json,
+                updated_at = CURRENT_TIMESTAMP,
+                completed_at = CASE 
+                    WHEN excluded.status IN ('completed', 'failed') 
+                    THEN CURRENT_TIMESTAMP 
+                    ELSE completed_at 
+                END
+            """,
+            (cycle_id, todo_index, description, status, modifications_str)
+        )
+        # Always commit TODO tracking immediately for persistence
+        self.conn.commit()
+    
+    def get_todo_status(self, cycle_id: str) -> List[Dict[str, Any]]:
+        """
+        Get all TODO items for a cycle.
         
         Returns:
-            Sanitized FTS5 query string
+            List of TODO items with status
         """
-        # If user already used quotes or boolean operators, trust them
-        if any(op in query for op in ['"', ' AND ', ' OR ', ' NOT ']):
-            return query
+        cursor = self.conn.execute(
+            """
+            SELECT id, cycle_id, todo_index, description, status, 
+                   created_at, updated_at, completed_at, modifications_json
+            FROM todo_tracking
+            WHERE cycle_id = ?
+            ORDER BY todo_index
+            """,
+            (cycle_id,)
+        )
         
-        # If query contains special FTS5 chars, wrap in quotes
-        special_chars = ['.', ':', '(', ')', '*', '^']
-        if any(char in query for char in special_chars):
-            # Escape any internal quotes first
-            escaped = query.replace('"', '""')
-            return f'"{escaped}"'
+        results = []
+        for row in cursor.fetchall():
+            results.append({
+                "id": row[0],
+                "cycle_id": row[1],
+                "todo_index": row[2],
+                "description": row[3],
+                "status": row[4],
+                "created_at": row[5],
+                "updated_at": row[6],
+                "completed_at": row[7],
+                "modifications": json.loads(row[8]) if row[8] else None
+            })
         
-        # Otherwise return as-is (simple term search)
-        return query
+        return results

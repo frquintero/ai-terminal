@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 from datetime import datetime, timezone
+from typing import Optional
 
 
 class FakeShellIntegration:
@@ -10,7 +11,7 @@ class FakeShellIntegration:
     Used in tests to avoid exhausting PTY devices while keeping behavior realistic.
     """
 
-    def __init__(self, working_dir: str | None = None):
+    def __init__(self, working_dir: Optional[str] = None):
         self.current_dir = working_dir or os.getcwd()
         self.isolation_requested = False
         self.isolation_enabled = False
@@ -22,7 +23,7 @@ class FakeShellIntegration:
         self.last_command_normalized_output = ""
         self.last_command_output_empty = False
 
-    def run_command(self, command: str, timeout: int = 60, reset_dir: str | None = None) -> str:
+    def run_command(self, command: str, timeout: int = 60, reset_dir: Optional[str] = None) -> str:
         """
         Execute the provided shell command using the system bash binary.
         Mirrors ShellIntegration.run_command by resetting cwd and recording exit codes.
