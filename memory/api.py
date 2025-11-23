@@ -1364,8 +1364,8 @@ class Memory:
             """,
             (cycle_id, todo_index, description, status, modifications_str)
         )
-        # Always commit TODO tracking immediately for persistence
-        self.conn.commit()
+        # Defer commit to allow cycle-level rollback
+        self._commit_or_defer()
     
     def get_todo_status(self, cycle_id: str) -> List[Dict[str, Any]]:
         """

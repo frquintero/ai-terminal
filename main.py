@@ -102,8 +102,8 @@ def parse_cli_args():
     parser.add_argument('--version', action='store_true', help='Print version and exit')
     
     # Runtime configuration overrides
-    parser.add_argument('--agent', type=str, choices=['minimax', 'kimi2', 'custom'], 
-                        help='Override agent backend (minimax, kimi2, custom)')
+    parser.add_argument('--agent', type=str, choices=['minimax', 'kimi2', 'groq', 'custom'], 
+                        help='Override agent backend (minimax, kimi2, groq, custom)')
     parser.add_argument('--max-tokens', type=int, metavar='N',
                         help='Override max tokens per response')
     parser.add_argument('--temperature', type=float, metavar='T',

@@ -969,10 +969,13 @@ Describe the failure and tell the user what to do next."""
                     
                     # Log execution
                     step_id = len(step_results)
-                    step_meta = next(
-                        (s for s in (plan.get("steps") or []) if s.get("id") == step_id),
-                        {}
-                    )
+                    # Build metadata from current context since 'steps' key is deprecated in v3 plans
+                    step_meta = {
+                        "tool_name": tool_name,
+                        "tool_args": args,
+                        "intent": todos[current_todo_index].get("description") if todos and current_todo_index < len(todos) else None
+                    }
+                    
                     self._emit_status(
                        "executing", 
                        {

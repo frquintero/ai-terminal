@@ -118,12 +118,20 @@ class ToolExecutor:
             )
             agent_message = None
             events = None
+            success = True
+            error = None
+            
             if isinstance(result, dict):
                 agent_message = result.get("agent_message")
                 events = result.get("events")
+                # Propagate tool's self-reported success status if present
+                if "success" in result:
+                    success = bool(result["success"])
+                if "error" in result and result["error"]:
+                    error = result["error"]
             
             return {
-                "success": True,
+                "success": success,
                 "result": primary_text,
                 "stdout": normalized["stdout"],
                 "stderr": normalized["stderr"],
@@ -132,7 +140,7 @@ class ToolExecutor:
                 "exit_code": exit_code,
                 "output_preview": preview,
                 "data": result if isinstance(result, (dict, list)) else None,
-                "error": None,
+                "error": error,
                 "agent_message": agent_message,
                 "events": events
             }
