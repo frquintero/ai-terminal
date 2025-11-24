@@ -24,7 +24,8 @@ from orchestrator.prompts import (
     get_agent_a_user_message,
     get_agent_b_system_prompt,
     get_agent_b_user_message,
-    AGENT_A_TOOLS
+    AGENT_A_TOOLS,
+    RESPOND_TO_USER_TOOL
 )
 from orchestrator.metrics import CycleMetrics, StepMetrics, LLMMetrics, get_metrics
 from orchestrator.system_context_builder import SystemContextBuilder
@@ -505,7 +506,11 @@ class Orchestrator:
                         )
                     elif fname == "respond_to_user":
                         response = {
-                            "response": args.get("response")
+                            "segments": args.get("segments"),
+                            "policy_contract": args.get("policy_contract"),
+                            "policy_summary": args.get("policy_summary"),
+                            "attachments": args.get("attachments"),
+                            "template_values": args.get("template_values")
                         }
                     else:
                         last_error = f"Unknown tool called: {fname}"
@@ -529,8 +534,11 @@ class Orchestrator:
         response_type = detect_response_type(response)
         
         if response_type == "response":
-            agent_response = self._auto_fence_code(response["response"])
-            response_segments = [{"kind": "text", "text": agent_response}]
+            response_segments = self._sanitize_empty_segments(
+                response.get("segments") or [],
+                []
+            )
+            agent_response = self._segments_to_text(response_segments)
             # Treat as final answer without tool execution
             self.memory.save_chat_exchange(
                 session_id=self.session_id,
@@ -747,7 +755,9 @@ class Orchestrator:
     def _get_tool_schemas(self, role: str) -> List[Dict[str, Any]]:
         """Get native tool schemas for the given role."""
         if role == "B":
-            return [tool.schema for tool in TOOLS.values()]
+            schemas = [tool.schema for tool in TOOLS.values()]
+            schemas.append(RESPOND_TO_USER_TOOL)
+            return schemas
         return []
 
     def _run_agent_b_tool_loop(
@@ -808,6 +818,11 @@ class Orchestrator:
         agent_b_notes = ""
         last_stdout = None
         last_raw_stdout = None
+        respond_to_user_called = False
+        respond_segments: Optional[List[Dict[str, Any]]] = None
+        respond_policy_contract: Optional[Dict[str, Any]] = None
+        respond_policy_summary: Optional[str] = None
+        respond_attachments: Optional[List[Dict[str, Any]]] = None
 
         def _is_informative_negative(exit_code: Optional[int], stdout: Optional[str], stderr: Optional[str]) -> bool:
             """
@@ -971,6 +986,110 @@ class Orchestrator:
                     exec_args = self._strip_null_values(exec_args)
                     args = self._strip_null_values(args)
 
+                    if tool_name == "respond_to_user":
+                        validation_errors = []
+                        raw_segments = args.get("segments")
+                        policy_contract = args.get("policy_contract")
+                        policy_summary = args.get("policy_summary")
+                        template_values_update = args.get("template_values") or {}
+                        attachments_payload = args.get("attachments") or []
+
+                        if not isinstance(raw_segments, list) or not raw_segments:
+                            validation_errors.append("segments must be a non-empty array")
+                        if not isinstance(policy_contract, dict):
+                            validation_errors.append("policy_contract must be an object")
+                        if not isinstance(policy_summary, str) or not policy_summary.strip():
+                            validation_errors.append("policy_summary must be a non-empty string")
+                        if validation_errors:
+                            raise OrchestratorProcessError(
+                                "respond_to_user payload invalid",
+                                process="agent_b_finalization",
+                                stage="validation",
+                                facts={
+                                    "errors": validation_errors,
+                                    "payload": self._json_safe(args)
+                                },
+                                error_code="invalid_final_payload"
+                            )
+
+                        sanitized_segments = self._sanitize_empty_segments(raw_segments, step_results)
+                        respond_segments = sanitized_segments
+                        respond_policy_contract = policy_contract
+                        respond_policy_summary = policy_summary.strip()
+                        respond_attachments = attachments_payload if isinstance(attachments_payload, list) else []
+                        if isinstance(template_values_update, dict):
+                            template_values.update(template_values_update)
+
+                        final_response = self._segments_to_text(sanitized_segments)
+                        agent_b_notes = final_response
+                        steps_completed += 1
+
+                        step_id = len(step_results)
+                        step_result = {
+                            "step_id": step_id,
+                            "tool_name": "respond_to_user",
+                            "tool_args": args,
+                            "description": f"Step {step_id}: respond_to_user",
+                            "success": True,
+                            "exit_code": None,
+                            "stdout": final_response,
+                            "stderr": None,
+                            "output": final_response,
+                            "error": None,
+                            "informative_negative": False,
+                            "output_format": None
+                        }
+                        step_results.append(step_result)
+
+                        preview_text = (final_response or "")[:500]
+                        try:
+                            self.memory.save_step_output(
+                                cycle_id=cycle_id,
+                                step_id=step_id,
+                                tool_name="respond_to_user",
+                                tool_args=args,
+                                success=True,
+                                exit_code=None,
+                                output_preview=preview_text,
+                                stdout=final_response,
+                                stderr=None,
+                                raw_stdout=final_response,
+                                raw_stderr=None,
+                                output_format=None,
+                                parsed_outputs={
+                                    "segments": sanitized_segments,
+                                    "policy_contract": policy_contract,
+                                    "policy_summary": respond_policy_summary
+                                },
+                                artifact_path=None
+                            )
+                        except Exception:
+                            pass
+
+                        _SESSION_STATE.record_tool_call(
+                            tool_name="respond_to_user",
+                            args=args,
+                            success=True,
+                            exit_code=None,
+                            error=None,
+                            tool_call_id=tool_call_id,
+                            step_id=step_id,
+                            output_preview=preview_text
+                        )
+
+                        if tool_call_id:
+                            tool_outputs_by_call_id[tool_call_id] = {
+                                "tool_name": "respond_to_user",
+                                "result": {
+                                    "segments": sanitized_segments,
+                                    "policy_contract": policy_contract,
+                                    "policy_summary": respond_policy_summary
+                                }
+                            }
+
+                        respond_to_user_called = True
+                        break
+
                     # TODO Enforcement: Validate tool call against current TODO
                     if not _validate_tool_call_against_todo(tool_name, args):
                         # Tool call not approved for current TODO - this would be a violation
@@ -1087,37 +1206,6 @@ class Orchestrator:
                         except Exception:
                             # Never let logging failures mask the primary executor error
                             pass
-
-                        # Handling "json" tool hallucination gracefully (Robustness Fix)
-                        # If the error is about the "json" tool not existing, but we can parse the args,
-                        # we treat it as a successful final response.
-                        if tool_name == "json" and "not in request.tools" in str(exec_error):
-                            try:
-                                # We trust args is the payload intended for the user
-                                # It typically matches the structure: {"segments": [...], "template_values": ...}
-                                response_segments = args.get("segments")
-                                if response_segments:
-                                    final_response_text = self._segments_to_text(response_segments)
-                                    
-                                    return {
-                                        "steps_completed": steps_completed,
-                                        "steps_failed": steps_failed, # Don't count this as a failure
-                                        "total_steps": total_steps_attempted,
-                                        "step_results": step_results,
-                                        "success": True, # Mark cycle as successful!
-                                        "final_response": final_response_text,
-                                        "narration_template": final_response_text,
-                                        "output_values": output_values,
-                                        "output_value_types": output_value_types,
-                                        "output_value_sources": output_value_sources,
-                                        "template_values": template_values,
-                                        "response_segments": response_segments,
-                                        "agent_b_final_raw": json.dumps(args),
-                                        "missing_segments": False,
-                                    "error": None
-                                }
-                            except Exception:
-                                pass # Fall through to normal error handling
 
                         raise OrchestratorProcessError(
                             f"ToolExecutor failed for {tool_name}",
@@ -1386,7 +1474,10 @@ class Orchestrator:
                        "tool_call_id": tc.id,
                        "name": tool_name,
                        "content": tool_content
-                    })
+                   })
+                
+                if respond_to_user_called:
+                    break
             
         except OrchestratorProcessError:
             raise
@@ -1416,39 +1507,42 @@ class Orchestrator:
                         status="completed"
                     )
 
-        # Final narration pass with tools DISABLED to avoid bogus tool calls (e.g., "json").
-        final_segments, narration_template, template_values = self._call_agent_b_final_narration(
-            cycle_id=cycle_id,
-            plan=plan,
-            step_results=step_results,
-            output_values=output_values,
-            template_values=template_values,
-            agent_b_notes=agent_b_notes,
-            last_stdout=last_stdout or last_raw_stdout
-        )
+        narration_template: Optional[str] = None
+        if respond_to_user_called and respond_segments:
+            response_segments_filled = respond_segments
+            final_text = final_response or self._segments_to_text(response_segments_filled)
+            narration_template = final_text
+        else:
+            final_segments, narration_template, template_values = self._call_agent_b_final_narration(
+                cycle_id=cycle_id,
+                plan=plan,
+                step_results=step_results,
+                output_values=output_values,
+                template_values=template_values,
+                agent_b_notes=agent_b_notes,
+                last_stdout=last_stdout or last_raw_stdout
+            )
 
-        # Robustness Fix: If the final narration call itself fails or returns empty,
-        # ensure we still have a fallback response based on the last known output
-        if not final_segments and not narration_template:
-             if last_stdout or last_raw_stdout:
-                 fallback_body = last_stdout or last_raw_stdout
-                 final_segments = [
-                     {"kind": "text", "text": "Task completed."},
-                     {"kind": "block", "fence": "output", "body": fallback_body[:2000]}
-                 ]
-                 narration_template = "Task completed."
+            if not final_segments and not narration_template:
+                 if last_stdout or last_raw_stdout:
+                     fallback_body = last_stdout or last_raw_stdout
+                     final_segments = [
+                         {"kind": "text", "text": "Task completed."},
+                         {"kind": "block", "fence": "output", "body": fallback_body[:2000]}
+                     ]
+                     narration_template = "Task completed."
 
-        response_segments_filled = final_segments or [
-            {
-                "kind": "text",
-                "text": narration_template or final_response
-            }
-        ]
-        response_segments_filled = self._sanitize_empty_segments(
-            response_segments_filled,
-            step_results
-        )
-        final_text = self._segments_to_text(response_segments_filled)
+            response_segments_filled = final_segments or [
+                {
+                    "kind": "text",
+                    "text": narration_template or final_response
+                }
+            ]
+            response_segments_filled = self._sanitize_empty_segments(
+                response_segments_filled,
+                step_results
+            )
+            final_text = self._segments_to_text(response_segments_filled)
 
         total_steps = len(step_results)
         failed_steps = len([
@@ -1460,7 +1554,7 @@ class Orchestrator:
         # Determine overall success:
         # - If all steps succeeded: Success
         # - If some failed but were "informative negative" (e.g. checking if file exists): Success
-        # - If we recovered from a "json" tool hallucination (steps_failed might be > 0 but we caught it): Success
+        # - If respond_to_user completed successfully after intermediate failures: Success
         # - If we have a valid final response despite intermediate errors: Success (weak success)
         
         is_success = total_steps > 0 and failed_steps == 0
@@ -1470,7 +1564,7 @@ class Orchestrator:
         if not is_success and final_text and completed_steps > 0:
              is_success = True
 
-        return {
+        result_payload = {
             "steps_completed": completed_steps,
             "steps_failed": failed_steps,
             "total_steps": total_steps,
@@ -1486,6 +1580,13 @@ class Orchestrator:
             "agent_b_final_raw": narration_template or final_response,
             "missing_segments": len(response_segments_filled) == 0
         }
+        result_payload["respond_to_user_called"] = respond_to_user_called
+        if respond_to_user_called:
+            result_payload["response_policy_contract"] = respond_policy_contract
+            result_payload["response_policy_summary"] = respond_policy_summary
+            result_payload["response_attachments"] = respond_attachments or []
+
+        return result_payload
 
     def _sanitize_empty_segments(
         self,
@@ -1588,7 +1689,7 @@ class Orchestrator:
     ) -> Tuple[List[Dict[str, Any]], Optional[str], Dict[str, Any]]:
         """
         Run a final, tool-free Agent B pass to produce narration segments.
-        This avoids accidental tool calls (e.g., to a non-existent "json" tool).
+        Used only when respond_to_user was never called (legacy fallback for incomplete plans).
         """
         llm_client = LLMClient(
             config=self.config,

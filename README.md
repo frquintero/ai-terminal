@@ -34,7 +34,7 @@ The Version 3 architecture represents a shift from a router-based control flow t
      - Prompt built with `AGENT_A_SYSTEM_PROMPT`.
      - Goal: Analyze query & history to decide strategy.
      - Decision (Tool Call): Must call one of:
-       - `respond_to_user(response)`: For simple questions/chat.
+       - `respond_to_user(segments, policy_contract, policy_summary)`: For simple questions/chat or final status updates. Returns structured segments plus the enforced policy verdicts.
        - `delegate_to_agent_b(intent, success_criteria)`: For system execution tasks.
 
 3. **Agent B Execution Loop** (If Delegated)
@@ -46,8 +46,7 @@ The Version 3 architecture represents a shift from a router-based control flow t
        3. Execute: ToolExecutor runs command on system.
        4. Observation: Tool output (`stdout`/`stderr`) fed back as "tool" role message.
        5. Repeat: Analyzes result vs success_criteria, decides next step.
-     - Completion: When satisfied, stops calling tools.
-     - Final Narration: Orchestrator makes one final, tool-free call to Agent B for structured JSON response with final summary & output segments.
+     - Completion: When satisfied, Agent B must call the real `respond_to_user` tool with the final segments + policy contract. No narrator fallback exists; the call itself becomes the user-facing response.
 
 ### Memory System
 
@@ -85,14 +84,14 @@ The system uses two distinct agent personas, which can be powered by the same or
     *   **Input**: User query, Chat History, System Context (OS, CWD, Time).
     *   **Tools**:
         *   `delegate_to_agent_b(intent, success_criteria, todos)`: Used for tasks requiring system access, with a structured TODO list (including descriptions, success criteria, and optional subtasks) to enforce execution boundaries and prevent scope creep.
-        *   `respond_to_user(response)`: Used for direct conversational answers.
+        *   `respond_to_user(segments, policy_contract, policy_summary)`: Used for direct conversational answers. Returns structured segments plus the deterministic policy verdict so downstream logging stays factual.
     *   **Configuration**: Uses a higher temperature for more natural conversation.
     *   **SQLite3 Guidance**: Explicitly directs TODOs to use proper SQLite3 patterns (`-batch`, inline SQL, piped stdin) to keep commands in the non-interactive path.
 
 *   **Agent B (Execution)**
     *   **Role**: Senior DevOps Engineer.
     *   **Input**: Agent A's "Intent", "Success Criteria", and structured TODO list.
-    *   **Tools**: Native system tools (`run_command`, `read_file`, `write_file`, etc.).
+    *   **Tools**: Native system tools (`run_command`, `read_file`, `write_file`, etc.) plus the `respond_to_user` function tool for final user-facing summaries.
     *   **Execution**: Operates in a loop (Think -> Tool Call -> Observation -> Think) until the intent is satisfied, adhering strictly to the TODO list for plan fidelity and resource efficiency.
     *   **Configuration**: Uses a low temperature (near 0) for precise, deterministic code generation.
     *   **SQLite3 Guidance**: Always includes `-batch` or inline SQL (or feeds stdin) for SQLite3 commands to ensure they exit immediately; otherwise switches to `run_interactive`.

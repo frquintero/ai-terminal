@@ -14,7 +14,7 @@
      - Prompt built with `AGENT_A_SYSTEM_PROMPT`.
      - Goal: Analyze query & history to decide strategy.
      - Decision (Tool Call): Must call one of:
-       - `respond_to_user(response)`: For simple questions/chat.
+       - `respond_to_user(segments, policy_contract, policy_summary)`: For direct conversational answers or final status updates. Returns structured segments plus the enforced policy verdict.
        - `delegate_to_agent_b(intent, success_criteria)`: For system execution tasks.
 
 3. **Agent B Execution Loop** (If Delegated)
@@ -26,8 +26,21 @@
        3. Execute: ToolExecutor runs command on system.
        4. Observation: Tool output (`stdout`/`stderr`) fed back as "tool" role message.
        5. Repeat: Analyzes result vs success_criteria, decides next step.
-     - Completion: When satisfied, stops calling tools.
-    - Final Narration: Orchestrator makes one final, tool-free call to Agent B for structured JSON response with final summary & output segments. This response must be plain assistant content—legacy “`json` tool” wrappers are invalid and will be rejected/logged.
+     - Completion: When satisfied, Agent B must issue a final `respond_to_user` tool call with the structured segments + policy contract. The orchestrator never fabricates narration; that tool call becomes the user-facing response.
+
+### Configuring Agent Tool Calls
+
+The routerless design depends on each agent advertising only the tools it is allowed to invoke:
+
+- Agent A tool list contains `delegate_to_agent_b` and `respond_to_user`. The former requires intent, success criteria, and todos with per-TODO `policy_contract` entries. The latter requires structured `segments`, a `policy_contract` summing the deterministic verdicts (at least one rule with id/status/details), and a `policy_summary`. Attachments and `template_values` are optional, but empty policy structures are rejected.
+- Agent B receives all native system tools from `tools.py` plus the same `respond_to_user` function schema used by Agent A. Every execution loop iteration sends the complete tool schema array to the LLM so Groq can validate calls; tools not listed (for example a fictitious `json` function) are impossible to invoke.
+- The orchestrator enforces this contract by registering the schemas with each LLM request and by validating payloads locally. If a tool call arrives with missing fields, mis-typed arguments, or references to unregistered names, the orchestrator raises an `OrchestratorProcessError`, logs the facts in `cycle_failures`, and terminates without narration.
+
+Practical implications for prompt authors and future tool additions:
+
+1. When introducing a new tool, add its schema to `tools.py` so Agent B automatically inherits it; if Agent A should also reference it (rare), extend `AGENT_A_TOOLS` manually.
+2. Every example in prompts or docs must mirror the exact schema the LLM sees. Fields like `policy_contract.rules` or `segments.kind` are not optional in practice; omitting them encourages the model to emit invalid JSON that Groq will reject.
+3. Final responses always flow through the real `respond_to_user` call. The orchestrator does not wrap plain assistant text, so any agent describing a completion must call the tool explicitly, ensuring the `cycle_failures` and `llm_call_fails` tables capture only genuine backend faults instead of schema mistakes.
 
 
 ## Memory System
@@ -138,7 +151,7 @@ The system uses two distinct agent personas, which can be powered by the same or
     *   **Input**: User query, Chat History, System Context (OS, CWD, Time).
     *   **Tools**:
         *   `delegate_to_agent_b(intent, success_criteria, todos)`: Used for tasks requiring system access, with a structured TODO list (including descriptions, success criteria, and optional subtasks) to enforce execution boundaries and prevent scope creep.
-        *   `respond_to_user(response)`: Used for direct conversational answers.
+        *   `respond_to_user(segments, policy_contract, policy_summary)`: Used for direct conversational answers and final responses, ensuring every user-facing message cites the deterministic policy contract.
     *   **Configuration**: Uses a higher temperature for more natural conversation.
     *   **SQLite3 Guidance**: Explicitly directs TODOs to use proper SQLite3 patterns (`-batch`, inline SQL, piped stdin) to keep commands in the non-interactive path.
 

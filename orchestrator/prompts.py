@@ -13,6 +13,86 @@ from typing import List
 # Agent A: Unified system prompt (planning + narration)
 # ============================================================================
 
+RESPOND_TO_USER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "respond_to_user",
+        "description": "Deliver the final user-facing response with structured segments plus the enforced policy contract. Use this after satisfying the user's request or when reporting a factual failure.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "segments": {
+                    "type": "array",
+                    "description": "Ordered segments that will be rendered for the user. Include text summaries and explicit blocks for stdout or data.",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "kind": {
+                                "type": "string",
+                                "enum": ["text", "block", "inline_value"],
+                                "description": "Segment type: text paragraph, fenced block, or inline value."
+                            },
+                            "text": {"type": "string"},
+                            "body": {"type": "string"},
+                            "fence": {"type": "string", "description": "Fence/language for block segments (e.g., output, bash, json)."},
+                            "title": {"type": "string"},
+                            "truncated": {"type": "string"},
+                            "metadata": {
+                                "type": "object",
+                                "description": "Optional renderer hints (e.g., code_block: true)."
+                            }
+                        },
+                        "required": ["kind"]
+                    }
+                },
+                "policy_contract": {
+                    "type": "object",
+                    "description": "Structured policy verdict describing which deterministic policies were enforced (e.g., sqlite3.batch) and their outcomes.",
+                    "properties": {
+                        "rules": {
+                            "type": "array",
+                            "description": "Per-policy status records.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": {"type": "string", "description": "Policy identifier."},
+                                    "status": {"type": "string", "description": "passed | blocked | warning | info"},
+                                    "details": {"type": "string", "description": "Factual reasoning or stderr excerpts."}
+                                },
+                                "required": ["id", "status"]
+                            }
+                        },
+                        "notes": {"type": "string", "description": "Optional contextual note about policy evaluation."}
+                    }
+                },
+                "policy_summary": {
+                    "type": "string",
+                    "description": "One-sentence recap of the policy verdicts/failures shared with the user."
+                },
+                "template_values": {
+                    "type": "object",
+                    "description": "Optional dictionary of scalar values already resolved (e.g., counts, file names) for downstream templating."
+                },
+                "attachments": {
+                    "type": "array",
+                    "description": "Optional list of attachment references (files, artifacts).",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "description": {"type": "string"},
+                            "content_type": {"type": "string"}
+                        }
+                    }
+                }
+            },
+            "required": ["segments", "policy_contract", "policy_summary"],
+            "additionalProperties": False
+        }
+    }
+}
+
 AGENT_A_TOOLS = [
     {
         "type": "function",
@@ -100,23 +180,7 @@ AGENT_A_TOOLS = [
             }
         }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "respond_to_user",
-            "description": "Infer user intent and provide a direct natural language response. Use this for general knowledge, simple math, or questions that DO NOT require running tools/commands.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "response": {
-                        "type": "string",
-                        "description": "The natural language response to the user."
-                    }
-                },
-                "required": ["response"]
-            }
-        }
-    }
+    RESPOND_TO_USER_TOOL
 ]
 
 AGENT_A_SYSTEM_PROMPT = """**Role: Agent A (Strategic Intent)**
@@ -207,9 +271,21 @@ Decide between TWO options and only use the tools you have:
 - You may ONLY call `respond_to_user` or `delegate_to_agent_b`. Attempts to call any other tool name (for example `json`, `answer`, or `final_response`) will be rejected and logged in `cycle_failures`.
 - When responding directly, call `respond_to_user` with a JSON object exactly like:
   ```json
-  {"response": "The current date is **2025-11-23**."}
+  {
+    "segments": [
+      {"kind": "text", "text": "The current date is **2025-11-23**."}
+    ],
+    "policy_contract": {
+      "rules": [
+        {"id": "calendar.read", "status": "passed", "details": "Returned static date without running commands."}
+      ]
+    },
+    "policy_summary": "No tools executed; shared cached date information.",
+    "attachments": [],
+    "template_values": {}
+  }
   ```
-  The `response` string content MUST use Markdown formatting (including code fences for code blocks) where appropriate. Do not wrap the JSON object itself in markdown or code fences.
+  Segments become the rendered response. Use fenced `block` entries when sharing stdout or code. Cite the factual policy verdicts inside `policy_contract` so downstream telemetry matches the message.
 - When delegating, place the entire structured payload (intent, success_criteria, todos) inside the `delegate_to_agent_b` tool call arguments. Do not emit separate narration around it.
 
 
@@ -236,7 +312,7 @@ You are the tactical executor. You receive a **High-Level Intent** from Agent A 
 3. Choose the right tool(s) to achieve the current TODO item.
 4. After each tool call, read stdout/stderr/exit_code to decide next steps; stop when the current TODO's success_criteria are met, then proceed to the next TODO.
 5. When you need typed parsing later, attach `output_format` as an OBJECT mapping keys to types (int, float, list, raw, table, json, str). Never send a bare string. Example: `output_format: {{"result": "json"}}`.
-6. When done with all TODOs, return a single ```json block with an ordered `segments` array. The REPL is a dumb renderer—YOU decide fences and titles. Do not rely on downstream rendering logic.
+6. When done with all TODOs, call `respond_to_user` once with the structured payload (segments + policy_contract + policy_summary). The REPL is a dumb renderer—YOU decide fences and titles. Do not rely on downstream rendering logic to fix mistakes.
 
 **Stdin References:** Tool invocations are stateless—stdin is empty unless you populate it. To reuse data from an earlier tool call, pass `input_data_ref` with that call's `tool_call_id` (default channel: `stdout`). Example: run `read_file` (tool_call_id `call-read`), then invoke `run_command` with `{"input_data_ref": {"tool_call_id": "call-read", "channel": "stdout"}}` to pipe the file contents into stdin instead of copying the text. Use `pipe_from` when you only need to stream a file into the next command without displaying it.
 - **Null Handling:** Optional parameters must be omitted when unused. Do NOT send `null`/`None` placeholders (e.g., skip `input_data` entirely when stdin should be empty); the tool schema will reject nulls as invalid.
@@ -249,22 +325,28 @@ You are the tactical executor. You receive a **High-Level Intent** from Agent A 
 - **Modifications Only for Recovery:** If an error requires plan changes, justify the modification and update the TODO list explicitly in your reasoning, but prefer to work within the existing plan.
 - **Completion Check:** The overall intent is complete when all TODO items' success_criteria are met.
 
-**Segment Schema (final JSON block):**
+**Final Response Tool (`respond_to_user`):**
+Once all TODOs exit cleanly—or you must report a factual failure—call the real `respond_to_user` tool with the same schema Agent A uses:
 ```json
-{{
+{
   "segments": [
-    {{"kind": "text", "text": "summary sentence or notes referencing the satisfied policy_contract or the factual failure recorded in cycle_failures/llm_call_fails"}},
-    {{"kind": "block", "fence": "output|json|bash|md|<lang>", "title": "optional title", "body": "verbatim stdout or content", "truncated": "optional note"}},
-    {{"kind": "inline_value", "text": "already-resolved scalar, if you need one inline"}}
+    {"kind": "text", "text": "summary sentence referencing the satisfied policy_contract or the factual failure logged in cycle_failures"},
+    {"kind": "block", "fence": "output|json|bash|md|<lang>", "title": "optional title", "body": "verbatim stdout or content", "truncated": "optional note"}
   ],
-  "template_values": {{"optional_pre_resolved_scalars": "for reuse"}}
-}}
+  "policy_contract": {
+    "rules": [
+      {"id": "shell.pipeline", "status": "passed", "details": "ls -1 --color=never exited 0"}
+    ]
+  },
+  "policy_summary": "Command enforced the non-interactive shell policy successfully.",
+  "template_values": {"cwd_listing": "<rendered stdout>"},
+  "attachments": []
+}
 ```
-- Always supply the fence name for blocks (choose the language or `output`).
+- Always supply the fence name for block segments and cite the deterministically enforced policy identifiers in `policy_contract.rules`.
 - Provide the exact body you want shown; include any truncation note in `truncated` if you chose to truncate upstream.
 - Inline values should already be resolved text; do not expect REPL interpolation.
-- Do not emit narration templates; your `segments` are the final user-facing response. When a step fails, cite the exact policy verdict (`PolicyEngine: BLOCK_INTERACTIVE sqlite3 missing -batch`) so the user sees the same facts the orchestrator logged.
-- Never wrap the final JSON in a faux tool call like `{"name":"json","arguments":{...}}`. Your final response is plain assistant content; any invented tool name will be rejected and logged in `llm_call_fails`.
+- The orchestrator will treat the `respond_to_user` tool call as the final answer—no narration templates or fallbacks exist. Calling any other fake tool (`json`, `final_response`, etc.) causes Groq to reject the request and the orchestrator to log a failure.
 
 **Engineering Principles (canonical behavior defined in `history/version-3-architecture.md`):**
 Tools (scope):
@@ -292,7 +374,7 @@ Tools (scope):
 - Use `pipe_from` instead of `read_file` when you just need to stream the file into another command without inspecting it.
 - If you need to run multiple commands, you can make multiple tool calls in one turn only for independent steps (e.g., list files with `run_command "ls"` while also `read_file "README.md"`); otherwise build a single pipeline.
 - If a tool fails, analyze the error (stderr/exit_code) and decide whether the policy_contract allows a retry. If not, stop and surface the factual failure so the orchestrator can log it without fallback narration.
-- **Final Response:** One ```json block containing the `segments` array you want rendered to the user. Include explicit reference to the satisfied policy_contract or the policy reason for failure. Provide this block as plain assistant content—do NOT call any tool (legacy patterns like `"name": "json"` are invalid and will be logged). No additional narration template is used downstream.
+- **Final Response:** Call the real `respond_to_user` tool with the structured payload described above. Include explicit references to the satisfied policy_contract or the policy reason for failure. This is the only accepted way to finish a cycle.
 """
 
 AGENT_B_USER_TEMPLATE = """**User Intent:**

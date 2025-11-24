@@ -156,13 +156,29 @@ class TestOrchestratorIntegration(unittest.TestCase):
         mock_llm_client.return_value.call.side_effect = [
             {"error": None, "message": SimpleNamespace(content=None, tool_calls=[tool_call])},
             {"error": None, "message": SimpleNamespace(
-                content="```json\n{\"narration_template\":\"Found these files: {bat_files}\"}\n```",
-                tool_calls=[]
-            )},
-            {"error": None, "message": SimpleNamespace(content={
-                "segments": [{"kind": "text", "text": "Found these files: {bat_files}"}],
-                "template_values": {}
-            })}
+                content=None,
+                tool_calls=[
+                    SimpleNamespace(
+                        id="call-final",
+                        function=SimpleNamespace(
+                            name="respond_to_user",
+                            arguments=json.dumps({
+                                "segments": [
+                                    {"kind": "text", "text": "Found these files: {bat_files}"}
+                                ],
+                                "policy_contract": {
+                                    "rules": [
+                                        {"id": "shell.pipeline", "status": "passed", "details": "find command exited 0"}
+                                    ]
+                                },
+                                "policy_summary": "find command enforced the non-interactive shell policy.",
+                                "template_values": {},
+                                "attachments": []
+                            })
+                        )
+                    )
+                ]
+            )}
         ]
 
         with patch.object(self.orchestrator.tool_executor, "execute", return_value={

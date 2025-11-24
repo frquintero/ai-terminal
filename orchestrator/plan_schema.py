@@ -37,11 +37,65 @@ EXECUTION_PLAN_SCHEMA = {
 # 2. Direct Response (no tool usage)
 RESPONSE_SCHEMA = {
     "type": "object",
-    "required": ["response"],
+    "required": ["segments", "policy_contract", "policy_summary"],
     "properties": {
-        "response": {
+        "segments": {
+            "type": "array",
+            "description": "Ordered list of response segments rendered to the user.",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["text", "block", "inline_value"]},
+                    "text": {"type": "string"},
+                    "body": {"type": "string"},
+                    "fence": {"type": "string"},
+                    "title": {"type": "string"},
+                    "truncated": {"type": "string"},
+                    "metadata": {"type": "object"}
+                },
+                "required": ["kind"]
+            }
+        },
+        "policy_contract": {
+            "type": "object",
+            "description": "Structured summary of deterministic policy verdicts.",
+            "properties": {
+                "rules": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "status": {"type": "string"},
+                            "details": {"type": "string"}
+                        },
+                        "required": ["id", "status"]
+                    }
+                },
+                "notes": {"type": "string"}
+            },
+            "required": ["rules"]
+        },
+        "policy_summary": {
             "type": "string",
-            "description": "Final natural-language reply to the user"
+            "description": "One-sentence recap of the enforced policy status."
+        },
+        "attachments": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "description": {"type": "string"},
+                    "content_type": {"type": "string"}
+                }
+            }
+        },
+        "template_values": {
+            "type": "object",
+            "description": "Optional scalar values already computed."
         }
     }
 }
@@ -63,7 +117,7 @@ def detect_response_type(plan: Any) -> Optional[str]:
     
     if "intent" in plan:
         return "execution_plan"
-    if "response" in plan:
+    if "segments" in plan:
         return "response"
     return None
 
@@ -126,12 +180,43 @@ def _validate_execution_plan(plan: Dict[str, Any]) -> Tuple[bool, Optional[str]]
 
 def _validate_response(plan: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
     """Validate direct response structure."""
-    response = plan["response"]
-    
-    if not isinstance(response, str):
-        return False, f"'response' must be string, got {type(response).__name__}"
-    if not response.strip():
-        return False, "'response' cannot be empty"
+    segments = plan.get("segments")
+    if not isinstance(segments, list) or not segments:
+        return False, "'segments' must be a non-empty array"
+    for idx, segment in enumerate(segments):
+        if not isinstance(segment, dict):
+            return False, f"Segment {idx} must be an object"
+        kind = segment.get("kind")
+        if kind not in {"text", "block", "inline_value"}:
+            return False, f"Segment {idx} has invalid 'kind': {kind}"
+
+    policy_contract = plan.get("policy_contract")
+    if not isinstance(policy_contract, dict):
+        return False, "'policy_contract' must be an object"
+    rules = policy_contract.get("rules")
+    if not isinstance(rules, list) or not rules:
+        return False, "'policy_contract.rules' must be a non-empty array"
+    for idx, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            return False, f"policy_contract.rules[{idx}] must be an object"
+        rule_id = rule.get("id")
+        status = rule.get("status")
+        if not isinstance(rule_id, str) or not rule_id.strip():
+            return False, f"policy_contract.rules[{idx}].id must be a non-empty string"
+        if not isinstance(status, str) or not status.strip():
+            return False, f"policy_contract.rules[{idx}].status must be a non-empty string"
+
+    policy_summary = plan.get("policy_summary")
+    if not isinstance(policy_summary, str) or not policy_summary.strip():
+        return False, "'policy_summary' must be a non-empty string"
+
+    attachments = plan.get("attachments")
+    if attachments is not None and not isinstance(attachments, list):
+        return False, "'attachments' must be an array when provided"
+
+    template_values = plan.get("template_values")
+    if template_values is not None and not isinstance(template_values, dict):
+        return False, "'template_values' must be an object when provided"
     
     return True, None
 

@@ -64,3 +64,6 @@ rootfs_build/
 
 # Working directory for file operations
 ai-terminal-wd/
+
+# AI planning documents (ephemeral)
+history/
